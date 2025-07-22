@@ -5,7 +5,7 @@ playbook_create_report_email.yml
   gather_facts: false
   tasks:
     - name: Juntar relatórios de cada host
-      set_fact:
+      ansible.builtin.set_fact:
         service_reports: >-
           {{
             (groups.linux_targets | default([]) + groups.windows_targets | default([]))
@@ -14,13 +14,13 @@ playbook_create_report_email.yml
             | list
           }}
         unreachable_hosts: "{{ unreachable_hosts | default([]) }}"
-    
-    - name: Calcular lista de serviços testados (apenas do Survey)
+
+    - name: Calcular lista de serviços testados (Survey)
       ansible.builtin.set_fact:
         services_tested: "{{ services | default([]) | unique | join(', ') }}"
 
     - name: Calcular erros
-      set_fact:
+      ansible.builtin.set_fact:
         bad_rows: >-
           {{
             service_reports
@@ -43,12 +43,19 @@ playbook_create_report_email.yml
           }}
 
     - name: Montar HTML final
-      set_fact:
+      ansible.builtin.set_fact:
         send_mail_body: |
+          {% set show_map = {
+            'restarted':'started',
+            'restart':'started',
+            'running':'started'
+          } %}
           <h2>Gerenciamento de Serviços</h2>
-          <p><b>Motivo:</b> {{ motivo | e }}</p>
-          <p><b>Serviços testados:</b> {{ services_tested }}</p>
-    
+          <p><b>Motivo:</b> {{ (motivo | default('N/D')) | e }}</p>
+          {% if services_tested %}
+            <p><b>Serviços testados:</b> {{ services_tested }}</p>
+          {% endif %}
+
           {% if unreachable_hosts and unreachable_hosts|length > 0 %}
           <h3 style="color:#d9534f;">Hosts inalcançáveis</h3>
           <ul>
@@ -57,12 +64,13 @@ playbook_create_report_email.yml
             {% endfor %}
           </ul>
           {% endif %}
-    
-          {% set linux_reports = service_reports | selectattr('os','equalto','linux') | list %}
+
+          {% set linux_reports   = service_reports | selectattr('os','equalto','linux')   | list %}
           {% set windows_reports = service_reports | selectattr('os','equalto','windows') | list %}
-    
+
           {% if linux_reports %}
-            {% set expected_linux = linux_reports[0].expected | capitalize %}
+            {% set expected_linux_raw = linux_reports[0].expected | lower %}
+            {% set expected_linux = show_map.get(expected_linux_raw, expected_linux_raw) | capitalize %}
             <h3>Servidores Linux</h3>
             <p><b>Estado esperado:</b> {{ expected_linux }}</p>
             <table style="border-collapse:collapse;font-family:Arial;font-size:12px;">
@@ -73,20 +81,22 @@ playbook_create_report_email.yml
               </tr>
               {% for rep in linux_reports %}
                 {% for r in rep.rows %}
-                <tr>
-                  <td style="border:1px solid #ccc;padding:4px;">{{ rep.host }}</td>
-                  <td style="border:1px solid #ccc;padding:4px;">{{ r.name }}</td>
-                  <td style="border:1px solid #ccc;padding:4px;color:{{ 'green' if r.ok else 'red' }};">
-                    {{ r.after }}
-                  </td>
-                </tr>
+                  {% set after_disp = show_map.get(r.after|lower, r.after) %}
+                  <tr>
+                    <td style="border:1px solid #ccc;padding:4px;">{{ rep.host }}</td>
+                    <td style="border:1px solid #ccc;padding:4px;">{{ r.name }}</td>
+                    <td style="border:1px solid #ccc;padding:4px;color:{{ 'green' if r.ok else 'red' }};">
+                      {{ after_disp }}
+                    </td>
+                  </tr>
                 {% endfor %}
               {% endfor %}
             </table>
           {% endif %}
-    
+
           {% if windows_reports %}
-            {% set expected_windows = windows_reports[0].expected | capitalize %}
+            {% set expected_windows_raw = windows_reports[0].expected | lower %}
+            {% set expected_windows = show_map.get(expected_windows_raw, expected_windows_raw) | capitalize %}
             <h3 style="margin-top:24px;">Servidores Windows</h3>
             <p><b>Estado esperado:</b> {{ expected_windows }}</p>
             <table style="border-collapse:collapse;font-family:Arial;font-size:12px;">
@@ -97,18 +107,19 @@ playbook_create_report_email.yml
               </tr>
               {% for rep in windows_reports %}
                 {% for r in rep.rows %}
-                <tr>
-                  <td style="border:1px solid #ccc;padding:4px;">{{ rep.host }}</td>
-                  <td style="border:1px solid #ccc;padding:4px;">{{ r.name }}</td>
-                  <td style="border:1px solid #ccc;padding:4px;color:{{ 'green' if r.ok else 'red' }};">
-                    {{ r.after }}
-                  </td>
-                </tr>
+                  {% set after_disp = show_map.get(r.after|lower, r.after) %}
+                  <tr>
+                    <td style="border:1px solid #ccc;padding:4px;">{{ rep.host }}</td>
+                    <td style="border:1px solid #ccc;padding:4px;">{{ r.name }}</td>
+                    <td style="border:1px solid #ccc;padding:4px;color:{{ 'green' if r.ok else 'red' }};">
+                      {{ after_disp }}
+                    </td>
+                  </tr>
                 {% endfor %}
               {% endfor %}
             </table>
           {% endif %}
-    
+
           {% if not any_errors %}
             <p style="color:green;margin-top:18px;"><b>Todos os serviços estão no estado esperado.</b></p>
           {% else %}
@@ -116,96 +127,10 @@ playbook_create_report_email.yml
           {% endif %}
 
     - name: Definir subject
-      set_stats:
+      ansible.builtin.set_stats:
         data:
           send_mail_subject: "Ansible-Report - Job #{{ awx_job_id }} - {{ awx_job_template_name }} - {{ 'SUCESSO' if not any_errors else 'ALERTA' }}"
           send_mail_body: "{{ send_mail_body }}"
-
-windows_manager_service.yml
-
-- name: Normaliza wsm_start_mode em lista
-  ansible.builtin.set_fact:
-    wsm_start_mode_list: >-
-      {{
-        wsm_start_mode_raw
-        if (wsm_start_mode_raw is sequence and wsm_start_mode_raw is not string)
-        else (wsm_start_mode_raw | replace(' ', '') | lower | split(','))
-      }}
-
-- name: Coletando informações de serviços
-  ansible.windows.win_service_info:
-  register: wsm_host_services
-
-- name: Determinar serviços ausentes no host (Windows)
-  ansible.builtin.set_fact:
-    wsm_missing_services: >-
-      {{ (windows_services | default([]))
-         | difference( (wsm_host_services.services | default([]))
-                       | map(attribute='name') | list ) }}
-
-- name: Determina serviços elegíveis
-  ansible.builtin.set_fact:
-    wsm_target_services: >-
-      {{
-        wsm_host_services.services
-        | selectattr('name', 'in', windows_services)
-        | selectattr('start_mode', 'in', wsm_start_mode_list)
-        | map(attribute='name')
-        | list
-      }}
-
-- name: "{{ wsm_state }} serviços permitidos"
-  ansible.windows.win_service:
-    name: "{{ item }}"
-    state: "{{ wsm_state }}"
-  loop: "{{ wsm_target_services }}"
-  loop_control:
-    label: "{{ item }}"
-  register: wsm_action
-  ignore_errors: true
-
-- name: Inicializa rows
-  set_fact:
-    host_rows: []
-
-- name: Construir rows
-  set_fact:
-    host_rows: "{{ host_rows + [ {
-        'name': item.item,
-        'after': item.state | default('unknown'),
-        'ok': (
-            (wsm_state == 'started' and (item.state in ['running','started']))
-            or
-            (wsm_state == 'stopped' and item.state == 'stopped')
-            or
-            (wsm_state == 'restarted' and (item.state in ['running','started']))
-        ) and (not (item.failed | default(false))),
-        'error': (item.msg | default('')) if (item.failed | default(false)) else ''
-      } ] }}"
-  loop: "{{ wsm_action.results }}"
-  loop_control:
-    label: "{{ item.item }}"
-  changed_when: false
-
-- name: Adicionar linhas de serviços ausentes (Windows)
-  ansible.builtin.set_fact:
-    host_rows: "{{ host_rows + [ {
-        'name': item,
-        'after': 'absent',
-        'ok': false,
-        'found': false,
-        'error': 'Serviço não encontrado no host'
-      } ] }}"
-  loop: "{{ wsm_missing_services }}"
-  when: wsm_missing_services | length > 0
-
-- name: Ajustar relatório final por host (Windows)
-  set_fact:
-    service_host_report:
-      host: "{{ inventory_hostname }}"
-      os: "windows"
-      expected: "{{ wsm_state }}"
-      rows: "{{ host_rows }}"
 
 linux_manager_service.yml
 
@@ -224,9 +149,18 @@ linux_manager_service.yml
   ansible.builtin.set_fact:
     lsm_missing_services: "{{ linux_services | difference(lsm_target_services) }}"
 
-- name: Separar serviços custom (ITM etc.)
+- name: Garantir variáveis custom existem
   ansible.builtin.set_fact:
-    lsm_custom_ids: "{{ (hostvars['localhost'].linux_custom_services | default([])) | map(attribute='id') | list }}"
+    linux_custom_cmds: "{{ linux_custom_cmds | default({}) }}"
+    lsm_custom_ids: >-
+      {{
+        (linux_custom_cmds | dict2items | map(attribute='key') | list)
+        if (linux_custom_cmds | length > 0)
+        else []
+      }}
+
+- name: Separar serviços custom
+  ansible.builtin.set_fact:
     lsm_systemd_final: "{{ lsm_target_services | difference(lsm_custom_ids) }}"
 
 - name: "{{ lsm_state }} serviços systemd permitidos"
@@ -260,59 +194,123 @@ linux_manager_service.yml
     label: "{{ item.item }}"
   changed_when: false
 
-- name: Executar serviços custom
-  vars:
-    cmd_state_map:
-      started:  "start"
-      stopped:  "stop"
-      restarted: "restart"
-  loop: "{{ lsm_custom_ids | intersect(linux_services) }}"
-  loop_control:
-    loop_var: custom_id
-  block:
-    - name: Montar comando para o estado solicitado
-      ansible.builtin.set_fact:
-        _cmd_to_run: >-
-          {%- set s = cmd_state_map.get(lsm_state, lsm_state) -%}
-          {%- if s == 'start' -%}   {{ linux_custom_cmds[custom_id].start }}
-          {%- elif s == 'stop' -%}  {{ linux_custom_cmds[custom_id].stop }}
-          {%- elif s == 'restart' or s == 'restarted' -%}
-              {{ linux_custom_cmds[custom_id].stop }} && {{ linux_custom_cmds[custom_id].start }}
-          {%- else -%} true {# fallback #}
-          {%- endif -%}
+- name: Preparar flags de ação
+  ansible.builtin.set_fact:
+    do_start:   "{{ lsm_state in ['started','restarted'] }}"
+    do_stop:    "{{ lsm_state in ['stopped','restarted'] }}"
+    do_restart: "{{ lsm_state == 'restarted' }}"
 
-    - name: Executar comando custom
-      ansible.builtin.shell: "{{ _cmd_to_run }}"
-      register: _custom_exec
-      failed_when: false
-      changed_when: false
+- name: Preparar lista de serviços custom
+  ansible.builtin.set_fact:
+    custom_list: "{{ (linux_custom_cmds | default({})) | dict2items }}"
 
-    - name: Executar status (se existir)
-      ansible.builtin.shell: "{{ linux_custom_cmds[custom_id].status }}"
-      register: _custom_status
-      failed_when: false
-      changed_when: false
-      when: linux_custom_cmds[custom_id].status is defined
+- name: Checar presença do binário START de cada custom
+  ansible.builtin.stat:
+    path: "{{ item.value.start.split()[0] }}"
+  loop: "{{ custom_list | default([]) }}"
+  loop_control: { label: "{{ item.key }}" }
+  register: custom_start_stat
+  when: custom_list | length > 0
 
-    - name: Somar linha custom
-      ansible.builtin.set_fact:
-        host_rows: "{{ host_rows + [ {
-            'name': linux_custom_cmds[custom_id].display | default(custom_id),
-            'after': (_custom_status.stdout | default('executado')),
-            'ok': ( _custom_exec.rc | default(0) == 0 ),
-            'error': ( _custom_exec.stderr | default('') )
-          } ] }}"
+- name: Separar custom presentes e ausentes
+  ansible.builtin.set_fact:
+    custom_present: >-
+      {{
+        custom_list | zip(custom_start_stat.results)
+        | selectattr('1.stat.exists','equalto',True)
+        | map(attribute='0') | list
+      }}
+    custom_absent: >-
+      {{
+        custom_list | zip(custom_start_stat.results)
+        | rejectattr('1.stat.exists','equalto',True)
+        | map(attribute='0') | list
+      }}
+  when: custom_list | length > 0
 
-- name: Adicionar linhas de serviços ausentes (Linux)
+- name: STOP custom
+  ansible.builtin.shell: "{{ item.value.stop }}"
+  loop: "{{ custom_present }}"
+  loop_control: { label: "{{ item.key }}" }
+  register: custom_stop
+  failed_when: false
+  changed_when: false
+  when:
+    - custom_present | length > 0
+    - do_stop
+
+- name: Pausa rápida antes do START
+  ansible.builtin.pause:
+    seconds: 2
+  when: custom_present | length > 0 and do_restart
+
+- name: START custom
+  ansible.builtin.shell: "{{ item.value.start }}"
+  loop: "{{ custom_present }}"
+  loop_control: { label: "{{ item.key }}" }
+  register: custom_start
+  failed_when: false
+  changed_when: false
+  when:
+    - custom_present | length > 0
+    - do_start
+
+- name: STATUS custom
+  ansible.builtin.shell: "{{ item.value.status }}"
+  loop: "{{ custom_present }}"
+  loop_control: { label: "{{ item.key }}" }
+  register: custom_status
+  failed_when: false
+  changed_when: false
+  when:
+    - custom_present | length > 0
+    - item.value.status is defined
+
+- name: Acrescentar linhas para custom PRESENTES
+  ansible.builtin.set_fact:
+    host_rows: "{{ host_rows + [ {
+        'name': item.value.display | default(item.key),
+        'after': (do_restart | ternary('restarted',
+                   (do_start and not do_stop) | ternary('started',
+                     (do_stop and not do_start) | ternary('stopped','executado')))),
+        'ok': (
+               (do_restart and
+                 (custom_stop.results[loop.index0].rc | default(0) == 0) and
+                 (custom_start.results[loop.index0].rc | default(0) == 0)
+               )
+            or (do_start and (custom_start.results[loop.index0].rc | default(0) == 0))
+            or (do_stop  and (custom_stop.results[loop.index0].rc  | default(0) == 0))
+        ),
+        'error': (
+           (custom_stop.results[loop.index0].stderr  | default('')) ~ ' ' ~
+           (custom_start.results[loop.index0].stderr | default(''))
+        )
+      } ] }}"
+  loop: "{{ custom_present | default([]) }}"
+  loop_control: { label: "{{ item.key }}" }
+  when: custom_present | length > 0
+
+- name: Acrescentar linhas para custom AUSENTES
+  ansible.builtin.set_fact:
+    host_rows: "{{ host_rows + [ {
+        'name': item.value.display | default(item.key),
+        'after': 'absent',
+        'ok': false,
+        'error': 'Comando não encontrado no host'
+      } ] }}"
+  loop: "{{ custom_absent | default([]) }}"
+  loop_control: { label: "{{ item.key }}" }
+  when: custom_absent | length > 0
+
+- name: Adicionar linhas de serviços ausentes (Linux - systemd)
   ansible.builtin.set_fact:
     host_rows: "{{ host_rows + [ {
         'name': item,
         'after': 'absent',
         'ok': false,
-        'found': false,
         'error': 'Serviço não encontrado no host'
       } ] }}"
-  loop: "{{ lsm_missing_services }}"
+  loop: "{{ lsm_missing_services | difference(lsm_custom_ids | default([])) }}"
   when: lsm_missing_services | length > 0
 
 - name: Montar objeto de relatório por host (Linux)
@@ -346,19 +344,33 @@ setup_services.yml
 - ansible.builtin.set_fact:
     linux_services: "{{ linux_services | unique }}"
     windows_services: "{{ windows_services | unique }}"
-    linux_custom_cmds: "{{ linux_custom_cmds | default({}) }}"
 
+playbook_service_linux.yml
 
-vars/services/itm.yml
+---
+- name: Gerenciar serviços em hosts Linux
+  hosts: linux_targets
+  become: true
+  become_user: root
+  
+  gather_facts: false
+  vars:
+    state_map:
+      start: started
+      stop: stopped
+      restart: restarted
+    lsm_state: "{{ state_map.get(service_state | lower | trim, service_state) }}"
+    lsm_errors: []
+    linux_services: "{{ hostvars['localhost'].linux_services | default([]) }}"
+    linux_custom_cmds: "{{ hostvars['localhost'].linux_custom_cmds | default({}) }}"
+  tasks:
+    - name: Captura apenas os fatos necessários
+      ansible.builtin.setup:
+        gather_subset:
+        - '!all'
+        - '!min'
+        - platform
+        - distribution
 
-linux_services: [] 
-linux_custom_services:
-  - id: itm_lz
-    display: "IBM ITM LZ agent"
-    start:  "/opt/IBM/ITM/bin/itmcmd agent start lz"
-    stop:   "/opt/IBM/ITM/bin/itmcmd agent stop lz"
-    status: "/opt/IBM/ITM/bin/itmcmd agent status lz"
-
-windows_services:
-  - KNTCMA
-
+    - name: Gerenciar serviços nos hosts linux
+      ansible.builtin.include_tasks: tasks/linux_manager_service.yml
