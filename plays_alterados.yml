@@ -1,194 +1,224 @@
-playbook_create_report_email.yml
-
-- name: Consolidar relatório geral de serviços
-  hosts: localhost
-  gather_facts: false
-  tasks:
-    - name: Juntar relatórios de cada host
-      ansible.builtin.set_fact:
-        service_reports: >-
-          {{
-            (groups.linux_targets | default([]) + groups.windows_targets | default([]))
-            | map('extract', hostvars, 'service_host_report')
-            | select('defined')
-            | list
-          }}
-        unreachable_hosts: "{{ unreachable_hosts | default([]) }}"
-
-    - name: Separar relatórios com erro de execução
-      ansible.builtin.set_fact:
-        exec_error_reports: "{{ service_reports | selectattr('error','defined') | list }}"
-        normal_reports: "{{ service_reports | rejectattr('error','defined') | list }}"
-
-    - name: Calcular lista de serviços testados (Survey)
-      ansible.builtin.set_fact:
-        services_tested: "{{ services | default([]) | unique | join(', ') }}"
-
-    - name: Calcular linhas NOK
-      ansible.builtin.set_fact:
-        bad_rows: >-
-          {{
-            normal_reports
-            | map(attribute='rows')
-            | flatten
-            | selectattr('ok','equalto',False)
-            | list
-          }}
-
-    - name: Calcular flag any_errors
-      ansible.builtin.set_fact:
-        any_errors: >-
-          {{
-            (unreachable_hosts | length > 0)
-            or (exec_error_reports | length > 0)
-            or (bad_rows | length > 0)
-          }}
-
-    - name: Montar HTML final
-      ansible.builtin.set_fact:
-        send_mail_body: |
-          {% set show_map = {
-            'restarted':'started',
-            'restart':'started',
-            'running':'started'
-          } %}
-          <h2>Gerenciamento de Serviços</h2>
-          <p><b>Motivo:</b> {{ (motivo | default('N/D')) | e }}</p>
-          {% if services_tested %}
-            <p><b>Serviços gerenciados:</b> {{ services_tested }}</p>
-          {% endif %}
-
-          {% if unreachable_hosts and unreachable_hosts|length > 0 %}
-          <h3 style="color:#d9534f;">Hosts inalcançáveis</h3>
-          <ul>
-          {% for h in unreachable_hosts %}
-            <li>{{ h }}</li>
-          {% endfor %}
-          </ul>
-          {% endif %}
-
-          {% if exec_error_reports %}
-          <h3 style="color:#f0ad4e;">Hosts com erro de execução de módulo</h3>
-          <ul>
-          {% for rep in exec_error_reports %}
-            <li><b>{{ rep.host }}</b>: {{ rep.error }}</li>
-          {% endfor %}
-          </ul>
-          {% endif %}
-
-          {% set linux_reports   = normal_reports | selectattr('os','equalto','linux')   | list %}
-          {% set windows_reports = normal_reports | selectattr('os','equalto','windows') | list %}
-
-          {% if linux_reports %}
-            {% set expected_linux_raw = linux_reports[0].expected | lower %}
-            {% set expected_linux = show_map.get(expected_linux_raw, expected_linux_raw) | capitalize %}
-            <h3>Servidores Linux</h3>
-            <p><b>Estado esperado:</b> {{ expected_linux }}</p>
-            <table style="border-collapse:collapse;font-family:Arial;font-size:12px;">
-              <tr style="background:#f2f2f2;">
-                <th style="border:1px solid #ccc;padding:4px;text-align:left;">Servidor</th>
-                <th style="border:1px solid #ccc;padding:4px;text-align:left;">Serviço</th>
-                <th style="border:1px solid #ccc;padding:4px;text-align:left;">Estado</th>
-              </tr>
-              {% for rep in linux_reports %}
-                {% for r in rep.rows %}
-                  {% set after_disp = show_map.get(r.after|lower, r.after) %}
-                  <tr>
-                    <td style="border:1px solid #ccc;padding:4px;">{{ rep.host }}</td>
-                    <td style="border:1px solid #ccc;padding:4px;">{{ r.name }}</td>
-                    <td style="border:1px solid #ccc;padding:4px;color:{{ 'green' if r.ok else 'red' }};">
-                      {{ after_disp }}
-                    </td>
-                  </tr>
-                {% endfor %}
-              {% endfor %}
-            </table>
-          {% endif %}
-
-          {% if windows_reports %}
-            {% set expected_windows_raw = windows_reports[0].expected | lower %}
-            {% set expected_windows = show_map.get(expected_windows_raw, expected_windows_raw) | capitalize %}
-            <h3 style="margin-top:24px;">Servidores Windows</h3>
-            <p><b>Estado esperado:</b> {{ expected_windows }}</p>
-            <table style="border-collapse:collapse;font-family:Arial;font-size:12px;">
-              <tr style="background:#f2f2f2;">
-                <th style="border:1px solid #ccc;padding:4px;text-align:left;">Servidor</th>
-                <th style="border:1px solid #ccc;padding:4px;text-align:left;">Serviço</th>
-                <th style="border:1px solid #ccc;padding:4px;text-align:left;">Estado</th>
-              </tr>
-              {% for rep in windows_reports %}
-                {% for r in rep.rows %}
-                  {% set after_disp = show_map.get(r.after|lower, r.after) %}
-                  <tr>
-                    <td style="border:1px solid #ccc;padding:4px;">{{ rep.host }}</td>
-                    <td style="border:1px solid #ccc;padding:4px;">{{ r.name }}</td>
-                    <td style="border:1px solid #ccc;padding:4px;color:{{ 'green' if r.ok else 'red' }};">
-                      {{ after_disp }}
-                    </td>
-                  </tr>
-                {% endfor %}
-              {% endfor %}
-            </table>
-          {% endif %}
-
-          {% if not any_errors %}
-            <p style="color:green;margin-top:18px;"><b>Todos os serviços estão no estado esperado.</b></p>
-          {% else %}
-            <p style="color:red;margin-top:18px;"><b>Existem divergências (ver seções acima).</b></p>
-          {% endif %}
-
-    - name: Definir subject
-      ansible.builtin.set_stats:
-        data:
-          send_mail_subject: "Ansible-Report - Job #{{ awx_job_id }} - {{ awx_job_template_name }} - {{ 'SUCESSO' if not any_errors else 'ALERTA' }}"
-          send_mail_body: "{{ send_mail_body }}"
-
-
-playbook_service_linux.yml
-
 ---
-- name: Gerenciar serviços em hosts Linux
-  hosts: linux_targets
-  become: true
+- hosts: all
+  gather_facts: no
+  become: yes
   become_user: root
-  
-  gather_facts: false
+
   vars:
-    state_map:
-      start: started
-      stop: stopped
-      restart: restarted
-    lsm_state: "{{ state_map.get(service_state | lower | trim, service_state) }}"
-    lsm_errors: []
-    linux_services: "{{ hostvars['localhost'].linux_services | default([]) }}"
-    linux_custom_cmds: "{{ hostvars['localhost'].linux_custom_cmds | default({}) }}"
+    certificate_name: ""
+    mount_cifs: ""
+    mount_path: "/opt/ansiblefiles/files/cer"
+    certificate_temp_folder: "/opt/ansiblefiles/files"
+
+    create_pfx: true
+    export_password: ""
+
+    ritm_code: ""
+
+    send_mail_cifs: producao
+    send_mail_cifs_path: "/Ansible/mail_attachments/"
+    send_mail_cifs_address:
+      producao: "//AG-MZ-IW-FS-002.corp.bradesco.com.br/Apps"
+      tutihofix: "//AG-AH-VV-FS-001.agorasenior.corp/Apps"
+
+    _cred_file: "{{ certificate_temp_folder }}/ansible-autentication-cifs-{{ awx_job_id | default('local') }}"
+
   tasks:
-    - name: Testar execução de módulo (perm / python / sudo)
-      ansible.builtin.command: /usr/bin/true
-      register: lsm_perm_test
-      ignore_errors: true
+    - name: Fluxo completo (validações + PFX opcional)
+      block:
+        - name: Verifica variáveis obrigatórias
+          ansible.builtin.assert:
+            that:
+              - certificate_name | length > 0
+              - mount_cifs | length > 0
+              - (create_pfx | bool) implies (export_password | length > 0)
+            fail_msg: >
+              certificate_name e mount_cifs são obrigatórios.
+              Se create_pfx = true é preciso definir export_password.
 
-    - name: Registrar erro de execução e montar relatório vazio (Linux)
-      ansible.builtin.set_fact:
-        service_host_report:
-          host: "{{ inventory_hostname }}"
-          os: "linux"
-          expected: "{{ lsm_state }}"
-          rows: []
-          error: "{{ lsm_perm_test.msg | default(lsm_perm_test.stderr) | default('Falha ao executar módulos Ansible (permissão/python)') }}"
-      when: lsm_perm_test is failed
+        - name: Garante diretório de montagem
+          ansible.builtin.file:
+            path: "{{ mount_path }}"
+            state: directory
 
-    - name: Encerrar host (Linux) em caso de erro de execução
-      ansible.builtin.meta: end_host
-      when: lsm_perm_test is failed
-  
-    - name: Captura apenas os fatos necessários
-      ansible.builtin.setup:
-        gather_subset:
-        - '!all'
-        - '!min'
-        - platform
-        - distribution
+        - name: Cria arquivo de credencial CIFS
+          ansible.builtin.copy:
+            dest: "{{ _cred_file }}"
+            content: "{{ ansible_password }}"
+          delegate_to: localhost
 
-    - name: Gerenciar serviços nos hosts linux
-      ansible.builtin.include_tasks: tasks/linux_manager_service.yml
+        - name: Monta CIFS
+          ansible.builtin.shell: |
+            mount "{{ mount_cifs | lower }}" "{{ mount_path }}" \
+              -o username={{ ansible_user }},password=`cat {{ _cred_file }}`,domain=agorasenior.corp,rw,vers=3.0
+          args:
+            warn: false
+
+        - name: Define paths dos artefatos
+          ansible.builtin.set_fact:
+            cert_dir: "{{ mount_path }}/{{ certificate_name }}"
+            key_path: "{{ cert_dir }}/{{ certificate_name }}.key"
+            csr_path: "{{ cert_dir }}/{{ certificate_name }}.csr"
+            cer_path: "{{ cert_dir }}/{{ certificate_name }}.cer"
+
+        - name: Verifica presença de key/csr/cer
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "{{ key_path }}"
+            - "{{ csr_path }}"
+            - "{{ cer_path }}"
+          register: file_checks
+
+        - name: Falha se arquivo obrigatório ausente
+          ansible.builtin.fail:
+            msg: "Arquivo obrigatório {{ item.stat.path }} ausente."
+          when: not item.stat.exists
+          loop: "{{ file_checks.results }}"
+
+        - name: Extrai texto do CSR
+          ansible.builtin.shell: "openssl req -in '{{ csr_path }}' -noout -text"
+          register: csr_text
+
+        - name: Extrai texto do CER
+          ansible.builtin.shell: "openssl x509 -in '{{ cer_path }}' -noout -text"
+          register: cer_text
+
+        - name: Compara SUBJECT
+          ansible.builtin.assert:
+            that:
+              - (csr_text.stdout | regex_search('Subject: (.*)')) ==
+                (cer_text.stdout | regex_search('Subject: (.*)'))
+            fail_msg: "Subject divergente entre CSR e CER"
+            success_msg: "Subject OK"
+
+        - name: Extrai SANs do CSR
+          ansible.builtin.shell: |
+            openssl req -in "{{ csr_path }}" -noout -text |
+            awk '/X509v3 Subject Alternative Name/ {getline; print}' |
+            sed 's/DNS://g; s/, /,/g'
+          register: csr_sans_raw
+          failed_when: false
+
+        - name: Extrai SANs do CER
+          ansible.builtin.shell: |
+            openssl x509 -in "{{ cer_path }}" -noout -text |
+            awk '/X509v3 Subject Alternative Name/ {getline; print}' |
+            sed 's/DNS://g; s/, /,/g'
+          register: cer_sans_raw
+          failed_when: false
+
+        - name: Compara SANs
+          ansible.builtin.assert:
+            that:
+              - (csr_sans_raw.stdout.split(',') | reject('equalto','') | list | sort) ==
+                (cer_sans_raw.stdout.split(',') | reject('equalto','') | list | sort)
+            fail_msg: "SANs divergentes"
+            success_msg: "SANs OK"
+          when: csr_sans_raw.stdout | length > 0
+
+        - name: Calcula modulus da KEY
+          ansible.builtin.shell: "openssl rsa -in '{{ key_path }}' -noout -modulus | md5sum"
+          register: key_mod
+
+        - name: Calcula modulus do CER
+          ansible.builtin.shell: "openssl x509 -in '{{ cer_path }}' -noout -modulus | md5sum"
+          register: cer_mod
+
+        - name: Compara modulus
+          ansible.builtin.assert:
+            that:
+              - key_mod.stdout == cer_mod.stdout
+            fail_msg: ".key NÃO corresponde ao .cer"
+            success_msg: "Key × Cert OK"
+
+        - name: Localiza CADEIA*.zip
+          ansible.builtin.find:
+            paths: "{{ cert_dir }}"
+            patterns: "CADEIA*.zip"
+            recurse: false
+          register: ca_zips
+
+        - name: Falha se não achar ZIP da cadeia
+          ansible.builtin.fail:
+            msg: "CADEIA*.zip não encontrado."
+          when: ca_zips.files | length == 0
+
+        - name: Descompacta cadeia
+          ansible.builtin.unarchive:
+            src: "{{ item.path }}"
+            dest: "{{ cert_dir }}/_ca"
+            remote_src: yes
+          loop: "{{ ca_zips.files }}"
+
+        - name: Concatena arquivos da CA (ignora diretórios) # FIX
+          ansible.builtin.shell: |
+            find "{{ cert_dir }}/_ca" -type f \( -iname "*.crt" -o -iname "*.cer" \) -print0 |
+            xargs -0 cat > "{{ cert_dir }}/{{ certificate_name }}.ca"
+          args:
+            warn: false
+
+        - name: Verifica cadeia com openssl verify
+          ansible.builtin.shell: |
+            openssl verify -CAfile "{{ cert_dir }}/{{ certificate_name }}.ca" "{{ cer_path }}"
+          register: chain_verify
+          failed_when: "'OK' not in chain_verify.stdout"
+
+        - name: Gera .pfx (se create_pfx = true)
+          block:
+            - name: Executa openssl pkcs12 -export
+              ansible.builtin.expect:
+                command: >
+                  openssl pkcs12 -export
+                  -in "{{ cer_path }}"
+                  -inkey "{{ key_path }}"
+                  -chain -CAfile "{{ cert_dir }}/{{ certificate_name }}.ca"
+                  -out "{{ cert_dir }}/{{ certificate_name }}.pfx"
+                responses:
+                  "Enter Export Password:": "{{ export_password }}"
+                  "Verifying - Enter Export Password:": "{{ export_password }}"
+
+            - name: Ajusta permissão do .pfx
+              ansible.builtin.file:
+                path: "{{ cert_dir }}/{{ certificate_name }}.pfx"
+                mode: "0644"
+          when: create_pfx | bool
+
+        - name: Define corpo e assunto do e-mail
+          ansible.builtin.set_stats:
+            data:
+              send_mail_body: |
+                {{ 'Arquivo .pfx criado e ' if create_pfx | bool else '' }}certificado <b>{{ certificate_name }}</b> validado com sucesso.<br/>
+                {% if ritm_code | length > 0 %}{{ ritm_code }}<br/>{% endif %}
+                - Subject OK<br/>
+                - SANs OK<br/>
+                - Key × Cert OK<br/>
+                - Cadeia OK<br/>
+              send_mail_subject: "Ansible-Report - Certificate - Job #{{ awx_job_id }} - {{ awx_job_template_name }}"
+              send_mail_attachments: |
+                {{ [ cert_dir ~ '/' ~ certificate_name ~ '.pfx' ] if create_pfx | bool else [] }}
+              send_mail_cifs: "{{ send_mail_cifs }}"
+
+      always:
+        - name: Remove diretório _ca extraído
+          ansible.builtin.file:
+            path: "{{ cert_dir }}/_ca"
+            state: absent
+          ignore_errors: true
+
+        - name: Remove .ca concatenado
+          ansible.builtin.file:
+            path: "{{ cert_dir }}/{{ certificate_name }}.ca"
+            state: absent
+          ignore_errors: true
+
+        - name: Desmonta CIFS
+          ansible.builtin.command: "umount '{{ mount_path }}'"
+          ignore_errors: true
+
+        - name: Remove credencial CIFS
+          ansible.builtin.file:
+            path: "{{ _cred_file }}"
+            state: absent
+          delegate_to: localhost
+          ignore_errors: true
