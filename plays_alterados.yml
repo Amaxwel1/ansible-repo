@@ -269,14 +269,6 @@ info.yaml
         label: "{{ vm }}"
       register: info_results
 
-    - name: Preparar lista de snapshots (por VM)
-      ansible.builtin.set_fact:
-        _snapshots: "{{ (item.guest_snapshots.snapshots | default([])) | list }}"
-        _vm_name: "{{ item.item }}"
-      loop: "{{ info_results.results }}"
-      loop_control:
-        label: "{{ item.item }}"
-
     - name: Montar HTML com a lista de snapshots (por VM)
       ansible.builtin.set_fact:
         report_html: >-
