@@ -43,6 +43,23 @@
                  | sum(start=[])) | unique | list
               }}
 
+        - name: Mapear grupos por host (a partir do _groups_norm)
+          ansible.builtin.set_fact:
+            host_groups_map: >-
+              {%- set G = hostvars['localhost']._groups_norm | default({}) -%}
+              {%- set out = {} -%}
+              {%- for gn, g in G.items() -%}
+                {%- for m in (g.members | default([])) -%}
+                  {%- set key = (m | string) -%}
+                  {%- set _ = out.update({ key: ((out.get(key, []) + [gn]) | unique) }) -%}
+                {%- endfor -%}
+              {%- endfor -%}
+              {{ out }}
+
+        - name: Consolidar lista de grupos aplicados (fallback seguro)
+          ansible.builtin.set_fact:
+            selected_groups2: "{{ (host_groups_map.values() | default([]) | sum(start=[])) | unique | list }}"
+
         - name: Variáveis seguras (parte 2)
           ansible.builtin.set_fact:
             missing_after_connection: "{{ expected_connectable_hosts | difference(reported_hosts) }}"
@@ -101,8 +118,9 @@
 
               <h2>Verificações</h2>
               <p><b>Motivo:</b> {{ motivo | e }}</p>
-              {% if selected_groups|length > 0 %}
-                <p><b>Grupos aplicados:</b> {{ selected_groups | join(', ') }}</p>
+              {% set _groups_line = (selected_groups2 | default(selected_groups)) %}
+              {% if _groups_line and (_groups_line | length) > 0 %}
+                <p><b>Grupos aplicados:</b> {{ _groups_line | join(', ') }}</p>
               {% endif %}
 
               {% if (unreachable_hosts_safe | length) > 0 %}
@@ -114,6 +132,18 @@
               <h3 style="color:#f0ad4e;">Hosts sem relatório (timeout/falha de execução)</h3>
               <ul>{% for h in missing_after_connection %}<li>{{ h }}</li>{% endfor %}</ul>
               {% endif %}
+
+              {% macro render_groups_header(reps, title) -%}
+                {% if reps and reps|length > 0 %}
+                  <h3>{{ title }}</h3>
+                  <ul>
+                    {% for rep in reps %}
+                      {% set grps = (host_groups_map.get(rep.host, []) | default([])) %}
+                      <li><b>{{ rep.host }}</b><br/>Grupos: {{ grps|length > 0 and (grps | join(', ')) or '—' }}</li>
+                    {% endfor %}
+                  </ul>
+                {% endif %}
+              {%- endmacro %}
 
               {% macro render_table(reps, title) -%}
                 {% if reps and reps|length > 0 %}
@@ -216,9 +246,11 @@
                 {% endif %}
               {%- endmacro %}
 
+              {{ render_groups_header(linux_reports, 'Servidores Linux') }}
               {{ render_table(linux_reports, 'Servidores Linux') }}
               {{ render_cmd_details(linux_reports, 'Servidores Linux') }}
 
+              {{ render_groups_header(windows_reports, 'Servidores Windows') }}
               {{ render_table(windows_reports, 'Servidores Windows') }}
               {{ render_cmd_details(windows_reports, 'Servidores Windows') }}
 
