@@ -1,0 +1,260 @@
+- name: Consolidar relatório
+  hosts: localhost
+  gather_facts: false
+  vars:
+    motivo: "{{ motivo | default('Verificação') }}"
+  tasks:
+    - block:
+        - name: Coletar alvos (linux+windows)
+          ansible.builtin.set_fact:
+            _all_targets: >-
+              {{
+                ((groups.linux_targets | default([])) + (groups.windows_targets | default([])))
+                | map('string') | reject('equalto','') | list | unique
+              }}
+
+        - name: Coletar relatórios (1 por host)
+          ansible.builtin.set_fact:
+            patch_reports: >-
+              {{
+                _all_targets
+                | map('extract', hostvars, 'patch_host_report')
+                | select('defined') | list
+              }}
+
+        - name: Variáveis seguras (parte 1)
+          ansible.builtin.set_fact:
+            unreachable_hosts_safe: >-
+              {{
+                (unreachable_hosts | default([]) | flatten
+                  | map('string') | map('trim')
+                  | map('regex_replace','[\\[\\]\"]','')
+                  | map('regex_replace',"\\'","")
+                  | reject('equalto','')
+                  | list | unique)
+              }}
+            expected_connectable_hosts: "{{ _all_targets }}"
+            reported_hosts: "{{ patch_reports | map(attribute='host') | list | unique }}"
+            selected_groups: >-
+              {{
+                (patch_reports
+                 | map(attribute='groups')
+                 | select('defined')
+                 | sum(start=[])) | unique | list
+              }}
+
+        - name: Variáveis seguras (parte 2)
+          ansible.builtin.set_fact:
+            missing_after_connection: "{{ expected_connectable_hosts | difference(reported_hosts) }}"
+            linux_reports: >-
+              {%- set out=[] -%}{%- set seen=[] -%}
+              {%- for r in patch_reports if r.os == 'linux' -%}
+                {%- if r.host not in seen -%}{%- set _ = out.append(r) -%}{%- set _ = seen.append(r.host) -%}{%- endif -%}
+              {%- endfor -%}{{ out }}
+            windows_reports: >-
+              {%- set out=[] -%}{%- set seen=[] -%}
+              {%- for r in patch_reports if r.os == 'windows' -%}
+                {%- if r.host not in seen -%}{%- set _ = out.append(r) -%}{%- set _ = seen.append(r.host) -%}{%- endif -%}
+              {%- endfor -%}{{ out }}
+
+        - name: Calcular se há falhas
+          ansible.builtin.set_fact:
+            any_errors: >-
+              {{
+                (unreachable_hosts_safe | length > 0)
+                or (missing_after_connection | length > 0)
+                or ((patch_reports | map(attribute='services') | sum(start=[]) | selectattr('ok','equalto',False) | list | length) > 0)
+                or ((patch_reports
+                      | selectattr('ports','defined')
+                      | map(attribute='ports')
+                      | map(attribute='local')
+                      | select('defined')
+                      | sum(start=[])
+                      | selectattr('ok','equalto',False) | list | length) > 0)
+                or ((patch_reports
+                      | map(attribute='storage')
+                      | select('defined')
+                      | sum(start=[])
+                      | selectattr('ok','equalto',False) | list | length) > 0)
+                or ((patch_reports | map(attribute='commands') | sum(start=[]) | selectattr('rc','!=',0) | list | length) > 0)
+              }}
+
+        - name: Montar HTML
+          ansible.builtin.set_fact:
+            send_mail_body: |
+              <style>
+                body { font-family: Arial, Helvetica, sans-serif; }
+                h2 { margin: 0 0 16px 0; }
+                h3 { margin: 18px 0 10px 0; }
+                h4 { margin: 14px 0 8px 0; }
+                p  { margin: 6px 0 12px 0; }
+                table { border-collapse: collapse; width: 100%; font-size: 12px; }
+                th, td { border: 1px solid #ddd; padding: 6px 8px; vertical-align: top; }
+                th { background: #f7f7f7; text-align: left; }
+                .grid { margin: 10px 0 14px 0; }
+                .stdout { white-space: pre-wrap; max-width: 100%; font-family: Consolas, "Courier New", monospace; font-size: 11px; color:#333; }
+                .cmdwrap { border:1px solid #e5e5e5; background:#fafafa; padding:8px; border-radius:6px; margin:6px 0 12px 0; }
+                .cmdline { font-family: Consolas, "Courier New", monospace; font-size: 11px; color:#111; padding:2px 6px; background:#fff; border:1px solid #eee; border-radius:4px; display:inline-block; }
+              </style>
+
+              {% set norm_map = {'running':'running','active':'running','inactive':'not running','absent':'not running'} %}
+
+              <h2>Verificações</h2>
+              <p><b>Motivo:</b> {{ motivo | e }}</p>
+              {% if selected_groups|length > 0 %}
+                <p><b>Grupos aplicados:</b> {{ selected_groups | join(', ') }}</p>
+              {% endif %}
+
+              {% if (unreachable_hosts_safe | length) > 0 %}
+              <h3 style="color:#b00020;">Hosts inalcançáveis</h3>
+              <ul>{% for h in unreachable_hosts_safe %}<li>{{ h }}</li>{% endfor %}</ul>
+              {% endif %}
+
+              {% if (missing_after_connection | length) > 0 %}
+              <h3 style="color:#f0ad4e;">Hosts sem relatório (timeout/falha de execução)</h3>
+              <ul>{% for h in missing_after_connection %}<li>{{ h }}</li>{% endfor %}</ul>
+              {% endif %}
+
+              {% macro render_table(reps, title) -%}
+                {% if reps and reps|length > 0 %}
+                  <h3>{{ title }}</h3>
+                  <table class="grid">
+                    <tr>
+                      <th style="width:220px;">Host</th>
+                      <th style="width:34%;">Serviços</th>
+                      <th style="width:16%;">Portas</th>
+                      <th style="width:16%;">Discos</th>
+                      <th style="width:14%;">Comandos</th>
+                    </tr>
+                    {% for rep in reps %}
+                      {% set svc_rows = rep.services | default([]) %}
+                      {% if rep.ports is defined and rep.ports.local is defined %}
+                        {% set local_rows = rep.ports.local %}
+                      {% else %}
+                        {% set local_rows = [] %}
+                      {% endif %}
+                      {% set sto_rows = rep.storage | default([]) %}
+                      {% set cmd_rows = rep.commands | default([]) %}
+                      {% set total = cmd_rows|length %}
+                      {% set oks = (cmd_rows | selectattr('rc','equalto',0) | list | length) %}
+                      {% set cmds_ok = (oks == total and total > 0) %}
+                      <tr>
+                        <td><b>{{ rep.host }}</b></td>
+
+                        <td>
+                          {% if svc_rows|length > 0 %}
+                            {% for s in svc_rows %}
+                              {% set raw = (s.state | string | lower) %}
+                              {% set norm = norm_map.get(raw, raw) %}
+                              {% set is_ok = (norm == 'running') %}
+                              <div>
+                                {{ s.name }}
+                                <span style="font-weight:bold;color:{{ 'green' if is_ok else '#b00020' }};">
+                                  {{ 'running' if is_ok else 'not running' }}
+                                </span>
+                              </div>
+                            {% endfor %}
+                          {% else %}—{% endif %}
+                        </td>
+
+                        <td>
+                          {% if local_rows|length > 0 %}
+                            {% for p in local_rows %}
+                              <div>
+                                {{ p.port }}
+                                <span style="font-weight:bold;color:{{ 'green' if p.ok else '#b00020' }};">
+                                  {{ 'OK' if p.ok else 'Falha' }}
+                                </span>
+                              </div>
+                            {% endfor %}
+                          {% else %}—{% endif %}
+                        </td>
+
+                        <td>
+                          {% if sto_rows|length > 0 %}
+                            {% for e in sto_rows %}
+                              <div>
+                                {{ e.mount }}:
+                                <span style="font-weight:bold;color:{{ 'green' if e.ok else '#b00020' }};">
+                                  {{ e.usage }}%
+                                </span>
+                              </div>
+                            {% endfor %}
+                          {% else %}—{% endif %}
+                        </td>
+
+                        <td>
+                          {% if total > 0 %}
+                            <span style="font-weight:bold;color:{{ 'green' if cmds_ok else '#b00020' }};">
+                              {{ 'OK' if cmds_ok else 'Falha' }}
+                            </span>
+                            ({{ oks }}/{{ total }})
+                          {% else %}—{% endif %}
+                        </td>
+                      </tr>
+                    {% endfor %}
+                  </table>
+                {% endif %}
+              {%- endmacro %}
+
+              {% macro render_cmd_details(reps, title) -%}
+                {% set reps_with_cmds = reps | selectattr('commands','defined') | list %}
+                {% if reps_with_cmds|length > 0 %}
+                  <h3>{{ title }} – Detalhes de comandos</h3>
+                  {% for rep in reps_with_cmds %}
+                    {% set cmds = rep.commands | default([]) %}
+                    {% if cmds|length > 0 %}
+                      <h4>{{ rep.host }}</h4>
+                      {% for c in cmds %}
+                        <div class="cmdwrap">
+                          <span class="cmdline">{{ c.cmd }}</span>
+                          <pre class="stdout">{{ (c.stdout | default(''))[0:2000] }}</pre>
+                        </div>
+                      {% endfor %}
+                    {% endif %}
+                  {% endfor %}
+                {% endif %}
+              {%- endmacro %}
+
+              {{ render_table(linux_reports, 'Servidores Linux') }}
+              {{ render_cmd_details(linux_reports, 'Servidores Linux') }}
+
+              {{ render_table(windows_reports, 'Servidores Windows') }}
+              {{ render_cmd_details(windows_reports, 'Servidores Windows') }}
+
+              {% if not any_errors %}
+                <p style="color:green;"><b>Todas as checagens passaram.</b></p>
+              {% else %}
+                <p style="color:#b00020;"><b>Existem falhas – ver destaque nas seções.</b></p>
+              {% endif %}
+
+        - name: Definir subject/body para envio
+          ansible.builtin.set_stats:
+            data:
+              send_mail_subject: "Ansible-Report – Job #{{ awx_job_id | default('N/A') }} - {{ awx_job_template_name | default('Patch Verification') }} – {{ 'SUCESSO' if not any_errors else 'ALERTA' }}"
+              send_mail_body: "{{ send_mail_body }}"
+
+      rescue:
+        - name: Subject de alerta em caso de falha no relatório
+          ansible.builtin.set_fact:
+            _err_subject: "Ansible-Report – Job #{{ awx_job_id | default('N/A') }} - {{ awx_job_template_name | default('Patch Verification') }} – ALERTA"
+
+        - name: Corpo de alerta com detalhes do erro
+          ansible.builtin.set_fact:
+            send_mail_body: |
+              <style>
+                body { font-family: Arial, Helvetica, sans-serif; }
+                h2 { margin: 0 0 16px 0; }
+                p  { margin: 6px 0 14px 0; }
+                pre { white-space: pre-wrap; }
+              </style>
+              <h2 style="color:#b00020">Falha ao consolidar relatório</h2>
+              <p>O relatório encontrou um erro e não foi possível montar as tabelas completas.</p>
+              <p><b>Tarefa:</b> {{ ansible_failed_task.name | default('desconhecida') }}</p>
+              <pre>{{ (ansible_failed_result.msg | default(ansible_failed_result | to_nice_json | default(''))) }}</pre>
+
+        - name: Publicar subject/body de alerta
+          ansible.builtin.set_stats:
+            data:
+              send_mail_subject: "{{ _err_subject }}"
+              send_mail_body: "{{ send_mail_body }}"
