@@ -1,0 +1,162 @@
+- name: Seed cm seguro
+  ansible.builtin.set_fact:
+    _cm: "{{ cm | default({}) }}"
+
+- name: Seed patch_checks seguro
+  ansible.builtin.set_fact:
+    _pc: "{{ _cm.get('patch_checks', {}) }}"
+
+- name: Seed defaults/groups/hosts seguros
+  ansible.builtin.set_fact:
+    _pc_defaults: "{{ _pc.get('defaults', {}) }}"
+    _pc_groups: "{{ _pc.get('groups', {}) }}"
+    _pc_hosts: "{{ _pc.get('hosts', {}) }}"
+
+- name: Normalizar grupos
+  ansible.builtin.set_fact:
+    _groups_norm: >-
+      {%- set G = _pc_groups | default({}) -%}
+      {%- set out = {} -%}
+      {%- for gn, g in G.items() -%}
+        {%- set raw_members = g.get('members', g.get('maquinas', g.get('hosts', []))) -%}
+        {%- set members = (
+              raw_members if (raw_members is sequence and not (raw_members is string))
+              else ( (raw_members | default('') | string | trim)
+                     | regex_replace('\\s*,\\s*', ',')
+                     | split(',')
+                     | reject('equalto','') | list )
+            ) -%}
+        {%- set linux = g.get('linux', {}) -%}
+        {%- set windows = g.get('windows', {}) -%}
+        {%- set merge = g.get('merge', {}) -%}
+        {%- set norm = {
+              'members': members,
+              'merge': merge,
+              'linux': {
+                'services': linux.get('services', []),
+                'ports':    linux.get('ports',    []),
+                'commands': linux.get('commands', [])
+              },
+              'windows': {
+                'services': windows.get('services', []),
+                'ports':    windows.get('ports',    []),
+                'commands': windows.get('commands', [])
+              }
+            } -%}
+        {%- set _ = out.update({gn: norm}) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Garantir target_hosts como lista
+  ansible.builtin.set_fact:
+    target_hosts: >-
+      {%- set raw = target_hosts | default([]) -%}
+      {%- if raw is sequence and not (raw is string) -%}
+        {{ raw | list | reject('equalto','') | list | unique }}
+      {%- else -%}
+        {%- set txt = (raw | string | trim) -%}
+        {%- set parsed = (txt | from_yaml) if (txt | regex_search('^[\\[\\{]')) else None -%}
+        {%- if parsed is sequence and not (parsed is string) -%}
+          {{ parsed | list | reject('equalto','') | list | unique }}
+        {%- else -%}
+          {{ (txt
+               | regex_replace('[\\[\\]\"]','')
+               | regex_replace("\\'","")
+               | regex_replace('\\s*,\\s*', ',')
+               | split(',')
+               | reject('equalto','')
+               | list
+             ) | unique }}
+        {%- endif -%}
+      {%- endif -%}
+
+- name: Pré-agregar grupos por host
+  ansible.builtin.set_fact:
+    _grp_acc: >-
+      {%- set acc = {} -%}
+      {%- set G   = _groups_norm | default({}) -%}
+      {%- set TH  = (target_hosts | map('string') | map('trim') | list) -%}
+      {%- for gn, g in G.items() -%}
+        {%- set memb = (g.members | default([])) | map('string') | map('trim') | list -%}
+        {%- set mpol = g.get('merge', {}) -%}
+        {%- for h in memb if h in TH -%}
+          {%- for oskey in ['linux','windows'] -%}
+            {%- set gos = g.get(oskey, {}) -%}
+            {%- set gs  = gos.get('services', []) -%}
+            {%- set gp  = gos.get('ports',    []) -%}
+            {%- set gc  = gos.get('commands', []) -%}
+            {%- set _ = acc.setdefault(h, {}) -%}
+            {%- set _ = acc[h].setdefault(oskey, {}) -%}
+            {%- set _ = acc[h][oskey].setdefault('services', []) -%}
+            {%- set _ = acc[h][oskey].setdefault('ports',    []) -%}
+            {%- set _ = acc[h][oskey].setdefault('commands', []) -%}
+            {%- set _ = acc[h][oskey].setdefault('_repl', {'services':False,'ports':False,'commands':False}) -%}
+            {%- if mpol.get('services','merge') == 'replace' -%}
+              {%- set _ = acc[h][oskey].update({'services': gs}) -%}
+              {%- set _ = acc[h][oskey]['_repl'].update({'services': True}) -%}
+            {%- else -%}
+              {%- set _ = acc[h][oskey]['services'].extend(gs) -%}
+            {%- endif -%}
+            {%- if mpol.get('ports','merge')    == 'replace' -%}
+              {%- set _ = acc[h][oskey].update({'ports': gp}) -%}
+              {%- set _ = acc[h][oskey]['_repl'].update({'ports': True}) -%}
+            {%- else -%}
+              {%- set _ = acc[h][oskey]['ports'].extend(gp) -%}
+            {%- endif -%}
+            {%- if mpol.get('commands','merge') == 'replace' -%}
+              {%- set _ = acc[h][oskey].update({'commands': gc}) -%}
+              {%- set _ = acc[h][oskey]['_repl'].update({'commands': True}) -%}
+            {%- else -%}
+              {%- set _ = acc[h][oskey]['commands'].extend(gc) -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ acc }}
+
+- name: Construir mapa de grupos aplicados por host
+  ansible.builtin.set_fact:
+    patch_group_membership: >-
+      {%- set out = {} -%}
+      {%- for gn, g in _groups_norm.items() -%}
+        {%- for h in g.members | default([]) -%}
+          {%- set _ = out.setdefault(h, []) -%}
+          {%- if gn not in out[h] -%}{%- set _ = out[h].append(gn) -%}{%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Construir checks finais por host (efetivo)
+  ansible.builtin.set_fact:
+    patch_check_by_host: >-
+      {%- set out = {} -%}
+      {%- set TH  = (target_hosts | map('string') | map('trim') | list) -%}
+      {%- for h in TH -%}
+        {%- set is_win = ((windows_list | default(groups.windows_targets | default([]))) | map('string') | map('trim') | select('equalto', h) | list | length) > 0 -%}
+        {%- set oskey = ('windows' if is_win else 'linux') -%}
+        {%- set def   = (_pc_defaults.get(oskey, {}) or {}) -%}
+        {%- set hc    = _pc_hosts.get(h, {}) -%}
+        {%- set mh    = hc.get('merge', {}) -%}
+        {%- set g     = (_grp_acc.get(h, {}) | default({})).get(oskey, {}) -%}
+        {%- set gr    = g.get('_repl', {'services':False,'ports':False,'commands':False}) -%}
+        {%- for key in ['services','ports','commands'] -%}
+          {%- set d0 = def.get(key, []) -%}
+          {%- set d  = (d0 if (d0 is sequence and not (d0 is string)) else ([] if (d0 is sameas true or d0 is sameas false or d0 is none) else [d0])) -%}
+          {%- set gv = g.get(key, []) -%}
+          {%- set hv0 = hc.get(key, []) -%}
+          {%- set hv = (hv0 if (hv0 is sequence and not (hv0 is string)) else ([] if (hv0 is sameas true or hv0 is sameas false or hv0 is none) else [hv0])) -%}
+          {%- set base = ( [] if gr.get(key) else d ) -%}
+          {%- set val  = ( hv if mh.get(key,'merge') == 'replace' else (base + gv + hv) ) -%}
+          {%- if key == 'ports' -%}
+            {%- set val = (val | map('string') | list | unique) -%}
+          {%- else -%}
+            {%- set val = (val | list | unique) -%}
+          {%- endif -%}
+          {%- set _ = out.update({ h: (out.get(h, {}) | combine({ key: val }, recursive=True)) }) -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Mostrar plano efetivo por host (pré-execução)
+  ansible.builtin.debug:
+    var: patch_check_by_host
