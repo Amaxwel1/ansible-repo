@@ -33,7 +33,7 @@
   register: oc_routes_raw
   changed_when: false
 
-- name: Montar lista normalizada de rotas (cluster/ns/name/host/tls)
+- name: Montar lista normalizada de rotas (cluster/ns/name/host/tls + env)
   ansible.builtin.set_fact:
     routes_norm: "{{ routes_norm + _cluster_routes }}"
   vars:
@@ -52,11 +52,17 @@
         {%- if line_trim != '' -%}
           {%- set parts = line_trim.split() -%}
           {%- if parts | length >= 3 -%}
+            {%- set host = parts[2] -%}
+            {%- set env = (
+              ('.apps.' in host and (host.split('.') | length >= 3))
+              | ternary((host.split('.')[2] | lower), '')
+            ) -%}
             {%- set _ = out.append({
               'cluster': oc_item_cluster,
               'namespace': parts[0],
               'name': parts[1],
-              'host': parts[2],
+              'host': host,
+              'env': env,
               'termination': (parts[3] if parts | length > 3 else ''),
               'insecure': (parts[4] if parts | length > 4 else ''),
               'has_tls': (parts | length > 3 and (parts[3] not in ['<none>', '']))
