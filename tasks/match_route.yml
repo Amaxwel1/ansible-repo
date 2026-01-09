@@ -46,6 +46,7 @@
       namespace: "{{ r.namespace }}"
       name: "{{ r.name }}"
       host: "{{ r.host }}"
+      env: "{{ r.env | default('') }}"
       current_termination: "{{ r.termination }}"
       current_insecure: "{{ r.insecure }}"
       matched: "{{ _best.found }}"
