@@ -87,6 +87,12 @@
     <b>Cluster(s) alvo:</b>
     <span class="mono">{{ clusters_needed | join(', ') }}</span>
   </div>
+  {% if selected_suffixes is defined and (selected_suffixes | length > 0) %}
+    <div>
+      <b>Sufixos selecionados:</b>
+      <span class="mono">{{ selected_suffixes | join(', ') }}</span>
+    </div>
+  {% endif %}
   <div>
     <b>Prefixo certificado:</b>
     <span class="mono">{{ certificate_prefix }}</span>
@@ -112,14 +118,12 @@
 <table>
   <tr>
     <th>Cert</th>
-    <th>Scope</th>
     <th>Arquivo</th>
     <th>SANs</th>
   </tr>
   {% for c in cert_inventory %}
   <tr>
     <td class="mono">{{ c.cert_name }}</td>
-    <td class="mono">{{ c.scope }}</td>
     <td class="mono">{{ c.cer_report_path | default(c.cer_path) }}</td>
     <td class="mono">
       {% if c.sans|length == 0 %}
@@ -135,6 +139,34 @@
 <h2>Rotas analisadas</h2>
 
 {% set matched_routes = (route_matches | selectattr('matched', 'equalto', true) | list) %}
+
+{% if selected_suffixes is defined and (selected_suffixes | length > 0) %}
+  {% for cl in clusters_needed %}
+    {% for env in selected_suffixes %}
+
+      {# rotas existentes no cluster/env (após filtros) #}
+      {% set routes_env = (routes_norm
+        | selectattr('cluster', 'equalto', cl)
+        | selectattr('env', 'defined')
+        | selectattr('env', 'equalto', env)
+        | list) %}
+
+      {# matches existentes no cluster/env #}
+      {% set matches_env = (matched_routes
+        | selectattr('cluster', 'equalto', cl)
+        | selectattr('env', 'defined')
+        | selectattr('env', 'equalto', env)
+        | list) %}
+
+      {% if routes_env | length == 0 %}
+        <p><b>Cluster {{ cl }} / env {{ env }}:</b> não existe rota nesse ambiente/cluster (após filtros).</p>
+      {% elif matches_env | length == 0 %}
+        <p><b>Cluster {{ cl }} / env {{ env }}:</b> existem rotas, mas nenhuma rota compatível (MATCH) para o(s) certificado(s) do prefixo informado.</p>
+      {% endif %}
+
+    {% endfor %}
+  {% endfor %}
+{% endif %}
 
 {% if matched_routes | length == 0 %}
   <p><b>Nenhuma rota encontrada com MATCH</b> para os certificados do prefixo informado.</p>
