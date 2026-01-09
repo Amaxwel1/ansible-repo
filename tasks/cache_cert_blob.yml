@@ -1,0 +1,43 @@
+---
+# Espera receber: cert_item (um item de cert_inventory)
+
+- name: Slurp cert (PEM)
+  become: true
+  ansible.builtin.slurp:
+    src: "{{ cert_item.cer_path }}"
+  register: _slurp_cert
+
+- name: Slurp key (se existir)
+  become: true
+  ansible.builtin.slurp:
+    src: "{{ cert_item.key_path }}"
+  register: _slurp_key
+  when: cert_item.key_path | default('') | trim | length > 0
+
+- name: Slurp CA chain (se existir)
+  become: true
+  ansible.builtin.slurp:
+    src: "{{ cert_item.ca_chain_path }}"
+  register: _slurp_ca
+  when: cert_item.ca_chain_path | default('') | trim | length > 0
+
+- name: Guardar no cache (por cer_path)
+  ansible.builtin.set_fact:
+    cert_blobs: >-
+      {{
+        cert_blobs | combine({
+          (cert_item.cer_path): {
+            'cert_pem': (_slurp_cert.content | b64decode),
+            'key_pem': (
+              (_slurp_key.content | b64decode)
+              if (_slurp_key is defined and _slurp_key.content is defined)
+              else ''
+            ),
+            'ca_pem': (
+              (_slurp_ca.content | b64decode)
+              if (_slurp_ca is defined and _slurp_ca.content is defined)
+              else ''
+            )
+          }
+        }, recursive=True)
+      }}

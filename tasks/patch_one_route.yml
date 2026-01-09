@@ -1,0 +1,109 @@
+---
+- name: Se for aplicar cert, garantir que existe key quando necessário
+  when:
+    - tls_apply_cert | bool
+    - route_termination in ['edge', 'reencrypt']
+  ansible.builtin.assert:
+    that:
+      - r.cer_path | default('') | trim | length > 0
+      - r.key_path | default('') | trim | length > 0
+    fail_msg: >
+      tls_apply_cert=true exige .cer + .key na pasta do certificado para edge/reencrypt.
+      Rota: {{ r.namespace }}/{{ r.name }} | cert={{ r.matched_cert }}
+
+- name: Obter cert/key/ca do cache (por cer_path)
+  ansible.builtin.set_fact:
+    cert_pem: "{{ cert_blobs.get(r.cer_path, {}).get('cert_pem', '') }}"
+    key_pem: "{{ cert_blobs.get(r.cer_path, {}).get('key_pem', '') }}"
+    item_ca_pem: "{{ cert_blobs.get(r.cer_path, {}).get('ca_pem', '') }}"
+  when:
+    - tls_apply_cert | bool
+    - route_termination in ['edge', 'reencrypt']
+
+- name: Calcular CAs efetivas
+  ansible.builtin.set_fact:
+    ca_pem: >-
+      {%- if tls_apply_cert | bool -%}
+        {%- if item_ca_pem | default('') | trim | length > 0 -%}
+          {{ item_ca_pem }}
+        {%- elif global_ca_slurp is defined and global_ca_slurp.content is defined -%}
+          {{ global_ca_slurp.content | b64decode }}
+        {%- else -%}
+          {{ '' }}
+        {%- endif -%}
+      {%- else -%}
+        {{ '' }}
+      {%- endif -%}
+    dest_ca_pem: >-
+      {%- if tls_apply_cert | bool and route_termination == 'reencrypt' -%}
+        {%- if global_dest_ca_slurp is defined and global_dest_ca_slurp.content is defined -%}
+          {{ global_dest_ca_slurp.content | b64decode }}
+        {%- else -%}
+          {{ ca_pem }}
+        {%- endif -%}
+      {%- else -%}
+        {{ '' }}
+      {%- endif -%}
+
+- name: Montar objeto TLS (dict) para patch
+  ansible.builtin.set_fact:
+    tls_patch: >-
+      {{
+        (route_termination == 'passthrough')
+        | ternary(
+            {'termination': 'passthrough'},
+            (
+              {
+                'termination': route_termination,
+                'insecureEdgeTerminationPolicy': route_insecure_policy
+              }
+              | combine(
+                  (tls_apply_cert | bool)
+                  | ternary(
+                      {
+                        'certificate': cert_pem,
+                        'key': key_pem
+                      },
+                      {}
+                    )
+                )
+              | combine(
+                  (tls_apply_cert | bool and (ca_pem | default('') | trim | length > 0))
+                  | ternary({'caCertificate': ca_pem}, {})
+                )
+              | combine(
+                  (tls_apply_cert | bool and route_termination == 'reencrypt' and (dest_ca_pem | default('') | trim | length > 0))
+                  | ternary({'destinationCACertificate': dest_ca_pem}, {})
+                )
+            )
+          )
+      }}
+
+- name: Remover destinationCACertificate quando destino não for reencrypt
+  ansible.builtin.set_fact:
+    tls_patch: "{{ tls_patch | combine({'destinationCACertificate': None}) }}"
+  when:
+    - route_termination != 'reencrypt'
+    - r.current_termination | default('') == 'reencrypt'
+
+- name: Aplicar patch na Route (no localhost)
+  delegate_to: localhost
+  become: false
+  redhat.openshift.k8s:
+    host: "{{ ocp_clusters[r.cluster] }}"
+    api_key: "{{ auth_tokens[r.cluster] }}"
+    state: present
+    merge_type: merge
+    definition:
+      apiVersion: route.openshift.io/v1
+      kind: Route
+      metadata:
+        name: "{{ r.name }}"
+        namespace: "{{ r.namespace }}"
+      spec:
+        tls: "{{ tls_patch }}"
+  register: patch_out
+
+- name: Atualizar patched_map (sem varrer route_matches inteiro)
+  ansible.builtin.set_fact:
+    patched_map: "{{ patched_map | combine({ (r.cluster ~ '|' ~ r.namespace ~ '|' ~ r.name): (patch_out.changed | default(false)) }) }}"

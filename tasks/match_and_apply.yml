@@ -1,0 +1,149 @@
+---
+- name: Montar path do report como mount_cifs + nome do arquivo (CER)
+  ansible.builtin.set_fact:
+    cert_inventory: "{{ (cert_inventory | default([])) | map('combine', _combine_map) | list }}"
+  vars:
+    _combine_map:
+      cer_report_path: "{{ (mount_cifs | default('') | regex_replace('/$','')) ~ '/' ~ ((item.cer_path | default('')) | basename) }}"
+  loop: "{{ cert_inventory | default([]) }}"
+  loop_control:
+    loop_var: item
+
+- name: Construir cert_patterns (SAN -> regex)
+  ansible.builtin.set_fact:
+    cert_patterns: "{{ (cert_patterns | default([])) + [ _cp ] }}"
+  vars:
+    cert: "{{ item.0 }}"
+    _san: "{{ item.1 | trim }}"
+    _escaped: "{{ _san | regex_replace('\\.', '\\\\.') | regex_replace('\\*', '[^.]+') }}"
+    _regex: "^{{ _escaped }}$"
+    _cp:
+      cert_name: "{{ cert.cert_name }}"
+      scope: "{{ cert.scope }}"
+      cert_dir: "{{ cert.cert_dir }}"
+      cer_path: "{{ cert.cer_path }}"
+      key_path: "{{ cert.key_path }}"
+      ca_chain_path: "{{ cert.ca_chain_path | default('') }}"
+      san: "{{ _san }}"
+      san_len: "{{ _san | length }}"
+      regex: "{{ _regex }}"
+  loop: "{{ cert_inventory | subelements('sans', skip_missing=True) }}"
+  when:
+    - item.1 is defined
+    - (item.1 | trim | length) > 0
+
+- name: Definir cert_patterns_eff
+  ansible.builtin.set_fact:
+    cert_patterns_eff: "{{ cert_patterns | default([]) }}"
+
+- name: Match routes -> cert (SEM include por rota)
+  ansible.builtin.set_fact:
+    route_matches: >-
+      {%- set out = [] -%}
+      {%- for r in (routes_norm | default([])) -%}
+        {%- set ns = namespace(best={
+          'found': false,
+          'san_len': 0,
+          'cert_name': '',
+          'san': '',
+          'cer_path': '',
+          'key_path': '',
+          'ca_chain_path': '',
+          'scope': ''
+        }) -%}
+
+        {%- for cand in (cert_patterns_eff | default([])) -%}
+          {%- if r.host is match(cand.regex) -%}
+            {%- if (cand.san_len | int) > (ns.best.san_len | int) -%}
+              {%- set ns.best = {
+                'found': true,
+                'san_len': cand.san_len,
+                'cert_name': cand.cert_name,
+                'san': cand.san,
+                'cer_path': cand.cer_path,
+                'key_path': cand.key_path,
+                'ca_chain_path': (cand.ca_chain_path | default('')),
+                'scope': cand.scope
+              } -%}
+            {%- endif -%}
+          {%- endif -%}
+        {%- endfor -%}
+
+        {%- set _ = out.append({
+          'cluster': r.cluster,
+          'namespace': r.namespace,
+          'name': r.name,
+          'host': r.host,
+          'current_termination': r.termination,
+          'current_insecure': r.insecure,
+          'matched': ns.best.found,
+          'matched_cert': ns.best.cert_name,
+          'matched_san': ns.best.san,
+          'desired_termination': route_termination,
+          'desired_insecure': route_insecure_policy,
+          'cer_path': ns.best.cer_path,
+          'key_path': ns.best.key_path,
+          'ca_chain_path': (ns.best.ca_chain_path | default('')),
+          'scope': ns.best.scope
+        }) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Stats (total/match/sem match)
+  ansible.builtin.set_fact:
+    routes_total: "{{ (route_matches | default([])) | length }}"
+    routes_matched_count: "{{ (route_matches | default([])) | selectattr('matched', 'equalto', true) | list | length }}"
+    routes_unmatched_count: "{{ (route_matches | default([])) | selectattr('matched', 'equalto', false) | list | length }}"
+
+# ---- CACHE (corrigido: loop no include_tasks, não em block) ----
+- name: Inicializar cache de blobs (cert_blobs) e mapa de patch
+  ansible.builtin.set_fact:
+    cert_blobs: {}
+    patched_map: {}
+  when:
+    - route_action == 'patch'
+    - tls_apply_cert | bool
+
+- name: Cachear cert/key/ca por certificado (1 vez) - via include_tasks
+  ansible.builtin.include_tasks: cache_cert_blob.yml
+  loop: "{{ cert_inventory | default([]) }}"
+  loop_control:
+    loop_var: cert_item
+    label: "{{ cert_item.cert_name }}"
+  when:
+    - route_action == 'patch'
+    - tls_apply_cert | bool
+
+- name: Executar patch das rotas (se route_action == patch)
+  ansible.builtin.include_tasks: patch_route.yml
+  when: route_action == 'patch'
+
+- name: Enriquecer rotas com patched (uma vez, sem O(n²))
+  ansible.builtin.set_fact:
+    route_matches: >-
+      {%- set out = [] -%}
+      {%- for rm in (route_matches | default([])) -%}
+        {%- set k = (rm.cluster ~ '|' ~ rm.namespace ~ '|' ~ rm.name) -%}
+        {%- set _ = out.append(rm | combine({'patched': (patched_map.get(k, false))})) -%}
+      {%- endfor -%}
+      {{ out }}
+  when: route_action == 'patch'
+
+- name: Montar HTML (inline)
+  ansible.builtin.set_fact:
+    report_html: "{{ lookup('template', 'templates/report.html.j2') }}"
+
+- name: Salvar report em /tmp
+  ansible.builtin.copy:
+    dest: "/tmp/report-cert-route-{{ ocp_cluster | lower | trim }}.html"
+    content: "{{ report_html }}"
+    mode: "0644"
+
+- name: Publicar para e-mail (stats)
+  ansible.builtin.set_stats:
+    data:
+      send_mail_subject: "Ansible-Report - Cert x Route - {{ ocp_cluster | upper }} - Job #{{ awx_job_id | default('local') }}"
+      send_mail_body: "{{ report_html }}"
+      send_mail_cifs: "{{ send_mail_cifs }}"
+      send_mail_cifs_path: "{{ send_mail_cifs_path }}"
+      send_mail_cifs_address: "{{ send_mail_cifs_address }}"

@@ -1,0 +1,41 @@
+---
+- name: Validar pré-requisitos para patch
+  ansible.builtin.assert:
+    that:
+      - route_termination in ['edge', 'passthrough', 'reencrypt']
+      - route_insecure_policy in ['Allow', 'Redirect', 'None']
+    fail_msg: "Config inválida para patch."
+  when: route_action == 'patch'
+
+- name: Preparar CA global (opcional)
+  when:
+    - route_action == 'patch'
+    - tls_apply_cert | bool
+    - tls_ca_pem_path | default('') | trim | length > 0
+  ansible.builtin.slurp:
+    src: "{{ tls_ca_pem_path }}"
+  register: global_ca_slurp
+  delegate_to: localhost
+  become: false
+
+- name: Preparar destinationCA global (opcional, reencrypt)
+  when:
+    - route_action == 'patch'
+    - tls_apply_cert | bool
+    - route_termination == 'reencrypt'
+    - tls_destination_ca_pem_path | default('') | trim | length > 0
+  ansible.builtin.slurp:
+    src: "{{ tls_destination_ca_pem_path }}"
+  register: global_dest_ca_slurp
+  delegate_to: localhost
+  become: false
+
+- name: Patch das rotas (uma por vez)
+  when:
+    - route_action == 'patch'
+    - r.matched | bool
+  ansible.builtin.include_tasks: patch_one_route.yml
+  loop: "{{ route_matches | default([]) }}"
+  loop_control:
+    loop_var: r
+    label: "{{ r.cluster }} {{ r.namespace }}/{{ r.name }}"

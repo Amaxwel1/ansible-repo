@@ -1,0 +1,51 @@
+---
+- name: Normalizar seleção do survey (tutihofix)
+  when: (ocp_cluster | lower | trim) == 'tutihofix'
+  ansible.builtin.set_fact:
+    selected_suffixes: >-
+      {{
+        (ocp_cert_tutihofix_envs
+          if (ocp_cert_tutihofix_envs is sequence and ocp_cert_tutihofix_envs is not string)
+          else ([ocp_cert_tutihofix_envs] if ocp_cert_tutihofix_envs|default('')|trim != '' else [])
+        )
+        | map('trim') | map('lower') | list
+      }}
+
+- name: Validar seleção (tutihofix)
+  when:
+    - (ocp_cluster | lower | trim) == 'tutihofix'
+    - selected_suffixes | length == 0
+  ansible.builtin.fail:
+    msg: "Selecione ao menos um ambiente (tu/ti/th/fix) no survey."
+
+- name: Montar plano (suffix -> cluster) para tutihofix
+  when: (ocp_cluster | lower | trim) == 'tutihofix'
+  ansible.builtin.set_fact:
+    cert_plan: "{{ (cert_plan | default([])) + [ { 'suffix': (item | lower | trim), 'cluster': suffix_cluster_map[item | lower | trim] } ] }}"
+  loop: "{{ selected_suffixes }}"
+
+- name: Clusters necessários (únicos) - tutihofix
+  when: (ocp_cluster | lower | trim) == 'tutihofix'
+  ansible.builtin.set_fact:
+    clusters_needed: "{{ cert_plan | map(attribute='cluster') | unique | list }}"
+
+- name: Plano para producao/dr
+  when: (ocp_cluster | lower | trim) in ['producao', 'dr']
+  ansible.builtin.set_fact:
+    clusters_needed: "{{ [ ocp_cluster | lower | trim ] }}"
+
+- name: Definir par (producao <-> dr)
+  when: (ocp_cluster | lower | trim) in ['producao', 'dr']
+  ansible.builtin.set_fact:
+    pair_cluster: >-
+      {{
+        ((ocp_cluster | lower | trim) == 'producao')
+        | ternary('dr', 'producao')
+      }}
+
+- name: Se validar par, adiciona par ao plano
+  when:
+    - (ocp_cluster | lower | trim) in ['producao', 'dr']
+    - validate_pair_cluster | bool
+  ansible.builtin.set_fact:
+    clusters_needed: "{{ (clusters_needed + [ pair_cluster ]) | unique | list }}"

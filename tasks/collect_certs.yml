@@ -1,0 +1,43 @@
+---
+- name: Garante diretório de montagem do CIFS
+  ansible.builtin.file:
+    path: "{{ mount_path }}"
+    state: directory
+    mode: "0755"
+
+- name: Cria arquivo de credencial CIFS (igual PFX)
+  ansible.builtin.copy:
+    dest: "{{ _cred_file }}"
+    content: "{{ ansible_password }}"
+
+- name: Monta CIFS (usando ansible_user + arquivo de senha)
+  ansible.builtin.shell: |
+    mount "{{ mount_cifs | lower }}" "{{ mount_path }}" \
+      -o username={{ ansible_user }},password=`cat {{ _cred_file }}`,domain=agorasenior.corp,rw,vers=3.0
+  register: mount_out
+  failed_when: false
+  changed_when: false
+
+- name: Buscar pastas de certificados pelo prefixo
+  ansible.builtin.find:
+    paths: "{{ cifs_cert_root }}"
+    file_type: directory
+    recurse: false
+    patterns: "{{ certificate_prefix }}*"
+  register: cert_dirs
+
+- name: Falhar se não achar nenhuma pasta
+  ansible.builtin.fail:
+    msg: "Nenhuma pasta encontrada no CIFS com prefixo: {{ certificate_prefix }} (root={{ cifs_cert_root }})"
+  when: cert_dirs.files | length == 0
+
+- name: Inicializar lista de certificados
+  ansible.builtin.set_fact:
+    cert_inventory: []
+
+- name: Processar cada pasta de certificado
+  ansible.builtin.include_tasks: process_cert_dir.yml
+  loop: "{{ cert_dirs.files }}"
+  loop_control:
+    loop_var: cert_dir_item
+    label: "{{ cert_dir_item.path | basename }}"

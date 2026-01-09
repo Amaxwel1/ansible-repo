@@ -1,0 +1,105 @@
+---
+- name: Definir variáveis locais da pasta
+  ansible.builtin.set_fact:
+    cert_dir: "{{ cert_dir_item.path }}"
+    cert_name: "{{ cert_dir_item.path | basename }}"
+
+- name: Localiza .cer
+  ansible.builtin.find:
+    paths: "{{ cert_dir }}"
+    patterns: "*.cer"
+    recurse: false
+  register: cer_found
+
+- name: Localiza .key
+  ansible.builtin.find:
+    paths: "{{ cert_dir }}"
+    patterns: "*.key"
+    recurse: false
+  register: key_found
+
+- name: Localiza cadeia (arquivos CADEIA*.TXT)
+  ansible.builtin.find:
+    paths: "{{ cert_dir }}"
+    recurse: false
+    use_regex: true
+    patterns:
+      - '(?i)^cadeia.*\.txt$'
+  register: chain_found
+
+- name: Falhar se não houver exatamente 1 .cer
+  ansible.builtin.assert:
+    that:
+      - cer_found.files | length == 1
+    fail_msg: "Esperado exatamente 1 arquivo *.cer em {{ cert_dir }}"
+
+- name: Caminho do cer
+  ansible.builtin.set_fact:
+    _cer_path: "{{ cer_found.files[0].path }}"
+
+- name: Tenta ler CER como PEM
+  ansible.builtin.shell: "openssl x509 -in '{{ _cer_path }}' -noout -text"
+  register: cer_text_raw
+  failed_when: false
+  changed_when: false
+
+- name: Converte DER -> PEM se necessário
+  ansible.builtin.shell: |
+    openssl x509 -inform der -in "{{ _cer_path }}" -out "{{ _cer_path }}.pem"
+  when: cer_text_raw.rc != 0
+  register: der_conv
+  failed_when: der_conv.rc != 0
+  changed_when: true
+
+- name: Define caminho efetivo do PEM
+  ansible.builtin.set_fact:
+    cer_effective_path: >-
+      {{ (cer_text_raw.rc == 0) | ternary(_cer_path, _cer_path ~ '.pem') }}
+
+- name: Extrai SANs do CER
+  ansible.builtin.shell: |
+    openssl x509 -in "{{ cer_effective_path }}" -noout -text |
+    awk '/X509v3 Subject Alternative Name/ {getline; print}' |
+    sed 's/DNS://g; s/, /,/g'
+  register: cer_sans_raw
+  failed_when: false
+  changed_when: false
+
+- name: SANs normalizados
+  ansible.builtin.set_fact:
+    cer_sans_list: "{{ cer_sans_raw.stdout.split(',') | map('trim') | reject('equalto','') | list }}"
+
+- name: Mapear escopo do certificado pela pasta (heurística)
+  ansible.builtin.set_fact:
+    cert_scope: >-
+      {% set n = cert_name | lower %}
+      {% if 'prd' in n %}
+      producao
+      {% elif n.endswith('-dr') or 'dr' in n %}
+      dr
+      {% elif 'ti' in n %}
+      ti
+      {% elif 'tu' in n %}
+      tu
+      {% elif 'th' in n %}
+      th
+      {% elif 'fix' in n %}
+      fix
+      {% else %}
+      all
+      {% endif %}
+
+- name: Registrar cert no inventário
+  ansible.builtin.set_fact:
+    cert_inventory: >-
+      {{
+        cert_inventory + [ {
+          'cert_name': cert_name,
+          'cert_dir': cert_dir,
+          'cer_path': cer_effective_path,
+          'key_path': (key_found.files[0].path if (key_found.files|length)==1 else ''),
+          'ca_chain_path': (chain_found.files[0].path if (chain_found.files|length)>0 else ''),
+          'sans': cer_sans_list,
+          'scope': cert_scope
+        } ]
+      }}

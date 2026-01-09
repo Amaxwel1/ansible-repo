@@ -1,0 +1,59 @@
+---
+- name: Inicializar melhor match da rota
+  ansible.builtin.set_fact:
+    _best:
+      found: false
+      san_len: 0
+      cert_name: ""
+      san: ""
+      regex: ""
+      cer_path: ""
+      key_path: ""
+      ca_chain_path: ""
+      scope: ""
+
+- name: Avaliar candidatos
+  ansible.builtin.set_fact:
+    _best: >-
+      {{
+        (_best.san_len | int < cand.san_len | int)
+        | ternary(
+            {
+              "found": true,
+              "san_len": cand.san_len,
+              "cert_name": cand.cert_name,
+              "san": cand.san,
+              "regex": cand.regex,
+              "cer_path": cand.cer_path,
+              "key_path": cand.key_path,
+              "ca_chain_path": cand.ca_chain_path | default(''),
+              "scope": cand.scope
+            },
+            _best
+          )
+      }}
+  loop: "{{ cert_patterns_eff }}"
+  loop_control:
+    loop_var: cand
+  when: r.host is match(cand.regex)
+
+- name: Registrar resultado
+  ansible.builtin.set_fact:
+    route_matches: "{{ route_matches + [ _rm ] }}"
+  vars:
+    _rm:
+      cluster: "{{ r.cluster }}"
+      namespace: "{{ r.namespace }}"
+      name: "{{ r.name }}"
+      host: "{{ r.host }}"
+      current_termination: "{{ r.termination }}"
+      current_insecure: "{{ r.insecure }}"
+      matched: "{{ _best.found }}"
+      matched_cert: "{{ _best.cert_name }}"
+      matched_san: "{{ _best.san }}"
+      desired_termination: "{{ route_termination }}"
+      desired_insecure: "{{ route_insecure_policy }}"
+      cer_path: "{{ _best.cer_path }}"
+      key_path: "{{ _best.key_path }}"
+      ca_chain_path: "{{ _best.ca_chain_path | default('') }}"
+      scope: "{{ _best.scope }}"

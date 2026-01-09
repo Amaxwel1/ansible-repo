@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <title>Relatório - Certificados x Routes</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      font-size: 14px;
+    }
+
+    h1 {
+      color: #1f2937;
+      font-size: 22px;
+      margin-bottom: 10px;
+    }
+
+    h2 {
+      color: #1f2937;
+      font-size: 18px;
+      margin-top: 24px;
+      margin-bottom: 10px;
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-bottom: 18px;
+    }
+
+    th, td {
+      border: 1px solid #a2a2a2;
+      padding: 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #e0e0e0;
+    }
+
+    .ok {
+      background: #d1fae5;
+    }
+
+    .warn {
+      background: #fef3c7;
+    }
+
+    .bad {
+      background: #fee2e2;
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+        "Liberation Mono", "Courier New", monospace;
+    }
+
+    /* Bloco de resumo do topo (clusters, ação, etc.) */
+    .summary {
+      font-size: 15px;
+      line-height: 1.5;
+      color: #111827;
+      margin-bottom: 20px;
+    }
+
+    .summary b {
+      font-size: 15px;
+    }
+
+    .small {
+      font-size: 12px;
+      color: #374151;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Relatório - Certificados x Routes</h1>
+
+<div class="summary">
+  <div>
+    <b>Motivo:</b>
+    <span class="mono">{{ motivo }}</span>
+  </div>
+  <div>
+    <b>Cluster(s) alvo:</b>
+    <span class="mono">{{ clusters_needed | join(', ') }}</span>
+  </div>
+  <div>
+    <b>Prefixo certificado:</b>
+    <span class="mono">{{ certificate_prefix }}</span>
+  </div>
+  <div>
+    <b>Ação:</b>
+    <span class="mono">{{ route_action }}</span>
+  </div>
+  <div>
+    <b>Desejado:</b>
+    termination=<span class="mono">{{ route_termination }}</span> |
+    insecurePolicy=<span class="mono">{{ route_insecure_policy }}</span>
+  </div>
+  <div>
+    <b>Domínio filtro:</b>
+    <span class="mono">
+      {{ default_domain_filter if default_domain_filter|trim else '(sem filtro)' }}
+    </span>
+  </div>
+</div>
+
+<h2>Certificados encontrados no CIFS</h2>
+<table>
+  <tr>
+    <th>Cert</th>
+    <th>Scope</th>
+    <th>Arquivo</th>
+    <th>SANs</th>
+  </tr>
+  {% for c in cert_inventory %}
+  <tr>
+    <td class="mono">{{ c.cert_name }}</td>
+    <td class="mono">{{ c.scope }}</td>
+    <td class="mono">{{ c.cer_report_path | default(c.cer_path) }}</td>
+    <td class="mono">
+      {% if c.sans|length == 0 %}
+        (sem SANs)
+      {% else %}
+        {{ c.sans | join('<br/>') | safe }}
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h2>Rotas analisadas</h2>
+
+{% set matched_routes = (route_matches | selectattr('matched', 'equalto', true) | list) %}
+
+{% if matched_routes | length == 0 %}
+  <p><b>Nenhuma rota encontrada com MATCH</b> para os certificados do prefixo informado.</p>
+{% else %}
+<table>
+  <tr>
+    <th>Cluster</th>
+    <th>Namespace/Route</th>
+    <th>Host</th>
+    <th>Cert match</th>
+    <th>Atual</th>
+    <th>Desejado</th>
+    <th>Patch</th>
+  </tr>
+
+  {% for r in matched_routes %}
+    <tr class="ok">
+      <td class="mono">{{ r.cluster }}</td>
+      <td class="mono">{{ r.namespace }}/{{ r.name }}</td>
+      <td class="mono">{{ r.host }}</td>
+
+      <td class="mono">
+        {{ r.matched_cert }}<br/>
+        <span class="small">SAN: {{ r.matched_san }}</span>
+      </td>
+
+      <td class="mono">
+        termination={{ r.current_termination if r.current_termination|trim else '(vazio)' }}<br/>
+        insecure={{ r.current_insecure if r.current_insecure|trim else '(vazio)' }}
+      </td>
+
+      <td class="mono">
+        termination={{ r.desired_termination }}<br/>
+        insecure={{ r.desired_insecure }}
+      </td>
+
+      <td>
+        {% if route_action == 'patch' %}
+          {{ 'ALTERADO' if (r.patched|default(false)) else 'SEM MUDANÇA' }}
+        {% else %}
+          -
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+</body>
+</html>

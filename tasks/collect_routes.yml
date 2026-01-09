@@ -1,0 +1,70 @@
+---
+- name: Inicializar inventário de rotas
+  ansible.builtin.set_fact:
+    routes_norm: []
+    routes_with_env: []
+
+- name: Normalizar envs selecionados (tutihofix)
+  ansible.builtin.set_fact:
+    _envs_selected: >-
+      {{
+        (
+          ocp_cert_tutihofix_envs
+          if (ocp_cert_tutihofix_envs is sequence and ocp_cert_tutihofix_envs is not string)
+          else ([ocp_cert_tutihofix_envs] if (ocp_cert_tutihofix_envs | default('') | string | trim) != '' else [])
+        )
+        | map('string') | map('trim') | map('lower') | list
+      }}
+
+- name: Montar regex de env (para grep) quando houver seleção
+  ansible.builtin.set_fact:
+    _env_grep_regex: "{{ '[.]apps[.](' ~ (_envs_selected | join('|')) ~ ')[.]' }}"
+  when: _envs_selected | length > 0
+
+- name: Listar Routes em cada cluster do plano (via oc, filtrando por domínio/env no CLI)
+  ansible.builtin.shell: "set -o pipefail; oc --server={{ ocp_clusters[cluster_name] | quote }} --token={{ auth_tokens[cluster_name] | quote }} --insecure-skip-tls-verify=true --request-timeout=60s get route -A -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,HOST:.spec.host,TERMINATION:.spec.tls.termination,INSECURE:.spec.tls.insecureEdgeTerminationPolicy --no-headers{% set _dom = (default_domain_filter | default('') | trim | regex_replace('^\\.', '')) %}{% if _dom | length > 0 %} | grep -F {{ _dom | quote }}{% endif %}{% if _envs_selected is defined and _envs_selected | length > 0 %} | grep -E {{ _env_grep_regex | quote }}{% endif %} || true"
+  args:
+    executable: /bin/bash
+  loop: "{{ clusters_needed | default([]) }}"
+  loop_control:
+    loop_var: cluster_name
+  delegate_to: localhost
+  become: false
+  register: oc_routes_raw
+  changed_when: false
+
+- name: Montar lista normalizada de rotas (cluster/ns/name/host/tls)
+  ansible.builtin.set_fact:
+    routes_norm: "{{ routes_norm + _cluster_routes }}"
+  vars:
+    oc_item_cluster: >-
+      {{
+        (
+          oc_item.get(oc_item.get('ansible_loop_var', 'item'))
+          | default(oc_item.get('item'), true)
+          | default('UNKNOWN_CLUSTER', true)
+        ) | string
+      }}
+    _cluster_routes: >-
+      {%- set out = [] -%}
+      {%- for line in oc_item.stdout_lines | default([]) -%}
+        {%- set line_trim = line | trim -%}
+        {%- if line_trim != '' -%}
+          {%- set parts = line_trim.split() -%}
+          {%- if parts | length >= 3 -%}
+            {%- set _ = out.append({
+              'cluster': oc_item_cluster,
+              'namespace': parts[0],
+              'name': parts[1],
+              'host': parts[2],
+              'termination': (parts[3] if parts | length > 3 else ''),
+              'insecure': (parts[4] if parts | length > 4 else ''),
+              'has_tls': (parts | length > 3 and (parts[3] not in ['<none>', '']))
+            }) -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  loop: "{{ oc_routes_raw.results | default([]) }}"
+  loop_control:
+    loop_var: oc_item

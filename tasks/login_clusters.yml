@@ -1,0 +1,17 @@
+---
+- name: Login em cada cluster necessário
+  redhat.openshift.openshift_auth:
+    host: "{{ ocp_clusters[item] }}"
+    username: "{{ ocp_user }}"
+    password: "{{ ocp_password }}"
+  loop: "{{ clusters_needed }}"
+  delegate_to: localhost
+  become: false
+  register: auth_results
+
+- name: Guardar tokens por cluster
+  ansible.builtin.set_fact:
+    auth_tokens: "{{ (auth_tokens | default({})) | combine({ result.item: result.k8s_auth.api_key }) }}"
+  loop: "{{ auth_results.results }}"
+  loop_control:
+    loop_var: result
