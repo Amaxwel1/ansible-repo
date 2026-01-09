@@ -1,0 +1,53 @@
+---
+ocp_cluster: "" # producao | tutihofix
+ocp_cert_tutihofix_envs: [] # quando ocp_cluster=tutihofix: [tu, ti, th, fix]
+
+# Usuário / senha para acessar o OpenShift (API)
+ocp_user: ""
+ocp_password: ""
+
+motivo: "Teste Automacao"
+
+# Certificados no CIFS
+certificate_prefix: "" # prefixo das pastas de certificado no CIFS
+mount_cifs: "" # ex: //SERVIDOR/Share
+mount_path: "/opt/ansiblefiles/files/cert-route-validate"
+cifs_cert_root: "{{ mount_path }}"
+
+# Pasta temporária para credencial CIFS (igual padrão do PFX)
+certificate_temp_folder: "/opt/ansiblefiles/files"
+_cred_file: "{{ certificate_temp_folder }}/ansible-autentication-cifs-{{ awx_job_id | default('local') }}"
+
+# Filtro de domínio para rotas
+default_domain_filter: "ocp.lab" # se vazio, não filtra por domínio
+validate_pair_cluster: true # se producao/dr, inclui par no plano
+
+# Ação nas rotas
+route_action: "validate" # validate | patch
+route_termination: "edge" # edge | passthrough | reencrypt
+route_insecure_policy: "Allow" # Allow | Redirect | None
+
+# TLS: aplicar cert/key/CA na rota (somente se route_action=patch)
+tls_apply_cert: true # true -> acrescenta certificate/key/CA na rota
+tls_ca_pem_path: "" # fallback global se pasta não tiver CADEIA.TXT
+tls_destination_ca_pem_path: "" # reencrypt: CA destino (se vazio, usa mesma CA)
+
+# Clusters OpenShift
+ocp_clusters:
+  producao: "https://api.crc.testing:6443"
+  dr: "https://api.cluster-wzxlv.dynamic.redhatworkshops.io:6443"
+  tuti: "https://api.cluster-j6t7t.dynamic.redhatworkshops.io:6443"
+  hofix: "https://api.cluster-j6t7t.dynamic.redhatworkshops.io:6443"
+  tutihofix: ficticio
+
+suffix_cluster_map:
+  tu: tuti
+  ti: tuti
+  th: hofix
+  fix: hofix
+
+send_mail_cifs: producao
+send_mail_cifs_path: "/Ansible/mail_attachments/"
+send_mail_cifs_address:
+  producao: "//192.168.0.115/certs"
+  tutihofix: "//AG-AH-VV-FS-001.agorasenior.corp/Apps"
