@@ -71,6 +71,7 @@
 
         {%- set _ = out.append({
           'cluster': r.cluster,
+          'env': (r.env | default('')),
           'namespace': r.namespace,
           'name': r.name,
           'host': r.host,
@@ -95,7 +96,6 @@
     routes_matched_count: "{{ (route_matches | default([])) | selectattr('matched', 'equalto', true) | list | length }}"
     routes_unmatched_count: "{{ (route_matches | default([])) | selectattr('matched', 'equalto', false) | list | length }}"
 
-# ---- CACHE (corrigido: loop no include_tasks, não em block) ----
 - name: Inicializar cache de blobs (cert_blobs) e mapa de patch
   ansible.builtin.set_fact:
     cert_blobs: {}
