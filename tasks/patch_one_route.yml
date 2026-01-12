@@ -100,6 +100,7 @@
       metadata:
         name: "{{ r.name }}"
         namespace: "{{ r.namespace }}"
+        labels: "{{ (route_labels | default({})) if (route_labels is defined and (route_labels | length > 0)) else omit }}"
       spec:
         tls: "{{ tls_patch }}"
   register: patch_out
