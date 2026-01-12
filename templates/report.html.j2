@@ -56,7 +56,6 @@
         "Liberation Mono", "Courier New", monospace;
     }
 
-    /* Bloco de resumo do topo (clusters, ação, etc.) */
     .summary {
       font-size: 15px;
       line-height: 1.5;
@@ -138,35 +137,16 @@
 
 <h2>Rotas analisadas</h2>
 
-{% set matched_routes = (route_matches | selectattr('matched', 'equalto', true) | list) %}
-
-{% if selected_suffixes is defined and (selected_suffixes | length > 0) %}
-  {% for cl in clusters_needed %}
-    {% for env in selected_suffixes %}
-
-      {# rotas existentes no cluster/env (após filtros) #}
-      {% set routes_env = (routes_norm
-        | selectattr('cluster', 'equalto', cl)
-        | selectattr('env', 'defined')
-        | selectattr('env', 'equalto', env)
-        | list) %}
-
-      {# matches existentes no cluster/env #}
-      {% set matches_env = (matched_routes
-        | selectattr('cluster', 'equalto', cl)
-        | selectattr('env', 'defined')
-        | selectattr('env', 'equalto', env)
-        | list) %}
-
-      {% if routes_env | length == 0 %}
-        <p><b>Cluster {{ cl }} / env {{ env }}:</b> não existe rota nesse ambiente/cluster (após filtros).</p>
-      {% elif matches_env | length == 0 %}
-        <p><b>Cluster {{ cl }} / env {{ env }}:</b> existem rotas, mas nenhuma rota compatível (MATCH) para o(s) certificado(s) do prefixo informado.</p>
-      {% endif %}
-
-    {% endfor %}
+{% if missing_envs is defined and (missing_envs | length > 0) %}
+  {% for m in missing_envs %}
+    {% set expected_host = 'troca-modelo-webapp.apps.' ~ m.env ~ '.' ~ default_domain_filter %}
+    <p class="warn" style="padding:10px;border:1px solid #a2a2a2;">
+      <b>Não existe rota</b> <span class="mono">{{ expected_host }}</span> no cluster <span class="mono">{{ m.cluster }}</span> no ambiente <span class="mono">{{ m.env }}</span>.
+    </p>
   {% endfor %}
 {% endif %}
+
+{% set matched_routes = (route_matches | selectattr('matched', 'equalto', true) | list) %}
 
 {% if matched_routes | length == 0 %}
   <p><b>Nenhuma rota encontrada com MATCH</b> para os certificados do prefixo informado.</p>
