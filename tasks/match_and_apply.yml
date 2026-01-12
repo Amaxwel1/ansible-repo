@@ -114,6 +114,23 @@
     - route_action == 'patch'
     - tls_apply_cert | bool
 
+- name: Normalizar labels vindas do survey (CSV -> dict)
+  ansible.builtin.set_fact:
+    route_labels: >-
+      {%- set d = {} -%}
+      {%- set raw = (route_labels_csv | default('') | string) -%}
+      {%- for pair in raw.split(',') -%}
+        {%- set p = pair | trim -%}
+        {%- if p != '' and ('=' in p) -%}
+          {%- set k = (p.split('=', 1)[0] | trim) -%}
+          {%- set v = (p.split('=', 1)[1] | trim) -%}
+          {%- if k != '' and v != '' -%}
+            {%- set _ = d.update({k: v}) -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ d }}
+
 - name: Executar patch das rotas (se route_action == patch)
   ansible.builtin.include_tasks: patch_route.yml
   when: route_action == 'patch'
@@ -128,6 +145,36 @@
       {%- endfor -%}
       {{ out }}
   when: route_action == 'patch'
+
+- name: Build allowed env map by cluster
+  set_fact:
+    allowed_envs_by_cluster: "{{ allowed_envs_by_cluster | default({}) | combine({ item: allow_list }) }}"
+  vars:
+    lcl: "{{ item | lower }}"
+    allow_list: >-
+      {{
+        (('hofix' in lcl) | ternary(['ho','fix','th'],
+          (('tuti' in lcl) | ternary(['tu','ti','th'], (selected_suffixes | default([]))))
+        ))
+      }}
+  loop: "{{ clusters_needed | default([]) }}"
+
+- name: Init missing envs
+  set_fact:
+    missing_envs: []
+
+- name: Compute missing envs per cluster (no MATCH for certificate)
+  set_fact:
+    missing_envs: "{{ (missing_envs | default([])) + [ {'cluster': pair.0, 'env': pair.1} ] }}"
+  vars:
+    sel_envs: "{{ selected_suffixes | default([]) }}"
+  loop: "{{ (clusters_needed | default([])) | product(sel_envs) | list }}"
+  loop_control:
+    loop_var: pair
+  when:
+    - (selected_suffixes | default([]) | length) > 0
+    - pair.1 in (allowed_envs_by_cluster[pair.0] | default(selected_suffixes | default([])))
+    - (route_matches | selectattr('matched', 'equalto', true) | selectattr('cluster', 'equalto', pair.0) | selectattr('env', 'equalto', pair.1) | list | length) == 0
 
 - name: Montar HTML (inline)
   ansible.builtin.set_fact:
