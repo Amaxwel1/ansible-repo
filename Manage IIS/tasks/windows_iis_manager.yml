@@ -1,0 +1,436 @@
+---
+- name: Inicializar lista de linhas do relatório
+  ansible.builtin.set_fact:
+    _iis_rows: []
+
+- name: Normalizar flags e operações no host Windows (evita skip e loop)
+  ansible.builtin.set_fact:
+    iis_manage_pools_eff: >-
+      {{
+        (iis_manage_pools | default(true))
+        if ((iis_manage_pools | default(true)) is boolean)
+        else ((iis_manage_pools | string | lower | trim) in ['sim','s','yes','y','true','1','on'])
+      }}
+    iis_manage_service_eff: >-
+      {{
+        (iis_manage_service | default(false))
+        if ((iis_manage_service | default(false)) is boolean)
+        else ((iis_manage_service | string | lower | trim) in ['sim','s','yes','y','true','1','on'])
+      }}
+    iis_pool_operation_eff: "{{ (iis_pool_operation | default('start')) | string | lower | trim }}"
+    iis_service_operation_eff: "{{ (iis_service_operation | default('restart')) | string | lower | trim }}"
+    iis_pool_max_retries_eff: "{{ (iis_pool_max_retries | default(3)) | int }}"
+    iis_service_max_retries_eff: "{{ (iis_service_max_retries | default(3)) | int }}"
+    iis_pools_norm_eff: "{{ iis_pools_norm | default([]) }}"
+    iis_services_norm_eff: "{{ iis_services_norm | default(['W3SVC']) }}"
+
+- name: Verificar se módulo WebAdministration/IIS está disponível
+  when: iis_manage_pools_eff
+  ansible.windows.win_powershell:
+    script: |
+      if (-not (Get-Module -ListAvailable -Name WebAdministration)) {
+        Write-Output "MISSING_WEBADMIN"
+      } else {
+        Write-Output "OK"
+      }
+  register: webadmin_check
+  changed_when: false
+  failed_when: false
+
+- name: Registrar erro e encerrar host se IIS/WebAdministration não estiver instalado
+  when:
+    - iis_manage_pools_eff
+    - webadmin_check is defined
+    - "'MISSING_WEBADMIN' in (webadmin_check.output | default([]) | join(''))"
+  block:
+    - ansible.builtin.set_fact:
+        iis_host_report:
+          host: "{{ inventory_hostname }}"
+          os: "windows"
+          rows: []
+          error: "Módulo WebAdministration/IIS não encontrado neste host."
+    - ansible.builtin.meta: end_host
+
+- name: Coletar Application Pools do IIS (estado atual)
+  when: iis_manage_pools_eff
+  ansible.windows.win_powershell:
+    script: |
+      Import-Module WebAdministration
+      $pools = Get-IISAppPool | Select-Object Name, @{Name='State';Expression={$_.State.ToString()}}
+      $pools | ConvertTo-Json -Compress
+  register: iis_pools_raw
+  changed_when: false
+  failed_when: false
+
+- name: Converter JSON de pools em objeto
+  when: iis_manage_pools_eff
+  ansible.builtin.set_fact:
+    _iis_pools_parsed: >-
+      {{
+        (iis_pools_raw.output | default([]) | join('') | trim | default('[]'))
+        | from_json
+      }}
+
+- name: Normalizar lista de pools (sempre lista)
+  when: iis_manage_pools_eff
+  ansible.builtin.set_fact:
+    _iis_pools_all: "{{ [_iis_pools_parsed] if _iis_pools_parsed is mapping else (_iis_pools_parsed | default([])) }}"
+
+- name: "Criar dicionário { pool: state } (estado inicial)"
+  when: iis_manage_pools_eff
+  ansible.builtin.set_fact:
+    iis_pools_states_initial: >-
+      {%- set out = {} -%}
+      {%- for p in _iis_pools_all -%}
+        {%- set _ = out.update({ p.Name: (p.State | string) }) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Falhar se não conseguiu listar pools (evita “rodar em vazio”)
+  ansible.builtin.fail:
+    msg: "Não foi possível listar Application Pools no host. Verifique permissões do WinRM e IIS."
+  vars:
+    _len: "{{ iis_pools_states_initial | default({}) | length }}"
+  when:
+    - iis_manage_pools_eff
+    - (_len | int) == 0
+
+- name: Determinar pools alvo (todos ou apenas os informados)
+  when: iis_manage_pools_eff
+  ansible.builtin.set_fact:
+    _iis_pools_effective: >-
+      {%- set all = iis_pools_states_initial.keys() | list -%}
+      {%- if (iis_pools_norm_eff | length) > 0 -%}
+        {{ iis_pools_norm_eff | map('string') | list | intersect(all) }}
+      {%- else -%}
+        {{ all }}
+      {%- endif -%}
+    _iis_pools_missing_requested: >-
+      {%- set all = iis_pools_states_initial.keys() | list -%}
+      {%- if (iis_pools_norm_eff | length) > 0 -%}
+        {{ iis_pools_norm_eff | map('string') | list | difference(all) }}
+      {%- else -%}
+        {{ [] }}
+      {%- endif -%}
+
+- name: Determinar pools que precisam de ação
+  when: iis_manage_pools_eff
+  ansible.builtin.set_fact:
+    _iis_pools_needing_action: >-
+      {%- set op = (iis_pool_operation_eff) -%}
+      {%- set out = [] -%}
+      {%- for name, st in iis_pools_states_initial.items() -%}
+        {%- if name in _iis_pools_effective -%}
+          {%- if op == 'restart' -%}
+            {%- set _ = out.append(name) -%}
+          {%- elif op == 'start' and (st | string) != 'Started' -%}
+            {%- set _ = out.append(name) -%}
+          {%- elif op == 'stop' and (st | string) != 'Stopped' -%}
+            {%- set _ = out.append(name) -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Aplicar operação nos Application Pools necessários
+  when:
+    - iis_manage_pools_eff
+    - (_iis_pools_needing_action | length) > 0
+  ansible.windows.win_powershell:
+    script: |
+      Import-Module WebAdministration
+      $Name = "{{ item }}"
+      $Operation = "{{ iis_pool_operation_eff }}"
+      $Max = {{ iis_pool_max_retries_eff }}
+
+      function Get-PoolState([string]$n) {
+        $p = Get-IISAppPool -Name $n -ErrorAction SilentlyContinue
+        if (-not $p) { return "MISSING" }
+        return $p.State.ToString()
+      }
+
+      $initial = Get-PoolState $Name
+      if ($initial -eq "MISSING") {
+        Write-Output ("MISSING: {0}" -f $Name)
+        exit 2
+      }
+
+      $success = $false
+      $st = $initial
+      $lastErr = ""
+
+      for ($i = 1; $i -le $Max; $i++) {
+
+        try {
+          if ($Operation -eq "restart") {
+            $cur = Get-PoolState $Name
+            if ($cur -ne "Stopped") {
+              Stop-WebAppPool -Name $Name -ErrorAction Stop | Out-Null
+              Start-Sleep -Seconds 2
+            }
+            Start-WebAppPool -Name $Name -ErrorAction Stop | Out-Null
+
+          } elseif ($Operation -eq "stop") {
+            $cur = Get-PoolState $Name
+            if ($cur -ne "Stopped") {
+              Stop-WebAppPool -Name $Name -ErrorAction Stop | Out-Null
+            }
+
+          } else {
+            $cur = Get-PoolState $Name
+            if ($cur -ne "Started") {
+              Start-WebAppPool -Name $Name -ErrorAction Stop | Out-Null
+            }
+          }
+
+        } catch {
+          $lastErr = $_.Exception.Message
+        }
+
+        Start-Sleep -Seconds 2
+        $st = Get-PoolState $Name
+
+        if (($Operation -in @("start","restart")) -and ($st -eq "Started")) { $success = $true; break }
+        if (($Operation -eq "stop") -and ($st -eq "Stopped")) { $success = $true; break }
+      }
+
+      if (-not $success) {
+        $msg = ("FAILED: {0} initial={1} final={2}" -f $Name, $initial, $st)
+        if ($lastErr) { $msg = $msg + " err=" + $lastErr }
+        Write-Output $msg
+        exit 1
+      } else {
+        Write-Output ("OK: {0} initial={1} final={2}" -f $Name, $initial, $st)
+      }
+  register: iis_pools_actions
+  changed_when: false
+  failed_when: false
+  loop: "{{ _iis_pools_needing_action }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Coletar Application Pools do IIS (estado final)
+  when: iis_manage_pools_eff
+  ansible.windows.win_powershell:
+    script: |
+      Import-Module WebAdministration
+      $pools = Get-IISAppPool | Select-Object Name, @{Name='State';Expression={$_.State.ToString()}}
+      $pools | ConvertTo-Json -Compress
+  register: iis_pools_raw_final
+  changed_when: false
+  failed_when: false
+
+- name: Parse JSON dos pools (estado final)
+  when: iis_manage_pools_eff
+  ansible.builtin.set_fact:
+    _iis_pools_parsed_final: >-
+      {{
+        (iis_pools_raw_final.output | default([]) | join('') | trim | default('[]'))
+        | from_json
+      }}
+
+- name: Normalizar lista final de pools (sempre lista)
+  when: iis_manage_pools_eff
+  ansible.builtin.set_fact:
+    _iis_pools_all_final: "{{ [_iis_pools_parsed_final] if _iis_pools_parsed_final is mapping else (_iis_pools_parsed_final | default([])) }}"
+
+- name: "Criar dicionário { pool: state } (estado final)"
+  when: iis_manage_pools_eff
+  ansible.builtin.set_fact:
+    iis_pools_states_final: >-
+      {%- set out = {} -%}
+      {%- for p in (_iis_pools_all_final | default([])) -%}
+        {%- set _ = out.update({ p.Name: (p.State | string) }) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Construir linhas do relatório (App Pools)
+  when: iis_manage_pools_eff
+  ansible.builtin.set_fact:
+    _iis_rows: >-
+      {%- set out = (_iis_rows | default([]) | list) -%}
+      {%- set op = iis_pool_operation_eff -%}
+
+      {%- for name in (_iis_pools_effective | default([])) -%}
+        {%- set initial = iis_pools_states_initial.get(name, 'Unknown') -%}
+        {%- set final = iis_pools_states_final.get(name, 'Unknown') -%}
+        {%- set acted = (name in (_iis_pools_needing_action | default([]))) -%}
+        {%- set action = (op if acted else 'none') -%}
+
+        {%- if op in ['start','restart'] -%}
+          {%- set ok = (final == 'Started') -%}
+        {%- elif op == 'stop' -%}
+          {%- set ok = (final == 'Stopped') -%}
+        {%- else -%}
+          {%- set ok = (final in ['Started','Stopped']) -%}
+        {%- endif -%}
+
+        {%- set msg = 'Sem ação – já estava no estado desejado' -%}
+        {%- for rr in (iis_pools_actions.results | default([])) -%}
+          {%- if rr.item == name -%}
+            {%- set msg = (rr.stdout | default(rr.stderr | default(''))) -%}
+          {%- endif -%}
+        {%- endfor -%}
+
+        {%- set _ = out.append({
+              'kind': 'pool',
+              'name': name,
+              'action': action,
+              'initial': initial,
+              'final': final,
+              'ok': ok,
+              'message': msg
+            }) -%}
+      {%- endfor -%}
+
+      {%- for name in (_iis_pools_missing_requested | default([])) -%}
+        {%- set _ = out.append({
+              'kind': 'pool',
+              'name': name,
+              'action': op,
+              'initial': 'absent',
+              'final': 'absent',
+              'ok': false,
+              'message': 'Application Pool não encontrado no host'
+            }) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Coletar informações de serviços (Windows)
+  when: iis_manage_service_eff
+  ansible.windows.win_service_info:
+  register: _iis_svc_info
+  changed_when: false
+  failed_when: false
+
+- name: Normalizar lista de serviços alvo (Windows)
+  when: iis_manage_service_eff
+  ansible.builtin.set_fact:
+    _iis_services_effective: "{{ iis_services_norm_eff | map('string') | list | unique }}"
+
+- name: Identificar serviços ausentes (Windows)
+  when: iis_manage_service_eff
+  ansible.builtin.set_fact:
+    _iis_services_missing: >-
+      {{
+        (_iis_services_effective | default([]))
+        | difference( (_iis_svc_info.services | default([])) | map(attribute='name') | list )
+      }}
+
+- name: Serviços presentes (Windows)
+  when: iis_manage_service_eff
+  ansible.builtin.set_fact:
+    _iis_services_present: >-
+      {{
+        (_iis_services_effective | default([]))
+        | intersect( (_iis_svc_info.services | default([])) | map(attribute='name') | list )
+      }}
+
+- name: Executar operação nos serviços do IIS com retries (Windows)
+  when:
+    - iis_manage_service_eff
+    - (_iis_services_present | length) > 0
+  ansible.windows.win_powershell:
+    script: |
+      $Name = "{{ item }}"
+      $Operation = "{{ iis_service_operation_eff }}"
+      $Max = {{ iis_service_max_retries_eff }}
+
+      $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+      if (-not $svc) {
+        Write-Output ("MISSING: {0}" -f $Name)
+        exit 2
+      }
+
+      $initial = $svc.Status.ToString()
+      $success = $false
+
+      for ($i = 1; $i -le $Max; $i++) {
+        if ($Operation -eq 'restart') {
+          Restart-Service -Name $Name -Force -ErrorAction SilentlyContinue
+        } elseif ($Operation -eq 'stop') {
+          Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
+        } else {
+          Start-Service -Name $Name -ErrorAction SilentlyContinue
+        }
+
+        Start-Sleep -Seconds 2
+        $st = (Get-Service -Name $Name -ErrorAction SilentlyContinue).Status.ToString()
+
+        if (($Operation -in @('start','restart')) -and ($st -eq 'Running')) { $success = $true; break }
+        if (($Operation -eq 'stop') -and ($st -eq 'Stopped')) { $success = $true; break }
+      }
+
+      if (-not $success) {
+        Write-Output ("FAILED: {0} initial={1} final={2}" -f $Name, $initial, $st)
+        exit 1
+      } else {
+        Write-Output ("OK: {0} initial={1} final={2}" -f $Name, $initial, $st)
+      }
+  loop: "{{ _iis_services_present }}"
+  loop_control:
+    label: "{{ item }}"
+  register: _iis_svc_actions
+  changed_when: false
+  failed_when: false
+
+- name: Construir linhas do relatório (Serviços IIS)
+  when: iis_manage_service_eff
+  ansible.builtin.set_fact:
+    _iis_rows: >-
+      {%- set out = (_iis_rows | default([]) | list) -%}
+      {%- set op = iis_service_operation_eff -%}
+
+      {%- for r in (_iis_svc_actions.results | default([])) -%}
+        {%- set msg = (
+              (r.output | default([]) | join('')) 
+              | default(r.host_out | default('')) 
+              | default(r.stdout | default('')) 
+              | default(r.stderr | default(''))
+            ) -%}
+
+        {%- set ok = (r.rc | default(0) == 0) -%}
+        {%- set name = r.item -%}
+
+        {%- set initial = 'unknown' -%}
+        {%- set final = 'unknown' -%}
+        {%- if 'initial=' in msg and 'final=' in msg -%}
+          {%- set rest = (msg.split('initial=')[1]) -%}
+          {%- set initial = (rest.split('final=')[0] | trim) -%}
+          {%- set final = (rest.split('final=')[1] | trim) -%}
+        {%- endif -%}
+
+        {%- set _ = out.append({
+              'kind': 'service',
+              'name': name,
+              'action': op,
+              'initial': initial,
+              'final': final,
+              'ok': ok,
+              'message': msg
+            }) -%}
+      {%- endfor -%}
+
+      {%- for s in (_iis_services_missing | default([])) -%}
+        {%- set _ = out.append({
+              'kind': 'service',
+              'name': s,
+              'action': op,
+              'initial': 'absent',
+              'final': 'absent',
+              'ok': false,
+              'message': 'Serviço não encontrado no host'
+            }) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Ajustar relatório final por host (Windows/IIS)
+  ansible.builtin.set_fact:
+    iis_host_report:
+      host: "{{ inventory_hostname }}"
+      os: "windows"
+      rows: "{{ _iis_rows | default([]) }}"
+      pools_operation: "{{ iis_pool_operation_eff }}"
+      services_operation: "{{ iis_service_operation_eff }}"
+      manage_pools: "{{ iis_manage_pools_eff }}"
+      manage_service: "{{ iis_manage_service_eff }}"

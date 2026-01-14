@@ -1,0 +1,101 @@
+---
+- name: Consolidar relatório geral de IIS
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Juntar relatórios de cada host
+      ansible.builtin.set_fact:
+        iis_reports: >-
+          {{
+            (groups.windows_targets | default([]))
+            | map('extract', hostvars, 'iis_host_report')
+            | select('defined')
+            | list
+          }}
+        unreachable_hosts: "{{ unreachable_hosts | default([]) }}"
+
+    - name: Separar relatórios com erro de execução
+      ansible.builtin.set_fact:
+        exec_error_reports: "{{ iis_reports | selectattr('error','defined') | list }}"
+        normal_reports: "{{ iis_reports | rejectattr('error','defined') | list }}"
+
+    - name: Calcular linhas NOK
+      ansible.builtin.set_fact:
+        bad_rows: >-
+          {{
+            normal_reports
+            | map(attribute='rows')
+            | flatten
+            | selectattr('ok','equalto',False)
+            | list
+          }}
+
+    - name: Calcular flag any_errors
+      ansible.builtin.set_fact:
+        any_errors: >-
+          {{
+            (unreachable_hosts | length > 0)
+            or (exec_error_reports | length > 0)
+            or (bad_rows | length > 0)
+          }}
+
+    - name: Montar HTML final
+      ansible.builtin.set_fact:
+        send_mail_body: |
+          {% set kind_map = {'pool':'Application Pool','service':'Serviço'} %}
+          <h2>Gerenciamento de IIS (Windows)</h2>
+          <p><b>Motivo:</b> {{ (motivo | default('N/D')) | e }}</p>
+
+          {% if unreachable_hosts and unreachable_hosts|length > 0 %}
+          <h3 style="color:#d9534f;">Hosts inalcançáveis</h3>
+          <ul>
+          {% for h in unreachable_hosts %}
+            <li>{{ h }}</li>
+          {% endfor %}
+          </ul>
+          {% endif %}
+
+          {% if exec_error_reports %}
+          <h3 style="color:#f0ad4e;">Hosts com erro de execução</h3>
+          <ul>
+          {% for rep in exec_error_reports %}
+            <li><b>{{ rep.host }}</b>: {{ rep.error }}</li>
+          {% endfor %}
+          </ul>
+          {% endif %}
+
+          {% if normal_reports %}
+            <h3 style="margin-top:18px;">Detalhes por host</h3>
+            <table style="border-collapse:collapse;font-family:Arial;font-size:12px;width:100%;">
+              <tr style="background:#f2f2f2;">
+                <th style="border:1px solid #ccc;padding:4px;text-align:left;">Servidor</th>
+                <th style="border:1px solid #ccc;padding:4px;text-align:left;">Tipo</th>
+                <th style="border:1px solid #ccc;padding:4px;text-align:left;">Item</th>
+                <th style="border:1px solid #ccc;padding:4px;text-align:left;">Ação</th>
+                <th style="border:1px solid #ccc;padding:4px;text-align:left;">Inicial</th>
+                <th style="border:1px solid #ccc;padding:4px;text-align:left;">Final</th>
+                <th style="border:1px solid #ccc;padding:4px;text-align:left;">Resultado</th>
+              </tr>
+              {% for rep in normal_reports %}
+                {% for r in (rep.rows | default([])) %}
+                <tr>
+                  <td style="border:1px solid #ccc;padding:4px;">{{ rep.host }}</td>
+                  <td style="border:1px solid #ccc;padding:4px;">{{ kind_map.get(r.kind, r.kind) }}</td>
+                  <td style="border:1px solid #ccc;padding:4px;">{{ r.name }}</td>
+                  <td style="border:1px solid #ccc;padding:4px;">{{ r.action }}</td>
+                  <td style="border:1px solid #ccc;padding:4px;">{{ r.initial }}</td>
+                  <td style="border:1px solid #ccc;padding:4px;">{{ r.final }}</td>
+                  <td style="border:1px solid #ccc;padding:4px;color:{{ 'green' if r.ok else 'red' }};">
+                    {{ 'OK' if r.ok else 'NOK' }}
+                  </td>
+                </tr>
+                {% endfor %}
+              {% endfor %}
+            </table>
+          {% endif %}
+
+    - name: Definir subject e stats (para job de envio de e-mail)
+      ansible.builtin.set_stats:
+        data:
+          send_mail_subject: "Ansible-Report - Job #{{ awx_job_id }} - {{ awx_job_template_name }} - IIS - {{ 'SUCESSO' if not any_errors else 'ALERTA' }}"
+          send_mail_body: "{{ send_mail_body }}"

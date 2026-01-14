@@ -1,0 +1,38 @@
+---
+- name: Detectar WinRM (Windows) na porta 5985
+  ansible.builtin.wait_for:
+    host: "{{ item }}"
+    port: 5985
+    timeout: 3
+    state: started
+  register: winrm_probe
+  failed_when: false
+  loop: "{{ target_hosts }}"
+
+- name: Montar lista de Windows alcançáveis (somente sucesso real)
+  ansible.builtin.set_fact:
+    windows_list: >-
+      {{
+        (winrm_probe.results | default([]))
+        | rejectattr('failed', 'equalto', true)
+        | map(attribute='item')
+        | reject('equalto', None)
+        | map('string')
+        | map('trim')
+        | reject('equalto', '')
+        | list
+      }}
+
+- name: Adicionar hosts Windows
+  ansible.builtin.add_host:
+    name: "{{ item }}"
+    groups: windows_targets
+    ansible_user: "{{ ansible_user }}"
+    ansible_password: "{{ ansible_password }}"
+    ansible_connection: winrm
+    ansible_winrm_transport: ntlm
+    ansible_port: 5985
+    ansible_winrm_server_cert_validation: ignore
+  loop: "{{ windows_list }}"
+  when: (windows_list | length) > 0
+  no_log: true

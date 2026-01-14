@@ -1,0 +1,25 @@
+---
+- name: Gerenciar IIS em hosts Windows
+  hosts: windows_targets
+  become_method: enable
+  gather_facts: false
+  vars:
+    iis_manage_pools: "{{ hostvars['localhost'].iis_manage_pools | default(true) }}"
+    iis_manage_service: "{{ hostvars['localhost'].iis_manage_service | default(false) }}"
+    iis_pools_norm: "{{ hostvars['localhost'].iis_pools_norm | default([]) }}"
+    iis_pool_operation: "{{ hostvars['localhost'].iis_pool_operation | default('start') }}"
+    iis_pool_max_retries: "{{ hostvars['localhost'].iis_pool_max_retries | default(3) }}"
+    iis_services_norm: "{{ hostvars['localhost'].iis_services_norm | default(['W3SVC']) }}"
+    iis_service_operation: "{{ hostvars['localhost'].iis_service_operation | default('restart') }}"
+    iis_service_max_retries: "{{ hostvars['localhost'].iis_service_max_retries | default(3) }}"
+  tasks:
+    - name: Captura apenas os fatos necessários
+      ansible.builtin.setup:
+        gather_subset:
+          - "!all"
+          - "!min"
+          - platform
+          - distribution
+
+    - name: Gerenciar IIS (pools/serviços)
+      ansible.builtin.include_tasks: tasks/windows_iis_manager.yml

@@ -1,0 +1,108 @@
+---
+- name: Gerenciamento de IIS (Windows)
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    target_hosts: >-
+      {{
+        (survey_hosts | default(''))
+        | regex_replace('\s*,\s*', ',')
+        | split(',')
+        | map('trim')
+        | reject('equalto','')
+        | list
+      }}
+
+  tasks:
+    - name: Validar entrada de hosts
+      ansible.builtin.assert:
+        that:
+          - target_hosts | length > 0
+        fail_msg: "Parâmetro 'survey_hosts' vazio. Informe um ou mais hosts (ex.: host1,host2)."
+
+    - name: Garantir defaults e normalizar entradas do Survey
+      ansible.builtin.set_fact:
+        motivo: "{{ motivo | default('N/D') }}"
+
+        iis_manage_pools: >-
+          {{
+            (
+              (iis_manage_pools | default(true))
+              if ((iis_manage_pools | default(true)) is boolean)
+              else (
+                {
+                  'sim': True, 's': True, 'yes': True, 'y': True, 'true': True, '1': True, 'on': True,
+                  'nao': False, 'não': False, 'n': False, 'no': False, 'false': False, '0': False, 'off': False,
+                  '': True
+                }.get((iis_manage_pools | default('') | string | trim | lower), True)
+              )
+            ) | bool
+          }}
+
+        iis_manage_service: >-
+          {{
+            (
+              (iis_manage_service | default(false))
+              if ((iis_manage_service | default(false)) is boolean)
+              else (
+                {
+                  'sim': True, 's': True, 'yes': True, 'y': True, 'true': True, '1': True, 'on': True,
+                  'nao': False, 'não': False, 'n': False, 'no': False, 'false': False, '0': False, 'off': False,
+                  '': False
+                }.get((iis_manage_service | default('') | string | trim | lower), False)
+              )
+            ) | bool
+          }}
+
+        iis_pool_operation: "{{ (iis_pool_operation | default('start')) | string | lower | trim }}"
+        iis_pool_max_retries: "{{ (iis_pool_max_retries | default(3)) | int }}"
+
+        iis_pools_survey_raw: "{{ iis_pools | default('') }}"
+
+        iis_services_raw: "{{ iis_services | default(iis_service_name | default([])) }}"
+        iis_service_operation: "{{ (iis_service_operation | default('restart')) | string | lower | trim }}"
+        iis_service_max_retries: "{{ (iis_service_max_retries | default(3)) | int }}"
+
+    - name: Normalizar pools do survey (vazio = todos)
+      ansible.builtin.set_fact:
+        iis_pools_norm: >-
+          {{
+            (iis_pools_survey_raw | string | trim | length > 0)
+            | ternary(
+                (iis_pools_survey_raw | string | split(',') | map('trim') | reject('equalto','') | list),
+                []
+              )
+          }}
+
+    - name: Normalizar lista de serviços do IIS (Survey)
+      ansible.builtin.set_fact:
+        iis_services_norm: >-
+          {%- set raw = iis_services_raw -%}
+          {{
+            (
+              raw
+              if (raw is sequence and raw is not string)
+              else (raw | default('') | regex_replace('\s*,\s*', ',') | split(','))
+            )
+            | map('trim')
+            | reject('equalto','')
+            | list
+          }}
+
+    - name: Definir defaults de serviços (se vazio)
+      ansible.builtin.set_fact:
+        iis_services_norm: "{{ ['W3SVC'] }}"
+      when:
+        - iis_manage_service | bool
+        - (iis_services_norm | length) == 0
+
+    - name: Construindo a lista de hosts (Windows)
+      ansible.builtin.include_tasks: tasks/create_dynamic_hosts_windows.yml
+
+    - name: Hosts inalcançáveis
+      ansible.builtin.set_fact:
+        unreachable_hosts: "{{ target_hosts | difference(windows_list | default([])) }}"
+
+- ansible.builtin.import_playbook: playbook_iis_windows.yml
+- ansible.builtin.import_playbook: playbook_create_report_email.yml
