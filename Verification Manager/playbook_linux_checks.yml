@@ -1,0 +1,491 @@
+- name: Verificações em Linux
+  hosts: linux_targets
+  gather_facts: false
+  become: true
+  vars_files:
+    - defaults/main.yml
+  vars:
+    checks: "{{ hostvars['localhost'].patch_check_by_host[inventory_hostname] | default({'services':[], 'ports':[], 'commands':[]}) }}"
+  tasks:
+    - block:
+        - name: Normalizar plano de serviços (Linux)
+          ansible.builtin.set_fact:
+            _svc_plan: "{{ checks.services | default([]) }}"
+
+        - name: Checar serviços (systemd is-active + existência)
+          when: (_svc_plan | length) > 0
+          ansible.builtin.shell: |
+            set -e
+            unit="{{ item.name }}"
+            case "$unit" in
+              *.service) ;;
+              *) unit="${unit}.service" ;;
+            esac
+
+            if ! systemctl list-unit-files "$unit" --no-legend 2>/dev/null | grep -q .; then
+              echo "absent"
+            else
+              state="$(systemctl is-active "$unit" 2>/dev/null || echo unknown)"
+              echo "$state"
+            fi
+          args:
+            executable: /bin/bash
+          register: svc_chk
+          changed_when: false
+          failed_when: false
+          loop: "{{ _svc_plan }}"
+
+        - name: Calcular serviços candidatos a restart (somente expected=running)
+          when: svc_chk is defined
+          ansible.builtin.set_fact:
+            _need_restart: >-
+              {%- set out = [] -%}
+              {%- for r in (svc_chk.results | default([])) -%}
+                {%- set exp = (r.item.expected | default('running') | string | lower) -%}
+                {%- set st  = (r.stdout | default('') | trim | lower) -%}
+                {%- set running = (st in ['active','running','started']) -%}
+                {%- set absent  = (st in ['absent']) -%}
+                {%- if exp == 'running' and (not running) and (not absent) -%}
+                  {%- set _ = out.append(r.item) -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {{ out }}
+
+        - name: Reiniciar serviços não-running (uma tentativa)
+          when: (_need_restart | default([])) | length > 0
+          ansible.builtin.shell: |
+            set -e
+            unit="{{ item.name }}"
+            case "$unit" in
+              *.service) ;;
+              *) unit="${unit}.service" ;;
+            esac
+            systemctl restart "$unit" 2>/dev/null || true
+            sleep 2
+            systemctl is-active "$unit" 2>/dev/null || echo unknown
+          args:
+            executable: /bin/bash
+          register: svc_retry
+          changed_when: false
+          failed_when: false
+          loop: "{{ _need_restart }}"
+
+        - name: Mapear resultados pós-restart
+          when: svc_retry is defined
+          ansible.builtin.set_fact:
+            _retry_map: >-
+              {%- set out = {} -%}
+              {%- for r in (svc_retry.results | default([])) -%}
+                {%- set _ = out.update({ (r.item.name|string) : (r.stdout|default('')|trim|lower) }) -%}
+              {%- endfor -%}
+              {{ out }}
+
+        - name: Resumo de serviços (respeitando expected running/stopped)
+          when: svc_chk is defined
+          ansible.builtin.set_fact:
+            _svc_rows: >-
+              {%- set out = [] -%}
+              {%- set retry = _retry_map | default({}) -%}
+              {%- for r in (svc_chk.results | default([])) -%}
+                {%- set name = r.item.name -%}
+                {%- set exp  = (r.item.expected | default('running') | string | lower) -%}
+                {%- set pre  = (r.stdout | default('unknown') | trim | lower) -%}
+
+                {%- set post = retry.get(name, None) -%}
+                {%- if post is not none -%}
+                  {%- set state_raw = (post | string | trim | lower) -%}
+                {%- else -%}
+                  {%- set state_raw = pre -%}
+                {%- endif -%}
+
+                {%- set is_running = (state_raw in ['active','running','started']) -%}
+                {%- set is_absent  = (state_raw in ['absent']) -%}
+
+                {%- if exp == 'stopped' -%}
+                  {%- set ok = (not is_running) and (not is_absent) -%}
+                {%- else -%}
+                  {%- set ok = is_running -%}
+                {%- endif -%}
+
+                {%- set _ = out.append({
+                      'name': name,
+                      'expected': exp,
+                      'state': state_raw,
+                      'ok': ok,
+                      'attempted_restart': (post is not none)
+                    }) -%}
+              {%- endfor -%}
+              {{ out }}
+
+        - name: Descobrir serviços com restart falho (Linux)
+          when: _svc_rows is defined
+          ansible.builtin.set_fact:
+            _svc_diag_plan: >-
+              {%- set out=[] -%}
+              {%- set gmap=hostvars['localhost']._groups_norm | default({}) -%}
+              {%- set host_groups=hostvars['localhost'].patch_group_membership[inventory_hostname] | default([]) -%}
+              {%- for s in (_svc_rows|default([])) -%}
+                {%- if s.attempted_restart|default(false) and not s.ok|default(false) -%}
+                  {%- set svc = s.name|string -%}
+                  {%- set logs=[] -%}
+                  {%- set grps=[] -%}
+                  {%- for g in host_groups -%}
+                    {%- set gconf = gmap.get(g, {}) -%}
+
+                    {# --- normaliza services do grupo: pode ser ["nginx"] ou [{name, expected}] --- #}
+                    {%- set lsvc_names = [] -%}
+                    {%- for it in (gconf.linux.services | default([])) -%}
+                      {%- if it is mapping -%}
+                        {%- set _ = lsvc_names.append(it.name | default(it.service | default('')) | string | trim) -%}
+                      {%- else -%}
+                        {%- set _ = lsvc_names.append(it | string | trim) -%}
+                      {%- endif -%}
+                    {%- endfor -%}
+                    {%- set lsvc_names = (lsvc_names | reject('equalto','') | list | unique) -%}
+
+                    {%- if svc in lsvc_names -%}
+                      {%- set _ = grps.append(g) -%}
+                      {%- for p in (gconf.linux.logs | default([])) -%}
+                        {%- if p and (p|string|trim) -%}
+                          {%- set _ = logs.append(p|string|trim) -%}
+                        {%- endif -%}
+                      {%- endfor -%}
+                    {%- endif -%}
+                  {%- endfor -%}
+                  {%- set _ = out.append({'service':svc, 'groups':(grps|unique|list), 'logs':(logs|unique|list)}) -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {{ out }}
+
+        - name: Garantir pasta de diagnósticos no controller (Linux)
+          when: (_svc_diag_plan | default([])) | length > 0
+          delegate_to: localhost
+          become: false
+          ansible.builtin.file:
+            path: "{{ (paths.tmpdir | default('/tmp/patch-verif')) ~ '/service-diag' }}"
+            state: directory
+            mode: "0755"
+
+        - name: Coletar diagnóstico (systemctl/journal + logs do grupo) (Linux)
+          when: (_svc_diag_plan | default([])) | length > 0
+          ansible.builtin.shell: |
+            set -o pipefail
+            svc="{{ item.service }}"
+            unit="$svc"
+            case "$unit" in
+              *.service) ;;
+              *) unit="${unit}.service" ;;
+            esac
+
+            echo "=================================================="
+            echo "Host: {{ inventory_hostname }}"
+            echo "Service: ${unit}"
+            echo "Groups: {{ (item.groups | default([])) | join(', ') }}"
+            echo "Date: $(date -Is 2>/dev/null || date)"
+            echo "=================================================="
+            echo
+            echo ">>> systemctl status ${unit} --no-pager"
+            systemctl status "${unit}" --no-pager 2>&1 || true
+            echo
+            echo ">>> journalctl -u ${unit} -n 200 --no-pager"
+            journalctl -u "${unit}" -n 200 --no-pager 2>&1 || true
+            echo
+
+            echo ">>> Group log files (tail -n 200)"
+            cat <<'EOFLOGS' > /tmp/_diag_logs_list.txt
+            {{ item.logs | default([]) | join('\n') }}
+            EOFLOGS
+
+            while IFS= read -r f; do
+              f="$(echo "$f" | xargs)"
+              [ -z "$f" ] && continue
+              echo
+              echo "----- FILE: $f -----"
+              if [ -f "$f" ]; then
+                tail -n 200 "$f" 2>&1 || true
+              else
+                echo "(não encontrado)"
+              fi
+            done < /tmp/_diag_logs_list.txt
+
+            rm -f /tmp/_diag_logs_list.txt || true
+          args:
+            executable: /bin/bash
+          register: _svc_diag_out
+          changed_when: false
+          failed_when: false
+          loop: "{{ _svc_diag_plan }}"
+          loop_control:
+            label: "{{ item.service }}"
+
+        - name: Definir tmpdir no host do CIFS (por job)
+          ansible.builtin.set_fact:
+            cifs_tmpdir: "/tmp/patch-verif-{{ awx_job_id | default('job') }}"
+          delegate_to: 192.168.0.247
+
+        - name: Garantir tmpdir no host do CIFS (writable)
+          ansible.builtin.file:
+            path: "{{ cifs_tmpdir }}/service-diag"
+            state: directory
+            mode: "0777"
+          delegate_to: 192.168.0.247
+          become: true
+
+        - name: Salvar diagnóstico em TXT (Linux) no host do CIFS
+          delegate_to: 192.168.0.247
+          become: true
+          ansible.builtin.copy:
+            dest: "{{ cifs_tmpdir }}/service-diag/svc_diag_{{ awx_job_id | default('job') }}_{{ inventory_hostname }}_{{ item.item.service | regex_replace('[^A-Za-z0-9_.-]','_') }}.txt"
+            content: "{{ item.stdout | default('') }}"
+          loop: "{{ _svc_diag_out.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item.service }}"
+          when:
+            - _svc_diag_out is defined
+            - (item.stdout | default('') | trim | length) > 0
+
+        - name: Registrar anexos do diagnóstico (Linux)
+          ansible.builtin.set_fact:
+            patch_diag_attachments: >-
+              {{
+                (patch_diag_attachments | default([])) +
+                [ cifs_tmpdir ~ '/service-diag' ~
+                  '/svc_diag_' ~ (awx_job_id | default('job')) ~ '_' ~ inventory_hostname ~ '_' ~
+                  (item.item.service | regex_replace('[^A-Za-z0-9_.-]','_')) ~ '.txt'
+                ]
+              }}
+          loop: "{{ _svc_diag_out.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item.service }}"
+          when:
+            - _svc_diag_out is defined
+            - (item.stdout | default('') | trim | length) > 0
+
+        - name: Checar portas localmente (listening)
+          when: (checks.ports | length) > 0
+          ansible.builtin.shell: |
+            set -o pipefail
+            SPEC="{{ item }}"
+            PORT="${SPEC%%/*}"
+            PROTO="${SPEC#*/}"
+            if [ "$PROTO" = "$SPEC" ]; then PROTO="tcp"; fi
+            if [ "$PROTO" = "udp" ]; then
+              ss -lunp | grep -E ":${PORT}\b" >/dev/null 2>&1
+            else
+              ss -lntp | grep -E ":${PORT}\b" >/dev/null 2>&1
+            fi
+          args:
+            executable: /bin/bash
+          register: listen_local
+          changed_when: false
+          failed_when: false
+          loop: "{{ checks.ports | map('string') | list }}"
+
+        - name: Resumo local-listen
+          when: listen_local is defined
+          ansible.builtin.set_fact:
+            _ports_local: "{{ (_ports_local | default([])) + [ { 'port': item.item, 'ok': ((item.rc | default(1)) == 0) } ] }}"
+          loop: "{{ listen_local.results | default([]) }}"
+
+        - name: Checar portas remotamente (controller -> host) [TCP]
+          when: (checks.ports | length) > 0
+          delegate_to: localhost
+          become: false
+          ansible.builtin.wait_for:
+            host: "{{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname) }}"
+            port: "{{ (item | string).split('/')[0] | int }}"
+            timeout: 3
+            state: started
+          register: listen_remote
+          failed_when: false
+          loop: "{{ checks.ports | map('string') | map('regex_replace', '/udp$', '') | list }}"
+
+        - name: Resumo remote [TCP]
+          when: listen_remote is defined
+          ansible.builtin.set_fact:
+            _ports_remote: "{{ (_ports_remote | default([])) + [ { 'port': item.item | string, 'ok': (not (item.failed | default(false))) } ] }}"
+          loop: "{{ listen_remote.results | default([]) }}"
+
+        - name: Coletar destinos telnet para este host (Linux)
+          ansible.builtin.set_fact:
+            _telnet_targets: "{{ hostvars['localhost'].patch_telnet_targets_by_host.get(inventory_hostname, []) }}"
+
+        - name: Testar conectividade telnet (TCP) no Linux (/dev/tcp)
+          when: (_telnet_targets | default([])) | length > 0
+          ansible.builtin.shell: |
+            set -o pipefail
+            SPEC="{{ item.target }}"
+            HOST="${SPEC%%:*}"
+            PORT="${SPEC#*:}"
+            if [ -z "$PORT" ] || [ "$PORT" = "$SPEC" ]; then PORT="80"; fi
+
+            timeout 5 bash -c "</dev/tcp/${HOST}/${PORT}" >/dev/null 2>&1
+          args:
+            executable: /bin/bash
+          register: telnet_results
+          changed_when: false
+          failed_when: false
+          loop: "{{ _telnet_targets }}"
+
+        - name: Resumo telnet (Linux)
+          when: telnet_results is defined
+          ansible.builtin.set_fact:
+            _telnet_rows: "{{ (_telnet_rows | default([])) + [ {
+              'group': item.item.group,
+              'target': item.item.target,
+              'dest': (item.item.target.split(':')[0]),
+              'port': ((item.item.target.split(':')[1]) if (':' in item.item.target) else '80'),
+              'ok': ((item.rc | default(1)) == 0),
+              'rc': (item.rc | default(1))
+              } ] }}"
+          loop: "{{ telnet_results.results | default([]) }}"
+
+        - name: Executar comandos
+          when: (checks.commands | length) > 0
+          ansible.builtin.shell: "{{ item }}"
+          args: { executable: /bin/bash }
+          register: cmd_results
+          changed_when: false
+          failed_when: false
+          loop: "{{ checks.commands }}"
+
+        - name: Resumo comandos
+          when: cmd_results is defined
+          ansible.builtin.set_fact:
+            _cmd_rows: "{{ (_cmd_rows | default([])) + [ { 'cmd': item.item, 'rc': item.rc | default(1), 'stdout': item.stdout | default(''), 'stderr': item.stderr | default('') } ] }}"
+          loop: "{{ cmd_results.results | default([]) }}"
+
+        - name: Coletar queries de banco para este host (Linux)
+          ansible.builtin.set_fact:
+            _db_queries: "{{ hostvars['localhost'].patch_db_queries_by_host.get(inventory_hostname, []) }}"
+
+        - name: Executar queries de banco via db_profile (Linux)
+          when: (_db_queries | default([])) | length > 0
+          vars:
+            _profile: "{{ item.profile | default('') }}"
+            _dbp: >-
+              {{
+                (hostvars['localhost'].cm.patch_checks.db_profiles | default({}))
+                .get(_profile, {})
+              }}
+          ansible.builtin.shell: |
+            set -e
+            group="{{ item.group | lower }}"
+            profile="{{ _profile }}"
+            name="{{ item.name | default('') }}"
+            sql="{{ item.sql }}"
+
+            if [ -z "$profile" ]; then
+              echo "Grupo '$group' tem queries mas não definiu db_profile."
+              exit 2
+            fi
+
+            engine="{{ _dbp.engine | default('') }}"
+            host="{{ _dbp.host | default('localhost') }}"
+            port="{{ _dbp.port | default('') }}"
+            user="{{ _dbp.user | default('') }}"
+            pass="{{ _dbp.password | default('') }}"
+            db="{{ _dbp.database | default('') }}"
+
+            if [ -z "$engine" ] || [ -z "$user" ] || [ -z "$db" ]; then
+              echo "db_profile '$profile' incompleto ou não encontrado em cm.patch_checks.db_profiles."
+              exit 3
+            fi
+
+            if [ "$engine" = "postgres" ]; then
+              PGPASSWORD="$pass" psql \
+                -h "$host" \
+                -p "${port:-5432}" \
+                -U "$user" \
+                -d "$db" \
+                -A -F '|' -P "footer=off" \
+                -c "$sql"
+            elif [ "$engine" = "oracle" ]; then
+              sqlplus -s "$user/$pass@$host:${port:-1521}/$db" <<EOF
+            $sql
+            EOF
+            else
+              echo "Engine '$engine' não suportada no Linux para este profile ($profile)."
+              exit 4
+            fi
+          args:
+            executable: /bin/bash
+          register: db_query_results
+          changed_when: false
+          failed_when: false
+          loop: "{{ _db_queries }}"
+
+        - name: Adicionar resultado das queries de banco ao resumo de comandos (Linux)
+          when: db_query_results is defined
+          ansible.builtin.set_fact:
+            _cmd_rows: >-
+              {%- set out = _cmd_rows | default([]) -%}
+              {%- for r in (db_query_results.results | default([])) -%}
+                {%- set g = (r.item.group | default('')) -%}
+                {%- set profile = (r.item.profile | default('')) -%}
+                {%- set name = (r.item.name | default('')) -%}
+                {%- set sql = (r.item.sql | default('')) -%}
+                {%- set label = ('DB(' ~ g ~ '): ' ~ (name if name|length>0 else 'query')) -%}
+                {%- set _ = out.append({
+                      'cmd': label,
+                      'rc': r.rc | default(1),
+                      'stdout': r.stdout | default(''),
+                      'stderr': r.stderr | default(''),
+                      'query_name': name,
+                      'sql': sql,
+                      'db_profile': profile
+                    }) -%}
+              {%- endfor -%}
+              {{ out }}
+
+        - name: Discos – uso por ponto de montagem (Linux)
+          ansible.builtin.shell: >
+            df -P -x tmpfs -x devtmpfs
+            | tail -n +2
+            | awk '{gsub("%","",$5); printf("{\"mount\":\"%s\",\"usage\":%s}\n", $6, $5)}'
+          register: _linux_df
+          changed_when: false
+          failed_when: false
+
+        - name: Normalizar lista de discos (Linux)
+          ansible.builtin.set_fact:
+            _storage_entries: >-
+              {%- set th = storage_threshold | default(70) | int -%}
+              {%- set out = [] -%}
+              {%- for line in (_linux_df.stdout_lines | default([])) -%}
+                {%- if line | trim | length > 0 -%}
+                  {%- set e = (line | from_json) -%}
+                  {%- set use = e.usage | int -%}
+                  {%- set _ = out.append({'mount': e.mount, 'usage': use, 'ok': (use < th)}) -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {{ out }}
+
+        - name: Montar relatório do host (Linux)
+          ansible.builtin.set_fact:
+            patch_host_report:
+              host: "{{ inventory_hostname }}"
+              os: linux
+              services: "{{ _svc_rows | default([]) }}"
+              ports:
+                local: "{{ _ports_local | default([]) }}"
+                remote: "{{ _ports_remote | default([]) }}"
+              telnet: "{{ _telnet_rows | default([]) }}"
+              commands: "{{ _cmd_rows | default([]) }}"
+              storage: "{{ _storage_entries | default([]) }}"
+              groups: "{{ hostvars['localhost'].patch_group_membership[inventory_hostname] | default([]) }}"
+
+      rescue:
+        - name: Publicar alerta – falha em checks Linux
+          ansible.builtin.set_stats:
+            data:
+              send_mail_subject: "Ansible-Report (FALHA) - Checks Linux - {{ awx_job_template_name | default('Patch Verification') }}"
+              send_mail_body: |
+                <h2 style="color:#b00020">Falha nos checks Linux</h2>
+                <p><b>Host:</b> {{ inventory_hostname }}</p>
+                <p><b>Tarefa:</b> {{ ansible_failed_task.name | default('desconhecida') }}</p>
+                <pre>{{ (ansible_failed_result.msg | default(ansible_failed_result | to_nice_json | default(''))) }}</pre>
+
+        - name: Aviso – falha tratada (Linux)
+          ansible.builtin.debug:
+            msg: "Falha tratada nos checks Linux — subject/body publicados."

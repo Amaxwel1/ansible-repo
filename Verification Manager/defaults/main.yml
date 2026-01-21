@@ -1,0 +1,21 @@
+---
+# PostgreSQL
+postgres_host: localhost
+postgres_port: 5432
+postgres_user: postgres
+postgres_password: "postgres@123"
+postgres_db: dbcvm
+
+# MSSQL / SQL Server
+mssql_host: localhost
+mssql_port: 1433
+mssql_user: sa
+mssql_password: ""
+mssql_db: master
+
+# Oracle
+oracle_host: localhost
+oracle_port: 1521
+oracle_sid: ORCLCDB
+oracle_user: system
+oracle_password: ""

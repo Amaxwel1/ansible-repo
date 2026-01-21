@@ -1,0 +1,114 @@
+cm:
+  patch_checks:
+    defaults:
+      linux:
+        services: []
+        ports: [22]
+        commands:
+          - "hostname ; uptime"
+      windows:
+        services: []
+        ports: [5985]
+        commands:
+          - "hostname ; whoami"
+
+    db_profiles:
+      psql14core:
+        engine: postgres
+        host: localhost
+        port: 5432
+        user: "{{ vault_psql14core_user }}"
+        password: "{{ vault_psql14core_password }}"
+        database: corePaqueta
+
+      postgres:
+        engine: postgres
+        host: localhost
+        port: 5432
+        user: "{{ vault_ps_user }}"
+        password: "{{ vault_ps_password }}"
+        database: dbcvm
+
+      psql14vm:
+        engine: postgres
+        host: localhost
+        port: 5433
+        user: "{{ vault_psql14vm_user}}"
+        password: "{{ vault_psql14vm_password }}"
+        database: Valemobi
+
+      marketdata:
+        engine: postgres
+        host: localhost
+        port: 5440
+        user: "{{ vault_market_user }}"
+        password: "{{ vault_market_password }}"
+        database: marketdata
+
+      # sqlfin:
+      #   engine: mssql
+      #   host: localhost
+      #   port: 1433
+      #   user: sa
+      #   password: "{{ vault_sqlfin_password }}"
+      #   database: FinanceDB
+
+    envs:
+      prd:
+        groups:
+          snmp:
+            members: "192.168.122.165"
+            merge:
+              commands: merge
+              telnet: replace
+              services: replace
+            linux:
+              telnet:
+                - "youtube.com:443"
+              commands:
+                - "pwd"
+              services:
+                - name: "snmptrapd"
+                  expected: "running"
+          httpd:
+            members: "192.168.122.34"
+          postgres:
+            members: "192.168.122.165"
+          efinanceira:
+            members: "192.168.122.223"
+          psql14core:
+            members: "192.168.122.34"
+          psql14vm:
+            members: "192.168.122.34"
+          marketdata:
+            members: "192.168.122.34"
+      hml:
+        groups:
+          snmp:
+            members: "192.168.122.223,192.168.122.34"
+          httpd:
+            members: "192.168.122.223"
+          fakefail:
+            members: "192.168.122.165, 192.168.122.223"
+
+      dr:
+        groups:
+          snmp:
+            members: "192.168.122.223"
+            merge:
+              commands: merge
+              telnet: replace
+              services: replace
+            # linux:
+            #   telnet:
+            #     - "youtube.com:443"
+            #   services:
+            #     - name: "snmptrapd"
+            #       expected: "stopped"
+            windows:
+              telnet:
+                - "google.com:443"
+              services:
+                - name: "SNMPTRAP"
+                  expected: "running"
+    hosts: {}

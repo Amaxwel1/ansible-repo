@@ -1,0 +1,23 @@
+- name: Teste standalone de IIS App Pools
+  hosts: all
+  gather_facts: no
+
+  vars:
+    iis_pools:
+      - "IISDemoPool"
+
+    iis_pool_operation: start
+    iis_pool_max_retries: 3
+
+  tasks:
+    - name: Incluir tasks de gerenciamento de IIS
+      ansible.builtin.include_tasks: "tasks/windows/iis_pools_manage.yml"
+
+    - name: Mostrar relatório gerado pelos pools
+      ansible.builtin.debug:
+        var: _iis_pools_report
+
+    - name: Mostrar erros (se houver)
+      ansible.builtin.debug:
+        var: iis_pools_errors
+      when: iis_pools_errors is defined and iis_pools_errors | length > 0

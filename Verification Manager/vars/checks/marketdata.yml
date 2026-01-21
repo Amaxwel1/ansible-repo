@@ -1,0 +1,17 @@
+cm:
+  patch_checks:
+    groups:
+      marketdata:
+        linux:
+          services: []
+          ports: ["5440"]
+          commands:
+            - !unsafe "sudo podman ps --format '{{.Names}} {{.Status}}' | egrep -i 'pg-marketdata' || true"
+            - !unsafe "sudo podman inspect -f '{{.Name}} {{.State.Status}} {{.State.Health.Status}}' pg-marketdata 2>/dev/null || true"
+            - "sudo podman logs --tail 50 pg-marketdata 2>/dev/null || true"
+          db_profile: marketdata
+          queries:
+            - name: "Tabela X"
+              sql: "SELECT COUNT(*) FROM tb_x;"
+            - name: "Health"
+              sql: "SELECT 1;"

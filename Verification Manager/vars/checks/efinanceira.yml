@@ -1,0 +1,14 @@
+cm:
+  patch_checks:
+    groups:
+      efinanceira:
+        merge:
+          services: merge
+          ports: merge
+          commands: merge
+        windows:
+          ports: [80, 443]
+          commands:
+            - 'netstat -ano | findstr "1521 80 443"'
+          iis_pools:
+            - "IISDemoPool"

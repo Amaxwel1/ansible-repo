@@ -1,0 +1,29 @@
+cm:
+  patch_checks:
+    groups:
+      postgres:
+        merge:
+          services: replace
+          ports: replace
+          commands: merge
+        linux:
+          services: ["postgresql", "postgresql-14"]
+          ports: [5432]
+          commands:
+            - "ss -lntp | grep -E ':5432\\b' || true"
+            - "systemctl status postgresql"
+          db_profile: postgres
+          queries:
+            - name: "Teste version"
+              sql: "SELECT version();"
+            - name: "Teste database"
+              sql: "SELECT current_database();"
+            - name: "Teste version"
+              sql: |
+                SELECT * from app.users
+                WHERE name in ('Bob');
+        # windows:
+        #   services: []
+        #   ports: []
+        #   commands: []
+        #   queries: []

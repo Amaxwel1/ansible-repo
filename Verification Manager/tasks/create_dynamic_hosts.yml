@@ -1,0 +1,53 @@
+- name: Inicializar lista de inalcançáveis
+  ansible.builtin.set_fact:
+    unreachable_hosts: []
+
+- name: "Detectar SSH (Linux) na porta 22"
+  ansible.builtin.wait_for:
+    host: "{{ item }}"
+    port: 22
+    timeout: 3
+    state: started
+  register: ssh_probe
+  failed_when: false
+  loop: "{{ target_hosts }}"
+
+- name: "Detectar WinRM (Windows) na porta 5985"
+  ansible.builtin.wait_for:
+    host: "{{ item }}"
+    port: 5985
+    timeout: 3
+    state: started
+  register: winrm_probe
+  failed_when: false
+  loop: "{{ target_hosts }}"
+
+- name: Montar listas linux/windows
+  ansible.builtin.set_fact:
+    linux_list: "{{ ssh_probe.results  | selectattr('elapsed','<',3) | map(attribute='item') | list }}"
+    windows_list: "{{ winrm_probe.results | selectattr('elapsed','<',3) | map(attribute='item') | list }}"
+
+- name: Adicionar hosts Linux
+  ansible.builtin.add_host:
+    name: "{{ item }}"
+    groups: linux_targets
+    ansible_user: "{{ ansible_user }}"
+    ansible_password: "{{ ansible_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ linux_key | default(omit) }}"
+    ansible_connection: ssh
+  loop: "{{ linux_list }}"
+  when: linux_list | length > 0
+
+- name: Adicionar hosts Windows
+  ansible.builtin.add_host:
+    name: "{{ item }}"
+    groups: windows_targets
+    ansible_user: "{{ ansible_user }}"
+    ansible_password: "{{ ansible_password }}"
+    ansible_connection: winrm
+    ansible_winrm_transport: ntlm
+    ansible_port: 5985
+    ansible_winrm_server_cert_validation: ignore
+  loop: "{{ windows_list }}"
+  when: windows_list | length > 0
+  no_log: true

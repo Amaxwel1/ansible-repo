@@ -1,0 +1,19 @@
+cm:
+  patch_checks:
+    groups:
+      httpd:
+        linux:
+          services: ["httpd"]
+          ports: [80, 443]
+          commands:
+            - "apachectl -t || httpd -t || true"
+            - "wget speed.hetzner.de"
+          telnet:
+            - "google.com:443"
+        windows:
+          services: ["Apache2.4"]
+          ports: [80, 443]
+          commands:
+            - "httpd.exe -t"
+          telnet:
+            - "google.com:443"

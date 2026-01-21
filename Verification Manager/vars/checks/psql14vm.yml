@@ -1,0 +1,17 @@
+cm:
+  patch_checks:
+    groups:
+      psql14vm:
+        linux:
+          services: []
+          ports: ["5433"]
+          commands:
+            - !unsafe "sudo podman ps --format '{{.Names}} {{.Status}}' | egrep -i 'pg-valemobi' || true"
+            - !unsafe "sudo podman inspect -f '{{.Name}} {{.State.Status}} {{.State.Health.Status}}' pg-valemobi 2>/dev/null || true"
+            - "sudo podman logs --tail 50 pg-valemobi 2>/dev/null || true"
+          db_profile: psql14vm
+          queries:
+            - name: "Ultimo flavour"
+              sql: "SELECT id_flavour FROM tb_fix_server_configuration_flavour ORDER BY id_flavour DESC LIMIT 1;"
+            - name: "Health"
+              sql: "SELECT 1;"

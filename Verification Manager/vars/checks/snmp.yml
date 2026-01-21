@@ -1,0 +1,23 @@
+cm:
+  patch_checks:
+    groups:
+      snmp:
+        merge:
+          services: replace
+          ports: replace
+          commands: replace
+        linux:
+          services: ["snmpd", "snmptrapd"]
+          ports: [22]
+          commands:
+            - "sudo ss -lntp | grep -E ':22\\b' || true"
+            - "ls -la"
+          telnet:
+            - "google.com:443"
+        windows:
+          services: ["SNMP", "SNMPTRAP"]
+          ports: [5985]
+          commands:
+            - "dir"
+          telnet:
+            - "google.com:443"

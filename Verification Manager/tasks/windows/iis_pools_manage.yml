@@ -1,0 +1,175 @@
+---
+# Gerenciamento de IIS Application Pools (Windows)
+#
+# Variáveis esperadas (podem vir do survey):
+#   iis_pools:                # lista de pools a gerenciar; se vazio/ausente = todos
+#   iis_pool_operation:       # "start" ou "restart" (default: "start")
+#   iis_pool_max_retries:     # tentativas para chegar em Started (default: 3)
+#
+# Fatos produzidos:
+#   iis_pools_states:         # { PoolName: State }
+#   iis_pools_errors:         # [ mensagens de erro de pools que não ficaram Started ]
+#   _iis_pools_report:        # resumo por pool (estado antes/depois, OK/Falha)
+
+- name: Inicializar lista de erros de IIS para este host
+  ansible.builtin.set_fact:
+    iis_pools_errors: []
+
+- name: Verificar se módulo WebAdministration/IIS está disponível
+  ansible.windows.win_powershell:
+    script: |
+      if (-not (Get-Module -ListAvailable -Name WebAdministration)) {
+        Write-Output "MISSING_WEBADMIN"
+      } else {
+        Write-Output "OK"
+      }
+  register: webadmin_check
+  changed_when: false
+  failed_when: false
+
+- name: Falhar se IIS/WebAdministration não estiver instalado
+  ansible.builtin.fail:
+    msg: "Módulo WebAdministration/IIS não encontrado neste host."
+  when:
+    - webadmin_check is defined
+    - "'MISSING_WEBADMIN' in (webadmin_check.output | default(''))"
+
+# 1) Coletar todos os pools e estados atuais
+- name: Obter lista de Application Pools do IIS
+  ansible.windows.win_powershell:
+    script: |
+      Import-Module WebAdministration
+      $pools = Get-IISAppPool | Select-Object Name, @{Name='State';Expression={$_.State.ToString()}}
+      $pools | ConvertTo-Json -Compress
+  register: iis_pools_raw
+  changed_when: false
+  failed_when: false
+
+- name: Converter JSON de pools em objeto
+  ansible.builtin.set_fact:
+    _iis_pools_parsed: >-
+      {{
+        (iis_pools_raw.output | default([]) | join('') | trim | default('[]'))
+        | from_json
+      }}
+
+- name: Normalizar lista de pools (sempre lista)
+  ansible.builtin.set_fact:
+    _iis_pools_all: "{{ [_iis_pools_parsed] if _iis_pools_parsed is mapping else _iis_pools_parsed }}"
+
+- name: "Criar dicionário { pool: state }"
+  ansible.builtin.set_fact:
+    iis_pools_states: >-
+      {%- set out = {} -%}
+      {%- for p in _iis_pools_all -%}
+        {%- set _ = out.update({ p.Name: (p.State | string) }) -%}
+      {%- endfor -%}
+      {{ out }}
+
+# 2) Determinar quais pools serão gerenciados
+- name: Determinar lista de pools alvo (todos ou apenas os informados)
+  ansible.builtin.set_fact:
+    _iis_pools_effective: >-
+      {%- set all = iis_pools_states.keys() | list -%}
+      {%- if iis_pools is defined and (iis_pools | length) > 0 -%}
+        {{ iis_pools | map('string') | list | intersect(all) }}
+      {%- else -%}
+        {{ all }}
+      {%- endif -%}
+
+- name: Filtrar pools que não estão Started
+  ansible.builtin.set_fact:
+    _iis_pools_needing_action: >-
+      {%- set out = [] -%}
+      {%- for name, st in iis_pools_states.items() -%}
+        {%- if name in _iis_pools_effective and (st | string) != 'Started' -%}
+          {%- set _ = out.append(name) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+# 3) Tentar Start/Restart somente nos que precisam
+- name: Iniciar/Reiniciar Application Pools que não estão Started
+  when: (_iis_pools_needing_action | length) > 0
+  ansible.windows.win_powershell:
+    script: |
+      Import-Module WebAdministration
+      $Name = "{{ item }}"
+      $Operation = "{{ iis_pool_operation }}"
+      $Max = {{ iis_pool_max_retries }}
+
+      $initial = (Get-IISAppPool -Name $Name -ErrorAction SilentlyContinue).State
+
+      $success = $false
+      for ($i = 1; $i -le $Max; $i++) {
+        if ($Operation -eq "restart") {
+          Restart-WebAppPool -Name $Name -ErrorAction SilentlyContinue
+        } else {
+          Start-WebAppPool -Name $Name -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Seconds 2
+        $st = (Get-IISAppPool -Name $Name -ErrorAction SilentlyContinue).State
+        if ($st -eq "Started") {
+          $success = $true
+          break
+        }
+      }
+
+      if (-not $success) {
+        Write-Output ("FAILED: {0} initial={1} final={2}" -f $Name, $initial, $st)
+        exit 1
+      } else {
+        Write-Output ("OK: {0} initial={1} final={2}" -f $Name, $initial, $st)
+      }
+  register: iis_pools_actions
+  changed_when: false
+  failed_when: false
+  loop: "{{ _iis_pools_needing_action }}"
+
+# 4) Montar relatório dos pools (estados antes/depois)
+- name: Construir relatório de pools de IIS
+  ansible.builtin.set_fact:
+    _iis_pools_report: >-
+      {%- set out = [] -%}
+      {# pools que não precisaram de ação #}
+      {%- for name, st in iis_pools_states.items() -%}
+        {%- if name in _iis_pools_effective and name not in (_iis_pools_needing_action | default([])) -%}
+          {%- set _ = out.append({
+                'name': name,
+                'initial_state': st,
+                'final_state': st,
+                'action': 'none',
+                'ok': (st == 'Started'),
+                'message': 'Sem ação – já estava Started'
+              }) -%}
+        {%- endif -%}
+      {%- endfor -%}
+
+      {# pools onde houve tentativa de start/restart #}
+      {%- for r in (iis_pools_actions.results | default([])) -%}
+        {%- set msg = (r.stdout | default(r.stderr | default(''))) -%}
+        {%- set ok = (r.rc | default(0) == 0) -%}
+        {%- set name = r.item -%}
+        {%- set _ = out.append({
+              'name': name,
+              'initial_state': iis_pools_states.get(name, 'Unknown'),
+              'final_state': ('Started' if ok else 'Unknown'),
+              'action': iis_pool_operation,
+              'ok': ok,
+              'message': msg
+            }) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Atualizar lista de erros de IIS (pools que não ficaram Started)
+  ansible.builtin.set_fact:
+    iis_pools_errors: >-
+      {%- set errs = iis_pools_errors | default([]) | list -%}
+      {%- for p in _iis_pools_report | default([]) -%}
+        {%- if not p.ok -%}
+          {%- set _ = errs.append(
+                (inventory_hostname ~ ' - ' ~ p.name ~ ' (' ~ (p.message | default('erro ao iniciar/reiniciar')) ~ ')')
+              ) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ errs }}

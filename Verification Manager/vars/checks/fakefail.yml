@@ -1,0 +1,12 @@
+cm:
+  patch_checks:
+    groups:
+      fakefail:
+        linux:
+          services: ["fakefail"]
+          logs:
+            - /var/log/fakefail.log
+        windows:
+          services: ["FakeFail"]
+          logs:
+            - C:/Temp/fakefail.log

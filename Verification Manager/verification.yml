@@ -1,0 +1,422 @@
+- name: Patch Verification Manager
+  hosts: localhost
+  gather_facts: false
+  vars:
+    motivo: "{{ motivo | default('Verificação') }}"
+  tasks:
+    - name: Orquestração principal
+      block:
+        - name: Normalizar entradas (survey_hosts, check_profile/check_profiles, check_env)
+          ansible.builtin.set_fact:
+            _survey_hosts_raw: "{{ survey_hosts | default('') }}"
+            _check_profile_raw: "{{ check_profile | default(check_profiles | default('')) }}"
+            _env_raw: "{{ check_env | default(check_envs | default(environment | default(environments | default('')))) }}"
+
+        - name: Calcular target_hosts (aceita string ou lista)
+          ansible.builtin.set_fact:
+            target_hosts: >-
+              {{
+                (
+                  _survey_hosts_raw
+                  if (_survey_hosts_raw is sequence and _survey_hosts_raw is not string)
+                  else (
+                    _survey_hosts_raw
+                    | string
+                    | regex_replace('\\s+', '')
+                    | regex_replace(',+', ',')
+                    | trim
+                    | split(',')
+                  )
+                )
+                | map('string')
+                | map('trim')
+                | reject('equalto','')
+                | unique
+                | list
+              }}
+
+        - name: Calcular lista de grupos selecionados (a partir de check_profile/check_profiles)
+          ansible.builtin.set_fact:
+            _selected_groups: >-
+              {{
+                (
+                  _check_profile_raw
+                  if (_check_profile_raw is sequence and _check_profile_raw is not string)
+                  else (
+                    _check_profile_raw
+                    | string
+                    | regex_replace('\\s*,\\s*', ',')
+                    | trim
+                    | split(',')
+                  )
+                )
+                | map('string')
+                | map('trim')
+                | map('lower')
+                | reject('equalto','')
+                | unique
+                | list
+              }}
+
+        - name: Calcular lista de ambientes selecionados (check_env/check_envs/environment/environments)
+          ansible.builtin.set_fact:
+            _selected_envs: >-
+              {{
+                (
+                  _env_raw
+                  if (_env_raw is sequence and _env_raw is not string)
+                  else (
+                    _env_raw
+                    | string
+                    | regex_replace('\\s*,\\s*', ',')
+                    | trim
+                    | split(',')
+                  )
+                )
+                | map('string')
+                | map('trim')
+                | map('lower')
+                | reject('equalto','')
+                | unique
+                | list
+              }}
+
+        - name: Carregar base (check_matrix.yml)
+          ansible.builtin.include_vars:
+            file: vars/check_matrix.yml
+            name: cm_base
+
+        - name: Expor envs cfg para resolução por host
+          ansible.builtin.set_fact:
+            patch_envs_cfg: "{{ cm_base.cm.patch_checks.envs | default({}) }}"
+
+        - name: Mapa host -> env
+          ansible.builtin.set_fact:
+            patch_host_env: >-
+              {%- set out = {} -%}
+              {%- set envs = cm_base.cm.patch_checks.envs | default({}) -%}
+              {%- set sel  = _selected_envs | default([]) -%}
+              {%- for envname, E in envs.items() -%}
+                {%- set env_l = (envname | string | lower) -%}
+                {%- if sel | length == 0 or env_l in sel -%}
+                  {%- for gname, gconf in (E.groups | default({})).items() -%}
+                    {%- set raw = gconf.get('members', gconf.get('maquinas', gconf.get('hosts', []))) -%}
+                    {%- set memb = (
+                          raw if (raw is sequence and raw is not string)
+                          else ((raw | default('') | string | trim)
+                                | regex_replace('\\s*,\\s*', ',')
+                                | split(',')
+                                | reject('equalto','') | list)
+                        ) -%}
+                    {%- for h in memb -%}
+                      {%- set key = (h | string | trim) -%}
+                      {%- if key | length > 0 -%}
+                        {%- set _ = out.update({ key: env_l }) -%}
+                      {%- endif -%}
+                    {%- endfor -%}
+                  {%- endfor -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {{ out }}
+
+        - name: Carregar vault de db_profiles
+          ansible.builtin.include_vars:
+            file: vars/senhas-vault.yml
+
+        - name: Inicializar agregador de grupos (dos arquivos vars/checks/*.yml)
+          ansible.builtin.set_fact:
+            _groups_bag: {}
+
+        - name: Inicializar agregador de db_profiles
+          ansible.builtin.set_fact:
+            _db_profiles_bag: {}
+
+        - name: Carregar grupos (vars/checks/*.yml)
+          ansible.builtin.include_vars:
+            file: "{{ item }}"
+            name: _grp
+          loop: "{{ lookup('ansible.builtin.fileglob', 'vars/checks/*.yml', wantlist=True) }}"
+          register: _loaded_groups
+          ignore_errors: true
+
+        - name: Somar grupos carregados (deep merge)
+          ansible.builtin.set_fact:
+            _groups_bag: >-
+              {{
+                _groups_bag
+                | combine((_item.ansible_facts._grp.cm.patch_checks.groups | default({})), recursive=True)
+              }}
+          loop: "{{ _loaded_groups.results }}"
+          loop_control:
+            loop_var: _item
+          when: _item.ansible_facts is defined and _item.ansible_facts._grp is defined
+
+        - name: Somar db_profiles carregados (deep merge)
+          ansible.builtin.set_fact:
+            _db_profiles_bag: >-
+              {{
+                _db_profiles_bag
+                | combine((_item.ansible_facts._grp.cm.patch_checks.db_profiles | default({})), recursive=True)
+              }}
+          loop: "{{ _loaded_groups.results }}"
+          loop_control:
+            loop_var: _item
+          when: _item.ansible_facts is defined and _item.ansible_facts._grp is defined
+
+        - name: Construir grupos base (arquivo + check_matrix.base.groups)
+          ansible.builtin.set_fact:
+            _base_groups: >-
+              {{
+                _groups_bag
+                | combine(cm_base.cm.patch_checks.groups | default({}), recursive=True)
+              }}
+
+        - name: Aplicar overlay de envs selecionados em cima dos grupos base
+          ansible.builtin.set_fact:
+            effective_groups: >-
+              {%- set base = _base_groups | default({}) -%}
+              {%- set envs = cm_base.cm.patch_checks.envs | default({}) -%}
+              {%- set sel  = _selected_envs | default([]) -%}
+              {%- set env_selected = (sel | length > 0) -%}
+
+              {%- set eff = {} -%}
+              {%- for gname, g in base.items() -%}
+                {%- if env_selected -%}
+                  {%- set _ = eff.update({ gname: (g | combine({'members': []}, recursive=True)) }) -%}
+                {%- else -%}
+                  {%- set _ = eff.update({ gname: g }) -%}
+                {%- endif -%}
+              {%- endfor -%}
+
+              {%- for envname, E in envs.items() -%}
+                {%- set env_l = (envname | string | lower) -%}
+                {%- if (sel | length == 0) or (env_l in sel) -%}
+                  {%- for gname, gconf in (E.groups | default({})).items() -%}
+                    {%- set current = eff.get(gname, {}) -%}
+
+                    {%- set raw_new = gconf.get('members', gconf.get('maquinas', gconf.get('hosts', []))) -%}
+                    {%- set new_list = (
+                          raw_new if (raw_new is sequence and raw_new is not string)
+                          else ((raw_new | default('') | string | trim)
+                                | regex_replace('\\s*,\\s*', ',')
+                                | split(',')
+                                | reject('equalto','') | list)
+                        ) -%}
+
+                    {%- set merged = current | combine(gconf, recursive=True) -%}
+
+                    {%- if env_selected -%}
+                      {%- set cur_list = current.get('members', []) | default([]) -%}
+                      {%- set members_union = (cur_list + new_list)
+                                              | map('string') | map('trim')
+                                              | reject('equalto','') | unique | list -%}
+                      {%- set merged = merged | combine({'members': members_union}, recursive=True) -%}
+                    {%- endif -%}
+
+                    {%- set _ = eff.update({ gname: merged }) -%}
+                  {%- endfor -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {{ eff }}
+
+        - name: Coletar hosts vindos dos ambientes
+          ansible.builtin.set_fact:
+            _env_members_from_selection: >-
+              {%- set env_selected = (_selected_envs | default([]) | length > 0) -%}
+              {%- set sel_groups = _selected_groups | default([]) -%}
+              {%- set out = [] -%}
+
+              {%- for gn, g in (effective_groups | default({})).items() -%}
+                {%- set gn_l = (gn | string | lower) -%}
+                {%- if (sel_groups | length == 0) or (gn_l in sel_groups) -%}
+                  {%- set raw = g.get('members', g.get('maquinas', g.get('hosts', []))) -%}
+                  {%- if raw is sequence and raw is not string -%}
+                    {%- set _ = out.extend(raw) -%}
+                  {%- else -%}
+                    {%- set s = (raw | default('') | string | trim) -%}
+                    {%- if s | length > 0 -%}
+                      {%- set _ = out.extend(s | regex_replace('\\s*,\\s*', ',') | split(',')) -%}
+                    {%- endif -%}
+                  {%- endif -%}
+                {%- endif -%}
+              {%- endfor -%}
+
+              {{
+                out | map('string') | map('trim')
+                | reject('equalto','') | unique | list
+              }}
+
+        - name: Consolidar patch_checks (defaults/hosts/db_profiles + effective_groups)
+          ansible.builtin.set_fact:
+            cm: >-
+              {%- set defaults = cm_base.cm.patch_checks.defaults | default({}) -%}
+              {%- set hosts    = cm_base.cm.patch_checks.hosts    | default({}) -%}
+              {%- set base_dbp = cm_base.cm.patch_checks.db_profiles | default({}) -%}
+              {%- set file_dbp = _db_profiles_bag | default({}) -%}
+              {%- set dbp      = file_dbp | combine(base_dbp, recursive=True) -%}
+              {{
+                {
+                  'patch_checks': {
+                    'defaults': defaults,
+                    'hosts':    hosts,
+                    'db_profiles': dbp,
+                    'groups':   effective_groups | default({})
+                  }
+                }
+              }}
+
+        - name: Indexar grupos por nome normalizado
+          ansible.builtin.set_fact:
+            _groups_index: >-
+              {%- set G = cm.patch_checks.groups | default({}) -%}
+              {%- set out = {} -%}
+              {%- for k, v in G.items() -%}
+                {%- set nk = (k | string | trim | lower) -%}
+                {%- set _ = out.update({ nk: v }) -%}
+              {%- endfor -%}
+              {{ out }}
+
+        - name: Coletar members dos grupos selecionados (auto-target)
+          ansible.builtin.set_fact:
+            _group_members_from_selection: >-
+              {%- set sel = _selected_groups | default([]) -%}
+              {%- set groups_cfg = cm.patch_checks.groups | default({}) -%}
+              {%- set out = [] -%}
+              {%- for gname in sel -%}
+                {%- set gkey = gname | string | lower -%}
+                {%- set g = _groups_index.get(gkey, groups_cfg.get(gname, {})) -%}
+                {%- set raw = g.get('members', g.get('maquinas', g.get('hosts', []))) -%}
+                {%- if raw is sequence and not (raw is string) -%}
+                  {%- set _ = out.extend(raw) -%}
+                {%- else -%}
+                  {%- set s = (raw | default('') | string | trim) -%}
+                  {%- if s | length > 0 -%}
+                    {%- set _ = out.extend(
+                      s
+                      | regex_replace('\\s*,\\s*', ',')
+                      | split(',')
+                    ) -%}
+                  {%- endif -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {{
+                out
+                | map('string')
+                | map('trim')
+                | reject('equalto','')
+                | list
+                | unique
+              }}
+
+        - name: Unir hosts do survey + env + grupos selecionados
+          ansible.builtin.set_fact:
+            target_hosts: >-
+              {{
+                (
+                  (target_hosts | default([]))
+                  + (_env_members_from_selection | default([]))
+                  + (_group_members_from_selection | default([]))
+                )
+                | map('string')
+                | map('trim')
+                | reject('equalto','')
+                | list
+                | unique
+              }}
+
+        - name: Detectar grupos inexistentes na matriz carregada
+          ansible.builtin.set_fact:
+            missing_groups: "{{ _selected_groups | difference(_groups_index.keys() | list) }}"
+
+        - name: Detectar envs inexistentes na matriz carregada
+          ansible.builtin.set_fact:
+            missing_envs: "{{ _selected_envs | difference((cm_base.cm.patch_checks.envs | default({})).keys() | list) }}"
+
+        - name: Detectar combinacoes env+grupo sem members
+          ansible.builtin.set_fact:
+            empty_membership_pairs: >-
+              {{
+                (empty_membership_pairs | default([])) +
+                [ {'env': item.0, 'group': item.1} ]
+              }}
+          when: >
+            (cm_base.cm.patch_checks.envs[item.0] is defined) and
+            (cm_base.cm.patch_checks.envs[item.0].groups[item.1] is defined) and
+            (
+              (cm_base.cm.patch_checks.envs[item.0].groups[item.1].members | default([]) | length) == 0
+            )
+          loop: "{{ _selected_envs | product(_selected_groups) | list }}"
+
+        - name: Garantir que existem hosts alvo para executar checagens
+          ansible.builtin.set_fact:
+            no_targets: "{{ (target_hosts | default([]) | length) == 0 }}"
+
+        - name: Gravar erros de validacao (facts)
+          ansible.builtin.set_fact:
+            validation_errors:
+              missing_groups: "{{ missing_groups | default([]) }}"
+              missing_envs: "{{ missing_envs | default([]) }}"
+              empty_membership_pairs: "{{ empty_membership_pairs | default([]) }}"
+              no_targets: "{{ no_targets | default(false) }}"
+
+        - name: Publicar erros de validacao para o report (set_stats)
+          ansible.builtin.set_stats:
+            data:
+              validation_errors: "{{ validation_errors }}"
+          when: >
+            (missing_groups | default([]) | length > 0) or
+            (missing_envs | default([]) | length > 0) or
+            (empty_membership_pairs | default([]) | length > 0) or
+            (no_targets | default(false))
+
+        - name: Adicionar hosts em memória
+          ansible.builtin.add_host:
+            name: "{{ item }}"
+          loop: "{{ target_hosts }}"
+
+        - name: Detectar Linux/Windows e criar grupos dinâmicos
+          ansible.builtin.include_tasks: tasks/create_dynamic_hosts.yml
+
+        - name: Resolver checks finais por host (merge/replace)
+          ansible.builtin.include_tasks: tasks/resolve_check_matrix.yml
+
+        - name: Hosts inalcançáveis
+          ansible.builtin.set_fact:
+            unreachable_hosts: "{{ target_hosts | difference(linux_list + windows_list) }}"
+
+      rescue:
+        - name: Definir _tmpdir
+          ansible.builtin.set_fact:
+            _tmpdir: "{{ paths.tmpdir | default('/tmp/patch-verif') }}"
+
+        - name: Definir _log_file
+          ansible.builtin.set_fact:
+            _log_file: "{{ log_file | default(_tmpdir ~ '/patch-verif.log') }}"
+
+        - name: Tail do log (se existir)
+          ansible.builtin.shell: |
+            [ -f "{{ _log_file }}" ] && tail -n 200 "{{ _log_file }}" || true
+          register: _tail
+          changed_when: false
+          failed_when: false
+
+        - name: E-mail – falha de orquestração (set_stats)
+          ansible.builtin.set_stats:
+            data:
+              send_mail_subject: "Ansible-Report (FALHA) - {{ awx_job_template_name | default('Verification') }}"
+              send_mail_attachments: "{{ [ _log_file ] if (_tail.stdout|length>0) else [] }}"
+              send_mail_body: |
+                <style>
+                table, th, td { border:1px solid #a2a2a2; border-collapse:collapse; padding:8px; }
+                th { background:#e0e0e0; } pre { white-space:pre-wrap; }
+                </style>
+                <h2 style="color:#b00020">Falha na orquestração da Verificacao</h2>
+                {% if _tail.stdout %}<h3>Últimas linhas do log</h3><pre>{{ _tail.stdout | e }}</pre>{% endif %}
+
+        - name: Aviso – falha tratada (prossegue para envio de e-mail)
+          ansible.builtin.debug:
+            msg: "Falha tratada — e-mail de falha será enviado."
+
+- ansible.builtin.import_playbook: playbook_windows_checks.yml
+- ansible.builtin.import_playbook: playbook_linux_checks.yml
+- ansible.builtin.import_playbook: playbook_report_email.yml

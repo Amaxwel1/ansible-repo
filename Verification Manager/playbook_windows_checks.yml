@@ -1,0 +1,515 @@
+- name: Verificações em Windows
+  hosts: windows_targets
+  gather_facts: false
+  vars_files:
+    - defaults/main.yml
+  vars:
+    checks: "{{ hostvars['localhost'].patch_check_by_host[inventory_hostname] | default({'services':[], 'ports':[], 'commands':[]}) }}"
+  tasks:
+    - block:
+        - name: Normalizar plano de serviços (Windows)
+          ansible.builtin.set_fact:
+            _svc_plan: "{{ checks.services | default([]) }}"
+
+        - name: Checar serviços (PowerShell Get-Service)
+          when: (_svc_plan | length) > 0
+          ansible.windows.win_shell: |
+            $name = "{{ item.name }}"
+            try {
+              $s = Get-Service -Name $name -ErrorAction Stop
+              $s.Status.ToString().ToLower()
+            } catch {
+              "absent"
+            }
+          register: svc_chk
+          changed_when: false
+          failed_when: false
+          loop: "{{ _svc_plan }}"
+
+        - name: Calcular serviços candidatos a restart (somente expected=running)
+          when: svc_chk is defined
+          ansible.builtin.set_fact:
+            _need_restart: >-
+              {%- set out = [] -%}
+              {%- for r in (svc_chk.results | default([])) -%}
+                {%- set exp = (r.item.expected | default('running') | string | lower) -%}
+                {%- set st  = (r.stdout | default('') | trim | lower) -%}
+                {%- set running = (st in ['running','started']) -%}
+                {%- if exp == 'running' and (not running) and st != 'absent' -%}
+                  {%- set _ = out.append(r.item) -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {{ out }}
+
+        - name: Reiniciar serviços não-running (uma tentativa)
+          when: (_need_restart | default([])) | length > 0
+          ansible.windows.win_shell: |
+            $name = "{{ item.name }}"
+            try {
+              Restart-Service -Name $name -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 2
+              (Get-Service -Name $name -ErrorAction SilentlyContinue).Status.ToString().ToLower()
+            } catch {
+              "error"
+            }
+          register: svc_retry
+          changed_when: false
+          failed_when: false
+          loop: "{{ _need_restart }}"
+
+        - name: Mapear resultados pós-restart
+          when: svc_retry is defined
+          ansible.builtin.set_fact:
+            _retry_map: >-
+              {%- set out = {} -%}
+              {%- for r in (svc_retry.results | default([])) -%}
+                {%- set _ = out.update({ (r.item.name|string) : (r.stdout|default('')|trim|lower) }) -%}
+              {%- endfor -%}
+              {{ out }}
+
+        - name: Resumo de serviços (respeitando expected running/stopped)
+          when: svc_chk is defined
+          ansible.builtin.set_fact:
+            _svc_rows: >-
+              {%- set out = [] -%}
+              {%- set retry = _retry_map | default({}) -%}
+              {%- for r in (svc_chk.results | default([])) -%}
+                {%- set name = r.item.name -%}
+                {%- set exp  = (r.item.expected | default('running') | string | lower) -%}
+                {%- set pre  = (r.stdout | default('unknown') | trim | lower) -%}
+
+                {%- set post = retry.get(name, None) -%}
+                {%- set state_raw = (post if post is not none else pre) -%}
+
+                {%- set is_running = (state_raw in ['running','started']) -%}
+                {%- set is_absent  = (state_raw == 'absent') -%}
+
+                {%- if exp == 'stopped' -%}
+                  {%- set ok = (not is_running) and (not is_absent) -%}
+                {%- else -%}
+                  {%- set ok = is_running -%}
+                {%- endif -%}
+
+                {%- set _ = out.append({
+                      'name': name,
+                      'expected': exp,
+                      'state': state_raw,
+                      'ok': ok,
+                      'attempted_restart': (post is not none)
+                    }) -%}
+              {%- endfor -%}
+              {{ out }}
+
+        - name: Descobrir serviços com restart falho (Windows)
+          when: _svc_rows is defined
+          ansible.builtin.set_fact:
+            _svc_diag_plan: >-
+              {%- set out=[] -%}
+              {%- set gmap=hostvars['localhost']._groups_norm | default({}) -%}
+              {%- set host_groups=hostvars['localhost'].patch_group_membership[inventory_hostname] | default([]) -%}
+
+              {%- for s in (_svc_rows|default([])) -%}
+                {%- if s.attempted_restart|default(false) and not s.ok|default(false) -%}
+                  {%- set svc = s.name|string -%}
+                  {%- set logs=[] -%}
+                  {%- set grps=[] -%}
+
+                  {%- for g in host_groups -%}
+                    {%- set gconf = gmap.get(g, {}) -%}
+
+                    {# --- normaliza services do grupo: pode ser ["Apache2.4"] ou [{name, expected}] --- #}
+                    {%- set wsvc_names = [] -%}
+                    {%- for it in (gconf.windows.services | default([])) -%}
+                      {%- if it is mapping -%}
+                        {%- set _ = wsvc_names.append(it.name | default(it.service | default('')) | string | trim) -%}
+                      {%- else -%}
+                        {%- set _ = wsvc_names.append(it | string | trim) -%}
+                      {%- endif -%}
+                    {%- endfor -%}
+                    {%- set wsvc_names = (wsvc_names | reject('equalto','') | list | unique) -%}
+
+                    {%- if svc in wsvc_names -%}
+                      {%- set _ = grps.append(g) -%}
+                      {%- for p in (gconf.windows.logs | default([])) -%}
+                        {%- if p and (p|string|trim) -%}
+                          {%- set _ = logs.append(p|string|trim) -%}
+                        {%- endif -%}
+                      {%- endfor -%}
+                    {%- endif -%}
+                  {%- endfor -%}
+
+                  {%- set _ = out.append({
+                        'service': svc,
+                        'groups': (grps|unique|list),
+                        'logs': (logs|unique|list)
+                      }) -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {{ out }}
+
+        - name: Garantir pasta de diagnósticos no controller (Windows)
+          when: (_svc_diag_plan | default([])) | length > 0
+          delegate_to: localhost
+          become: false
+          ansible.builtin.file:
+            path: "{{ (paths.tmpdir | default('/tmp/patch-verif')) ~ '/service-diag' }}"
+            state: directory
+            mode: "0755"
+
+        - name: Coletar diagnóstico do serviço (Get-Service + EventLog + logs do grupo) (Windows)
+          when: (_svc_diag_plan | default([])) | length > 0
+          ansible.windows.win_shell: |
+            $svc = "{{ item.service }}"
+            $groups = "{{ (item.groups | default([])) | join(', ') }}"
+            $logs = @(
+            {% for p in (item.logs | default([])) %}
+              "{{ p }}",
+            {% endfor %}
+              ""
+            ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+            Write-Output "=================================================="
+            Write-Output "Host: {{ inventory_hostname }}"
+            Write-Output "Service: $svc"
+            Write-Output "Groups: $groups"
+            Write-Output "Date: $(Get-Date -Format o)"
+            Write-Output "=================================================="
+            Write-Output ""
+
+            Write-Output ">>> Get-Service $svc"
+            Get-Service -Name $svc -ErrorAction SilentlyContinue | Format-List * | Out-String
+
+            Write-Output ">>> sc.exe queryex $svc"
+            sc.exe queryex $svc | Out-String
+
+            Write-Output ""
+            Write-Output ">>> Last 50 System events (Service Control Manager)"
+            try {
+              Get-WinEvent -LogName System -MaxEvents 200 |
+                Where-Object { $_.ProviderName -match "Service Control Manager" } |
+                Select-Object -First 50 |
+                Format-Table TimeCreated, Id, LevelDisplayName, Message -AutoSize | Out-String
+            } catch {
+              Write-Output "(não foi possível ler EventLog)"
+            }
+
+            Write-Output ""
+            Write-Output ">>> Group log files (tail 200)"
+            foreach ($f in $logs) {
+              Write-Output ""
+              Write-Output "----- FILE: $f -----"
+              try {
+                if (Test-Path $f) {
+                  Get-Content -Path $f -Tail 200 -ErrorAction Stop | Out-String
+                } else {
+                  Write-Output "(não encontrado)"
+                }
+              } catch {
+                Write-Output "(erro ao ler arquivo)"
+              }
+            }
+          register: _svc_diag_out
+          changed_when: false
+          failed_when: false
+          loop: "{{ _svc_diag_plan }}"
+          loop_control:
+            label: "{{ item.service }}"
+
+        - name: Definir tmpdir no host do CIFS (por job)
+          ansible.builtin.set_fact:
+            cifs_tmpdir: "/tmp/patch-verif-{{ awx_job_id | default('job') }}"
+          delegate_to: 192.168.0.247
+
+        - name: Garantir tmpdir no host do CIFS (writable)
+          ansible.builtin.file:
+            path: "{{ cifs_tmpdir }}/service-diag"
+            state: directory
+            mode: "0777"
+          delegate_to: 192.168.0.247
+          become: true
+
+        - name: Salvar diagnóstico em TXT (Windows) no host do CIFS
+          delegate_to: 192.168.0.247
+          become: true
+          ansible.builtin.copy:
+            dest: "{{ cifs_tmpdir }}/service-diag/svc_diag_{{ awx_job_id | default('job') }}_{{ inventory_hostname }}_{{ item.item.service | regex_replace('[^A-Za-z0-9_.-]','_') }}.txt"
+            content: "{{ item.stdout | default('') }}"
+          loop: "{{ _svc_diag_out.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item.service }}"
+          when:
+            - _svc_diag_out is defined
+            - (item.stdout | default('') | trim | length) > 0
+
+        - name: Registrar anexos do diagnóstico (Windows)
+          ansible.builtin.set_fact:
+            patch_diag_attachments: >-
+              {{
+                (patch_diag_attachments | default([])) +
+                [ cifs_tmpdir ~ '/service-diag' ~
+                  '/svc_diag_' ~ (awx_job_id | default('job')) ~ '_' ~ inventory_hostname ~ '_' ~
+                  (item.item.service | regex_replace('[^A-Za-z0-9_.-]','_')) ~ '.txt'
+                ]
+              }}
+          loop: "{{ _svc_diag_out.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item.service }}"
+          when:
+            - _svc_diag_out is defined
+            - (item.stdout | default('') | trim | length) > 0
+
+        - name: Checar portas localmente (listening)
+          when: (checks.ports | length) > 0
+          ansible.windows.win_shell: |
+            $spec = "{{ item }}"
+            $parts = $spec.Split("/")
+            $port = [int]$parts[0]
+            $proto = if ($parts.Length -gt 1) { $parts[1].ToLower() } else { "tcp" }
+            if ($proto -eq "udp") {
+              $l = Get-NetUDPEndpoint -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -eq $port }
+            } else {
+              $l = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -eq $port }
+            }
+            if ($null -ne $l) { exit 0 } else { exit 1 }
+          register: listen_local
+          changed_when: false
+          failed_when: false
+          loop: "{{ checks.ports | map('string') | list }}"
+
+        - name: Resumo local-listen (Windows)
+          when: listen_local is defined
+          ansible.builtin.set_fact:
+            _ports_local: "{{ (_ports_local | default([])) + [ { 'port': item.item, 'ok': ((item.rc | default(1)) == 0) } ] }}"
+          loop: "{{ listen_local.results | default([]) }}"
+
+        - name: Checar portas remotamente (controller -> host) [TCP]
+          when: (checks.ports | length) > 0
+          delegate_to: localhost
+          become: false
+          ansible.builtin.wait_for:
+            host: "{{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname) }}"
+            port: "{{ (item | string).split('/')[0] | int }}"
+            timeout: 3
+            state: started
+          register: listen_remote
+          failed_when: false
+          loop: "{{ checks.ports | map('string') | map('regex_replace', '/udp$', '') | list }}"
+
+        - name: Resumo remote [TCP]
+          when: listen_remote is defined
+          ansible.builtin.set_fact:
+            _ports_remote: "{{ (_ports_remote | default([])) + [ { 'port': item.item | string, 'ok': (not (item.failed | default(false))) } ] }}"
+          loop: "{{ listen_remote.results | default([]) }}"
+
+        - name: Coletar destinos telnet para este host (Windows)
+          ansible.builtin.set_fact:
+            _telnet_targets: "{{ hostvars['localhost'].patch_telnet_targets_by_host.get(inventory_hostname, []) }}"
+
+        - name: Testar conectividade telnet (TCP) no Windows (Test-NetConnection)
+          when: (_telnet_targets | default([])) | length > 0
+          ansible.windows.win_shell: |
+            $spec = "{{ item.target }}"
+            $parts = $spec.Split(":")
+            $host = $parts[0]
+            $port = 80
+            if ($parts.Length -gt 1 -and $parts[1]) { $port = [int]$parts[1] }
+
+            $ok = Test-NetConnection -ComputerName $host -Port $port -InformationLevel Quiet
+            if ($ok) { exit 0 } else { exit 1 }
+          register: telnet_results
+          changed_when: false
+          failed_when: false
+          loop: "{{ _telnet_targets }}"
+
+        - name: Resumo telnet (Windows)
+          when: telnet_results is defined
+          ansible.builtin.set_fact:
+            _telnet_rows: "{{ (_telnet_rows | default([])) + [ {
+              'group': item.item.group,
+              'target': item.item.target,
+              'dest': (item.item.target.split(':')[0]),
+              'port': ((item.item.target.split(':')[1]) if (':' in item.item.target) else '80'),
+              'ok': ((item.rc | default(1)) == 0),
+              'rc': (item.rc | default(1))
+              } ] }}"
+          loop: "{{ telnet_results.results | default([]) }}"
+
+        - name: Executar comandos
+          when: (checks.commands | length) > 0
+          ansible.windows.win_shell: "{{ item }}"
+          register: cmd_results
+          changed_when: false
+          failed_when: false
+          loop: "{{ checks.commands }}"
+
+        - name: Resumo comandos
+          when: cmd_results is defined
+          ansible.builtin.set_fact:
+            _cmd_rows: "{{ (_cmd_rows | default([])) + [ { 'cmd': item.item, 'rc': item.rc | default(1), 'stdout': item.stdout | default(''), 'stderr': item.stderr | default('') } ] }}"
+          loop: "{{ cmd_results.results | default([]) }}"
+
+        - name: Coletar queries de banco para este host (Windows)
+          ansible.builtin.set_fact:
+            _db_queries: "{{ hostvars['localhost'].patch_db_queries_by_host.get(inventory_hostname, []) }}"
+
+        - name: Executar queries de banco via db_profile (Windows)
+          when: (_db_queries | default([])) | length > 0
+          ansible.windows.win_shell: |
+            $group   = "{{ item.group }}".ToLower()
+            $profile = "{{ item.profile | default('') }}"
+            $qname   = "{{ item.name | default('') }}"
+
+            $sql = @"
+            {{ item.sql }}
+            "@
+
+            if ([string]::IsNullOrWhiteSpace($profile)) {
+              Write-Output "Grupo '$group' tem queries mas não definiu db_profile."
+              exit 2
+            }
+
+            $profilesJson = @'
+            {{ hostvars['localhost'].cm.patch_checks.db_profiles | default({}) | to_json }}
+            '@
+
+            $profiles = $profilesJson | ConvertFrom-Json
+
+            $names = @($profiles.PSObject.Properties.Name)
+            if (-not ($names -contains $profile)) {
+              Write-Output "db_profile '$profile' não encontrado em cm.patch_checks.db_profiles"
+              exit 3
+            }
+
+            $cfg = $profiles.$profile
+            $engine = ($cfg.engine   | ForEach-Object { $_.ToString().ToLower() })
+            $host   = ($cfg.host     | ForEach-Object { $_.ToString() })
+            $port   = ($cfg.port     | ForEach-Object { $_.ToString() })
+            $user   = ($cfg.user     | ForEach-Object { $_.ToString() })
+            $pass   = ($cfg.password | ForEach-Object { $_.ToString() })
+            $db     = ($cfg.database | ForEach-Object { $_.ToString() })
+
+            if ($engine -eq "mssql") {
+              sqlcmd -S "$host,$port" -U "$user" -P "$pass" -d "$db" -Q $sql
+              exit $LASTEXITCODE
+            }
+            elseif ($engine -eq "postgres") {
+              $env:PGPASSWORD = $pass
+              psql -h $host -p $port -U $user -d $db -A -F '|' -P "footer=off" -c $sql
+              exit $LASTEXITCODE
+            }
+            else {
+              Write-Output "Engine '$engine' não suportada no Windows para este profile ($profile)."
+              exit 4
+            }
+          register: db_query_results
+          changed_when: false
+          failed_when: false
+          loop: "{{ _db_queries }}"
+
+        - name: Adicionar resultado das queries de banco ao resumo de comandos (Windows)
+          when: db_query_results is defined
+          ansible.builtin.set_fact:
+            _cmd_rows: >-
+              {%- set out = _cmd_rows | default([]) -%}
+              {%- for r in (db_query_results.results | default([])) -%}
+                {%- set g = (r.item.group | default('')) -%}
+                {%- set profile = (r.item.profile | default('')) -%}
+                {%- set name = (r.item.name | default('')) -%}
+                {%- set sql = (r.item.sql | default('')) -%}
+                {%- set label = ('DB(' ~ g ~ '): ' ~ (name if name|length>0 else 'query')) -%}
+                {%- set _ = out.append({
+                      'cmd': label,
+                      'rc': r.rc | default(1),
+                      'stdout': r.stdout | default(''),
+                      'stderr': r.stderr | default(''),
+                      'query_name': name,
+                      'sql': sql,
+                      'db_profile': profile
+                    }) -%}
+              {%- endfor -%}
+              {{ out }}
+
+        - name: Coletar IIS Application Pools para este host (via grupos)
+          ansible.builtin.set_fact:
+            _iis_pools: >-
+              {%- set grp_map  = hostvars['localhost']._groups_norm | default({}) -%}
+              {%- set memb_map = hostvars['localhost'].patch_group_membership | default({}) -%}
+              {%- set host_grps = memb_map.get(inventory_hostname, []) -%}
+              {%- set pools = [] -%}
+              {%- for gn in host_grps -%}
+                {%- set g   = grp_map.get(gn, {}) -%}
+                {%- set win = g.get('windows', {}) -%}
+                {%- set ps  = win.get('iis_pools', []) -%}
+                {%- if ps is sequence and not (ps is string) -%}
+                  {%- for p in ps -%}
+                    {%- set _ = pools.append(p) -%}
+                  {%- endfor -%}
+                {%- elif ps is string and (ps | trim | length > 0) -%}
+                  {%- set _ = pools.append(ps) -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {{ pools | unique }}
+
+        - name: Gerenciar IIS Application Pools deste host
+          when: (_iis_pools | default([])) | length > 0
+          vars:
+            iis_pools: "{{ _iis_pools }}"
+            iis_pool_operation: "{{ iis_pool_operation | default('start') }}"
+            iis_pool_max_retries: "{{ iis_pool_max_retries | default(3) }}"
+          ansible.builtin.include_tasks: "tasks/windows/iis_pools_manage.yml"
+
+        - name: Discos – uso por unidade (Windows)
+          ansible.windows.win_shell: |
+            $drives = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3"
+            foreach ($d in $drives) {
+              if ($d.Size -gt 0) {
+                $u = [int](((($d.Size - $d.FreeSpace) * 100.0) / $d.Size) + 0.5)
+                @{ mount=$d.DeviceID; usage=$u } | ConvertTo-Json -Compress
+              }
+            }
+          register: _win_df
+          failed_when: false
+          changed_when: false
+
+        - name: Normalizar lista de discos (Windows)
+          ansible.builtin.set_fact:
+            _storage_entries: >-
+              {%- set th = storage_threshold | default(70) | int -%}
+              {%- set out = [] -%}
+              {%- for line in (_win_df.stdout_lines | default([])) -%}
+                {%- if line | trim | length > 0 -%}
+                  {%- set e = (line | from_json) -%}
+                  {%- set use = e.usage | int -%}
+                  {%- set _ = out.append({'mount': e.mount, 'usage': use, 'ok': (use < th)}) -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {{ out }}
+
+        - name: Montar relatório do host (Windows)
+          ansible.builtin.set_fact:
+            patch_host_report:
+              host: "{{ inventory_hostname }}"
+              os: windows
+              services: "{{ _svc_rows | default([]) }}"
+              ports:
+                local: "{{ _ports_local | default([]) }}"
+                remote: "{{ _ports_remote | default([]) }}"
+              telnet: "{{ _telnet_rows | default([]) }}"
+              commands: "{{ _cmd_rows | default([]) }}"
+              storage: "{{ _storage_entries | default([]) }}"
+              groups: "{{ hostvars['localhost'].patch_group_membership[inventory_hostname] | default([]) }}"
+
+      rescue:
+        - name: Publicar alerta – falha em checks Windows
+          ansible.builtin.set_stats:
+            data:
+              send_mail_subject: "Ansible-Report (FALHA) - Checks Windows - {{ awx_job_template_name | default('Patch Verification') }}"
+              send_mail_body: |
+                <h2 style="color:#b00020">Falha nos checks Windows</h2>
+                <p><b>Host:</b> {{ inventory_hostname }}</p>
+                <p><b>Tarefa:</b> {{ ansible_failed_task.name | default('desconhecida') }}</p>
+                <pre>{{ (ansible_failed_result.msg | default(ansible_failed_result | to_nice_json | default(''))) }}</pre>
+
+        - name: Aviso – falha tratada (Windows)
+          ansible.builtin.debug:
+            msg: "Falha tratada nos checks Windows — subject/body publicados."
