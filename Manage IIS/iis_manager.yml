@@ -4,6 +4,12 @@
   gather_facts: false
 
   vars:
+    iis_core_services_default:
+      - WAS
+      - W3SVC
+      - IISADMIN
+      - AppHostSvc
+
     target_hosts: >-
       {{
         (survey_hosts | default(''))
@@ -60,9 +66,15 @@
 
         iis_pools_survey_raw: "{{ iis_pools | default('') }}"
 
-        iis_services_raw: "{{ iis_services | default(iis_service_name | default([])) }}"
         iis_service_operation: "{{ (iis_service_operation | default('restart')) | string | lower | trim }}"
         iis_service_max_retries: "{{ (iis_service_max_retries | default(3)) | int }}"
+
+    - name: Validar operações (aceita info)
+      ansible.builtin.assert:
+        that:
+          - iis_pool_operation in ['start','stop','restart','info']
+          - iis_service_operation in ['start','stop','restart','info']
+        fail_msg: "Operação inválida. Use start|stop|restart|info."
 
     - name: Normalizar pools do survey (vazio = todos)
       ansible.builtin.set_fact:
@@ -75,27 +87,10 @@
               )
           }}
 
-    - name: Normalizar lista de serviços do IIS (Survey)
+    - name: Definir serviços principais do IIS (sem Survey)
       ansible.builtin.set_fact:
-        iis_services_norm: >-
-          {%- set raw = iis_services_raw -%}
-          {{
-            (
-              raw
-              if (raw is sequence and raw is not string)
-              else (raw | default('') | regex_replace('\s*,\s*', ',') | split(','))
-            )
-            | map('trim')
-            | reject('equalto','')
-            | list
-          }}
-
-    - name: Definir defaults de serviços (se vazio)
-      ansible.builtin.set_fact:
-        iis_services_norm: "{{ ['W3SVC'] }}"
-      when:
-        - iis_manage_service | bool
-        - (iis_services_norm | length) == 0
+        iis_services_norm: "{{ iis_core_services_default }}"
+      when: iis_manage_service | bool
 
     - name: Construindo a lista de hosts (Windows)
       ansible.builtin.include_tasks: tasks/create_dynamic_hosts_windows.yml
