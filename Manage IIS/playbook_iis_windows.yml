@@ -9,7 +9,7 @@
     iis_pools_norm: "{{ hostvars['localhost'].iis_pools_norm | default([]) }}"
     iis_pool_operation: "{{ hostvars['localhost'].iis_pool_operation | default('start') }}"
     iis_pool_max_retries: "{{ hostvars['localhost'].iis_pool_max_retries | default(3) }}"
-    iis_services_norm: "{{ hostvars['localhost'].iis_services_norm | default(['W3SVC']) }}"
+    iis_services_norm: "{{ hostvars['localhost'].iis_services_norm | default(['WAS','W3SVC','AppHostSvc','IISADMIN']) }}"
     iis_service_operation: "{{ hostvars['localhost'].iis_service_operation | default('restart') }}"
     iis_service_max_retries: "{{ hostvars['localhost'].iis_service_max_retries | default(3) }}"
   tasks:
