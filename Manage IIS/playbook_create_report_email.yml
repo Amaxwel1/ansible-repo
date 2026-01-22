@@ -43,6 +43,21 @@
       ansible.builtin.set_fact:
         send_mail_body: |
           {% set kind_map = {'pool':'Application Pool','service':'Serviço'} %}
+
+          {% set info_reports = [] %}
+          {% set action_reports = [] %}
+
+          {% for rep in (normal_reports | default([])) %}
+            {% set info_rows = (rep.rows | default([])) | selectattr('action','equalto','info') | list %}
+            {% set act_rows  = (rep.rows | default([])) | rejectattr('action','equalto','info') | list %}
+            {% if info_rows | length > 0 %}
+              {% set _ = info_reports.append({'host': rep.host, 'rows': info_rows}) %}
+            {% endif %}
+            {% if act_rows | length > 0 %}
+              {% set _ = action_reports.append({'host': rep.host, 'rows': act_rows}) %}
+            {% endif %}
+          {% endfor %}
+
           <h2>Gerenciamento de IIS (Windows)</h2>
           <p><b>Motivo:</b> {{ (motivo | default('N/D')) | e }}</p>
 
@@ -64,8 +79,36 @@
           </ul>
           {% endif %}
 
-          {% if normal_reports %}
-            <h3 style="margin-top:18px;">Detalhes por host</h3>
+          {% if info_reports | length > 0 %}
+            <h3 style="margin-top:18px;">Consulta (INFO)</h3>
+            <table style="border-collapse:collapse;font-family:Arial;font-size:12px;width:100%;">
+              <tr style="background:#f2f2f2;">
+                <th style="border:1px solid #ccc;padding:4px;text-align:left;">Servidor</th>
+                <th style="border:1px solid #ccc;padding:4px;text-align:left;">Tipo</th>
+                <th style="border:1px solid #ccc;padding:4px;text-align:left;">Item</th>
+                <th style="border:1px solid #ccc;padding:4px;text-align:left;">Estado</th>
+                <th style="border:1px solid #ccc;padding:4px;text-align:left;">Resultado</th>
+              </tr>
+
+              {% for rep in info_reports %}
+                {% for r in (rep.rows | default([])) %}
+                  {% set cur_state = (r.initial | default('unknown')) %}
+                  <tr>
+                    <td style="border:1px solid #ccc;padding:4px;">{{ rep.host }}</td>
+                    <td style="border:1px solid #ccc;padding:4px;">{{ kind_map.get(r.kind, r.kind) }}</td>
+                    <td style="border:1px solid #ccc;padding:4px;">{{ r.name }}</td>
+                    <td style="border:1px solid #ccc;padding:4px;">{{ cur_state }}</td>
+                    <td style="border:1px solid #ccc;padding:4px;color:{{ 'green' if r.ok else 'red' }};">
+                      {{ 'OK' if r.ok else 'NOK' }}
+                    </td>
+                  </tr>
+                {% endfor %}
+              {% endfor %}
+            </table>
+          {% endif %}
+
+          {% if action_reports | length > 0 %}
+            <h3 style="margin-top:18px;">Execução (Ações)</h3>
             <table style="border-collapse:collapse;font-family:Arial;font-size:12px;width:100%;">
               <tr style="background:#f2f2f2;">
                 <th style="border:1px solid #ccc;padding:4px;text-align:left;">Servidor</th>
@@ -76,7 +119,8 @@
                 <th style="border:1px solid #ccc;padding:4px;text-align:left;">Final</th>
                 <th style="border:1px solid #ccc;padding:4px;text-align:left;">Resultado</th>
               </tr>
-              {% for rep in normal_reports %}
+
+              {% for rep in action_reports %}
                 {% for r in (rep.rows | default([])) %}
                 <tr>
                   <td style="border:1px solid #ccc;padding:4px;">{{ rep.host }}</td>
@@ -92,6 +136,10 @@
                 {% endfor %}
               {% endfor %}
             </table>
+          {% endif %}
+
+          {% if (info_reports | length == 0) and (action_reports | length == 0) and (not exec_error_reports) and (not unreachable_hosts) %}
+            <p style="font-family:Arial;font-size:12px;color:#777;">Nenhum dado retornado.</p>
           {% endif %}
 
     - name: Definir subject e stats (para job de envio de e-mail)
