@@ -22,7 +22,14 @@
     iis_pool_max_retries_eff: "{{ (iis_pool_max_retries | default(3)) | int }}"
     iis_service_max_retries_eff: "{{ (iis_service_max_retries | default(3)) | int }}"
     iis_pools_norm_eff: "{{ iis_pools_norm | default([]) }}"
-    iis_services_norm_eff: "{{ iis_services_norm | default(['W3SVC']) }}"
+    iis_services_norm_eff: "{{ iis_services_norm | default(['WAS','W3SVC','IISADMIN']) }}"
+
+- name: Validar operações no host (aceita info)
+  ansible.builtin.assert:
+    that:
+      - iis_pool_operation_eff in ['start','stop','restart','info']
+      - iis_service_operation_eff in ['start','stop','restart','info']
+    fail_msg: "Operação inválida. Use start|stop|restart|info."
 
 - name: Verificar se módulo WebAdministration/IIS está disponível
   when: iis_manage_pools_eff
@@ -51,38 +58,43 @@
           error: "Módulo WebAdministration/IIS não encontrado neste host."
     - ansible.builtin.meta: end_host
 
-- name: Coletar Application Pools do IIS (estado atual)
+- name: Coletar Application Pools do IIS (BÁSICO)
   when: iis_manage_pools_eff
   ansible.windows.win_powershell:
     script: |
       Import-Module WebAdministration
       $pools = Get-IISAppPool | Select-Object Name, @{Name='State';Expression={$_.State.ToString()}}
       $pools | ConvertTo-Json -Compress
-  register: iis_pools_raw
+  register: iis_pools_basic_raw
   changed_when: false
   failed_when: false
 
-- name: Converter JSON de pools em objeto
+- name: Parse pools básico (inicial) - JSON
   when: iis_manage_pools_eff
   ansible.builtin.set_fact:
-    _iis_pools_parsed: >-
+    _iis_pools_basic_parsed: >-
       {{
-        (iis_pools_raw.output | default([]) | join('') | trim | default('[]'))
+        (iis_pools_basic_raw.output | default([]) | join('') | trim | default('[]'))
         | from_json
       }}
 
-- name: Normalizar lista de pools (sempre lista)
+- name: Normalizar lista de pools (inicial) - sempre lista
   when: iis_manage_pools_eff
   ansible.builtin.set_fact:
-    _iis_pools_all: "{{ [_iis_pools_parsed] if _iis_pools_parsed is mapping else (_iis_pools_parsed | default([])) }}"
+    _iis_pools_basic_all: >-
+      {{
+        [_iis_pools_basic_parsed]
+        if _iis_pools_basic_parsed is mapping
+        else (_iis_pools_basic_parsed | default([]))
+      }}
 
 - name: "Criar dicionário { pool: state } (estado inicial)"
   when: iis_manage_pools_eff
   ansible.builtin.set_fact:
     iis_pools_states_initial: >-
       {%- set out = {} -%}
-      {%- for p in _iis_pools_all -%}
-        {%- set _ = out.update({ p.Name: (p.State | string) }) -%}
+      {%- for p in (_iis_pools_basic_all | default([])) -%}
+        {%- set _ = out.update({ (p.Name | string): (p.State | string) }) -%}
       {%- endfor -%}
       {{ out }}
 
@@ -94,6 +106,71 @@
   when:
     - iis_manage_pools_eff
     - (_len | int) == 0
+
+- name: Coletar INFO de pools (somente quando operação=info)
+  when:
+    - iis_manage_pools_eff
+    - iis_pool_operation_eff == 'info'
+  ansible.windows.win_powershell:
+    script: |
+      Import-Module WebAdministration
+
+      $sites = @()
+      try { $sites = Get-Website | Select-Object Name, ApplicationPool } catch { $sites = @() }
+
+      $apps = @()
+      try {
+        if (Get-Command Get-WebApplication -ErrorAction SilentlyContinue) {
+          $apps = Get-WebApplication | Select-Object Site, Path, ApplicationPool
+        }
+      } catch { $apps = @() }
+
+      $out = @{}
+      foreach ($p in (Get-IISAppPool)) {
+        $name = $p.Name
+        $item = Get-Item ("IIS:\AppPools\{0}" -f $name) -ErrorAction SilentlyContinue
+
+        $runtime   = if ($item) { $item.managedRuntimeVersion } else { "" }
+        $pipeline  = if ($item) { $item.managedPipelineMode.ToString() } else { "" }
+        $autoStart = if ($item) { [bool]$item.autoStart } else { $null }
+        $startMode = if ($item) { $item.startMode.ToString() } else { "" }
+
+        $siteNames = @()
+        try { $siteNames = ($sites | Where-Object { $_.ApplicationPool -eq $name } | Select-Object -ExpandProperty Name) } catch { $siteNames = @() }
+
+        $appCount = 0
+        try { $appCount = ($apps | Where-Object { $_.ApplicationPool -eq $name }).Count } catch { $appCount = 0 }
+
+        $out[$name] = @{
+          runtime   = $runtime
+          pipeline  = $pipeline
+          autoStart = $autoStart
+          startMode = $startMode
+          sites     = ($siteNames -join ",")
+          appsCount = $appCount
+        }
+      }
+
+      $out | ConvertTo-Json -Compress
+  register: iis_pools_info_raw
+  changed_when: false
+  failed_when: false
+
+- name: Parse INFO pools (dict) ou set vazio
+  when: iis_manage_pools_eff
+  ansible.builtin.set_fact:
+    iis_pools_details_initial: >-
+      {{
+        (iis_pool_operation_eff == 'info')
+        | ternary(
+            (
+              (iis_pools_info_raw.output | default([]) | join('') | trim)
+              | default('{}', true)
+              | from_json
+            ),
+            {}
+          )
+      }}
 
 - name: Determinar pools alvo (todos ou apenas os informados)
   when: iis_manage_pools_eff
@@ -119,22 +196,27 @@
     _iis_pools_needing_action: >-
       {%- set op = (iis_pool_operation_eff) -%}
       {%- set out = [] -%}
-      {%- for name, st in iis_pools_states_initial.items() -%}
-        {%- if name in _iis_pools_effective -%}
-          {%- if op == 'restart' -%}
-            {%- set _ = out.append(name) -%}
-          {%- elif op == 'start' and (st | string) != 'Started' -%}
-            {%- set _ = out.append(name) -%}
-          {%- elif op == 'stop' and (st | string) != 'Stopped' -%}
-            {%- set _ = out.append(name) -%}
+      {%- if op == 'info' -%}
+        {{ out }}
+      {%- else -%}
+        {%- for name, st in iis_pools_states_initial.items() -%}
+          {%- if name in _iis_pools_effective -%}
+            {%- if op == 'restart' -%}
+              {%- set _ = out.append(name) -%}
+            {%- elif op == 'start' and (st | string) != 'Started' -%}
+              {%- set _ = out.append(name) -%}
+            {%- elif op == 'stop' and (st | string) != 'Stopped' -%}
+              {%- set _ = out.append(name) -%}
+            {%- endif -%}
           {%- endif -%}
-        {%- endif -%}
-      {%- endfor -%}
-      {{ out }}
+        {%- endfor -%}
+        {{ out }}
+      {%- endif -%}
 
 - name: Aplicar operação nos Application Pools necessários
   when:
     - iis_manage_pools_eff
+    - iis_pool_operation_eff != 'info'
     - (_iis_pools_needing_action | length) > 0
   ansible.windows.win_powershell:
     script: |
@@ -209,40 +291,63 @@
   loop_control:
     label: "{{ item }}"
 
-- name: Coletar Application Pools do IIS (estado final)
-  when: iis_manage_pools_eff
+- name: Definir estado final igual ao inicial (op=info)
+  when:
+    - iis_manage_pools_eff
+    - iis_pool_operation_eff == 'info'
+  ansible.builtin.set_fact:
+    iis_pools_states_final: "{{ iis_pools_states_initial }}"
+    iis_pools_details_final: "{{ iis_pools_details_initial }}"
+    iis_pools_actions: { "results": [] }
+
+- name: Coletar Application Pools do IIS (BÁSICO final)
+  when:
+    - iis_manage_pools_eff
+    - iis_pool_operation_eff != 'info'
   ansible.windows.win_powershell:
     script: |
       Import-Module WebAdministration
       $pools = Get-IISAppPool | Select-Object Name, @{Name='State';Expression={$_.State.ToString()}}
       $pools | ConvertTo-Json -Compress
-  register: iis_pools_raw_final
+  register: iis_pools_basic_raw_final
   changed_when: false
   failed_when: false
 
-- name: Parse JSON dos pools (estado final)
-  when: iis_manage_pools_eff
+- name: Parse pools básico (final) - JSON
+  when:
+    - iis_manage_pools_eff
+    - iis_pool_operation_eff != 'info'
   ansible.builtin.set_fact:
-    _iis_pools_parsed_final: >-
+    _iis_pools_basic_parsed_final: >-
       {{
-        (iis_pools_raw_final.output | default([]) | join('') | trim | default('[]'))
+        (iis_pools_basic_raw_final.output | default([]) | join('') | trim | default('[]'))
         | from_json
       }}
 
-- name: Normalizar lista final de pools (sempre lista)
-  when: iis_manage_pools_eff
+- name: Normalizar lista de pools (final) - sempre lista
+  when:
+    - iis_manage_pools_eff
+    - iis_pool_operation_eff != 'info'
   ansible.builtin.set_fact:
-    _iis_pools_all_final: "{{ [_iis_pools_parsed_final] if _iis_pools_parsed_final is mapping else (_iis_pools_parsed_final | default([])) }}"
+    _iis_pools_basic_all_final: >-
+      {{
+        [_iis_pools_basic_parsed_final]
+        if _iis_pools_basic_parsed_final is mapping
+        else (_iis_pools_basic_parsed_final | default([]))
+      }}
 
 - name: "Criar dicionário { pool: state } (estado final)"
-  when: iis_manage_pools_eff
+  when:
+    - iis_manage_pools_eff
+    - iis_pool_operation_eff != 'info'
   ansible.builtin.set_fact:
     iis_pools_states_final: >-
       {%- set out = {} -%}
-      {%- for p in (_iis_pools_all_final | default([])) -%}
-        {%- set _ = out.update({ p.Name: (p.State | string) }) -%}
+      {%- for p in (_iis_pools_basic_all_final | default([])) -%}
+        {%- set _ = out.update({ (p.Name | string): (p.State | string) }) -%}
       {%- endfor -%}
       {{ out }}
+    iis_pools_details_final: {}
 
 - name: Construir linhas do relatório (App Pools)
   when: iis_manage_pools_eff
@@ -255,9 +360,11 @@
         {%- set initial = iis_pools_states_initial.get(name, 'Unknown') -%}
         {%- set final = iis_pools_states_final.get(name, 'Unknown') -%}
         {%- set acted = (name in (_iis_pools_needing_action | default([]))) -%}
-        {%- set action = (op if acted else 'none') -%}
+        {%- set action = (op if (op == 'info' or acted) else 'none') -%}
 
-        {%- if op in ['start','restart'] -%}
+        {%- if op == 'info' -%}
+          {%- set ok = (initial != 'Unknown') -%}
+        {%- elif op in ['start','restart'] -%}
           {%- set ok = (final == 'Started') -%}
         {%- elif op == 'stop' -%}
           {%- set ok = (final == 'Stopped') -%}
@@ -266,11 +373,33 @@
         {%- endif -%}
 
         {%- set msg = 'Sem ação – já estava no estado desejado' -%}
-        {%- for rr in (iis_pools_actions.results | default([])) -%}
-          {%- if rr.item == name -%}
-            {%- set msg = (rr.stdout | default(rr.stderr | default(''))) -%}
-          {%- endif -%}
-        {%- endfor -%}
+        {%- if op == 'info' -%}
+          {%- set msg = 'Apenas consulta (info)' -%}
+        {%- else -%}
+          {%- for rr in (iis_pools_actions.results | default([])) -%}
+            {%- if rr.item == name -%}
+              {%- set msg = (
+                (rr.output | default([]) | join(''))
+                | default(rr.stdout | default(rr.stderr | default('')))
+              ) -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+
+        {%- set info = '' -%}
+        {%- if op == 'info' -%}
+          {%- set d = (iis_pools_details_initial.get(name, {}) if (iis_pools_details_initial is defined) else {}) -%}
+          {%- set sites = (d.get('sites','') | string) -%}
+          {%- if sites|length > 80 -%}{%- set sites = sites[0:80] ~ '…' -%}{%- endif -%}
+          {%- set info = (
+            'runtime=' ~ (d.get('runtime','')|string) ~
+            '; pipeline=' ~ (d.get('pipeline','')|string) ~
+            '; autoStart=' ~ (d.get('autoStart','')|string) ~
+            '; startMode=' ~ (d.get('startMode','')|string) ~
+            '; sites=' ~ sites ~
+            '; apps=' ~ (d.get('appsCount','')|string)
+          ) -%}
+        {%- endif -%}
 
         {%- set _ = out.append({
               'kind': 'pool',
@@ -279,6 +408,7 @@
               'initial': initial,
               'final': final,
               'ok': ok,
+              'info': info,
               'message': msg
             }) -%}
       {%- endfor -%}
@@ -291,45 +421,214 @@
               'initial': 'absent',
               'final': 'absent',
               'ok': false,
+              'info': 'absent',
               'message': 'Application Pool não encontrado no host'
             }) -%}
       {%- endfor -%}
       {{ out }}
-
-- name: Coletar informações de serviços (Windows)
-  when: iis_manage_service_eff
-  ansible.windows.win_service_info:
-  register: _iis_svc_info
-  changed_when: false
-  failed_when: false
 
 - name: Normalizar lista de serviços alvo (Windows)
   when: iis_manage_service_eff
   ansible.builtin.set_fact:
     _iis_services_effective: "{{ iis_services_norm_eff | map('string') | list | unique }}"
 
-- name: Identificar serviços ausentes (Windows)
+- name: Ordenar serviços do IIS (dependências)
+  when: iis_manage_service_eff
+  ansible.builtin.set_fact:
+    _iis_services_ordered: >-
+      {%- set base = ['WAS','W3SVC','IISADMIN','AppHostSvc','WMSVC'] -%}
+      {%- set eff = _iis_services_effective -%}
+      {%- set ordered = [] -%}
+      {%- for s in base -%}
+        {%- if s in eff -%}{%- set _ = ordered.append(s) -%}{%- endif -%}
+      {%- endfor -%}
+      {%- for s in eff -%}
+        {%- if s not in ordered -%}{%- set _ = ordered.append(s) -%}{%- endif -%}
+      {%- endfor -%}
+      {%- if iis_service_operation_eff == 'stop' -%}
+        {{ ordered | reverse | list }}
+      {%- else -%}
+        {{ ordered }}
+      {%- endif -%}
+
+- name: Coletar informações dos serviços (INFO) - inicial (somente quando operação=info)
+  when:
+    - iis_manage_service_eff
+    - iis_service_operation_eff == 'info'
+  ansible.windows.win_powershell:
+    script: |
+      $NamesRaw = "{{ _iis_services_ordered | join(',') }}"
+      $names = $NamesRaw.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_.Length -gt 0 }
+
+      $out = foreach ($n in $names) {
+        $filter = "Name='{0}'" -f ($n.Replace("'", "''"))
+        $s = Get-CimInstance -ClassName Win32_Service -Filter $filter -ErrorAction SilentlyContinue
+        if ($s) {
+          [pscustomobject]@{
+            Name        = $s.Name
+            DisplayName = $s.DisplayName
+            StartMode   = $s.StartMode
+            State       = $s.State
+            Status      = $s.Status
+            PathName    = $s.PathName
+          }
+        } else {
+          [pscustomobject]@{
+            Name    = $n
+            Missing = $true
+          }
+        }
+      }
+
+      $out | ConvertTo-Json -Compress
+  register: _iis_svc_info_initial_raw
+  changed_when: false
+  failed_when: false
+
+- name: Parse JSON dos serviços (INFO inicial) - JSON
+  when:
+    - iis_manage_service_eff
+    - iis_service_operation_eff == 'info'
+  ansible.builtin.set_fact:
+    _iis_svc_info_initial_parsed: >-
+      {{
+        (_iis_svc_info_initial_raw.output | default([]) | join('') | trim | default('[]'))
+        | from_json
+      }}
+
+- name: Normalizar lista de serviços INFO (inicial) - sempre lista
+  when:
+    - iis_manage_service_eff
+    - iis_service_operation_eff == 'info'
+  ansible.builtin.set_fact:
+    _iis_svc_info_initial_all: >-
+      {{
+        [_iis_svc_info_initial_parsed]
+        if _iis_svc_info_initial_parsed is mapping
+        else (_iis_svc_info_initial_parsed | default([]))
+      }}
+
+- name: Criar dict de detalhes de serviços (INFO inicial)
+  when:
+    - iis_manage_service_eff
+    - iis_service_operation_eff == 'info'
+  ansible.builtin.set_fact:
+    iis_services_details_initial: >-
+      {%- set out = {} -%}
+      {%- for s in (_iis_svc_info_initial_all | default([])) -%}
+        {%- set _ = out.update({ (s.Name | string): {
+          'displayName': (s.DisplayName | default('') | string),
+          'startMode': (s.StartMode | default('') | string),
+          'state': (s.State | default('') | string),
+          'status': (s.Status | default('') | string),
+          'pathName': (s.PathName | default('') | string),
+          'missing': ((s.Missing is defined) and (s.Missing | bool))
+        }}) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Coletar status dos serviços (BÁSICO) - inicial (quando operação != info)
+  when:
+    - iis_manage_service_eff
+    - iis_service_operation_eff != 'info'
+  ansible.windows.win_powershell:
+    script: |
+      $NamesRaw = "{{ _iis_services_ordered | join(',') }}"
+      $names = $NamesRaw.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_.Length -gt 0 }
+
+      $out = foreach ($n in $names) {
+        $svc = Get-Service -Name $n -ErrorAction SilentlyContinue
+        if ($svc) {
+          [pscustomobject]@{
+            Name  = $svc.Name
+            State = $svc.Status.ToString()
+          }
+        } else {
+          [pscustomobject]@{
+            Name    = $n
+            Missing = $true
+          }
+        }
+      }
+
+      $out | ConvertTo-Json -Compress
+  register: _iis_svc_basic_initial_raw
+  changed_when: false
+  failed_when: false
+
+- name: Parse serviços (BÁSICO inicial) - JSON
+  when:
+    - iis_manage_service_eff
+    - iis_service_operation_eff != 'info'
+  ansible.builtin.set_fact:
+    _iis_svc_basic_initial_parsed: >-
+      {{
+        (_iis_svc_basic_initial_raw.output | default([]) | join('') | trim | default('[]'))
+        | from_json
+      }}
+
+- name: Normalizar lista de serviços BÁSICO (inicial) - sempre lista
+  when:
+    - iis_manage_service_eff
+    - iis_service_operation_eff != 'info'
+  ansible.builtin.set_fact:
+    _iis_svc_basic_initial_all: >-
+      {{
+        [_iis_svc_basic_initial_parsed]
+        if _iis_svc_basic_initial_parsed is mapping
+        else (_iis_svc_basic_initial_parsed | default([]))
+      }}
+
+- name: Criar dict de detalhes de serviços (BÁSICO inicial)
+  when:
+    - iis_manage_service_eff
+    - iis_service_operation_eff != 'info'
+  ansible.builtin.set_fact:
+    iis_services_details_initial: >-
+      {%- set out = {} -%}
+      {%- for s in (_iis_svc_basic_initial_all | default([])) -%}
+        {%- set _ = out.update({ (s.Name | string): {
+          'displayName': '',
+          'startMode': '',
+          'state': (s.State | default('') | string),
+          'status': '',
+          'pathName': '',
+          'missing': ((s.Missing is defined) and (s.Missing | bool))
+        }}) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Criar listas present/missing de serviços (inicial)
   when: iis_manage_service_eff
   ansible.builtin.set_fact:
     _iis_services_missing: >-
-      {{
-        (_iis_services_effective | default([]))
-        | difference( (_iis_svc_info.services | default([])) | map(attribute='name') | list )
-      }}
+      {%- set out = [] -%}
+      {%- for name in (_iis_services_ordered | default([])) -%}
+        {%- set d = iis_services_details_initial.get(name, {}) -%}
+        {%- if d.get('missing', false) -%}
+          {%- set _ = out.append(name) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+    _iis_services_present_ordered: >-
+      {%- set out = [] -%}
+      {%- for name in (_iis_services_ordered | default([])) -%}
+        {%- if name not in (_iis_services_missing | default([])) -%}
+          {%- set _ = out.append(name) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
 
-- name: Serviços presentes (Windows)
+- name: Ajustar lista missing
   when: iis_manage_service_eff
   ansible.builtin.set_fact:
-    _iis_services_present: >-
-      {{
-        (_iis_services_effective | default([]))
-        | intersect( (_iis_svc_info.services | default([])) | map(attribute='name') | list )
-      }}
+    _iis_services_missing: "{{ (_iis_services_missing | default([])) | difference(_iis_services_present_ordered | default([])) }}"
 
 - name: Executar operação nos serviços do IIS com retries (Windows)
   when:
     - iis_manage_service_eff
-    - (_iis_services_present | length) > 0
+    - iis_service_operation_eff != 'info'
+    - (_iis_services_present_ordered | length) > 0
   ansible.windows.win_powershell:
     script: |
       $Name = "{{ item }}"
@@ -344,6 +643,7 @@
 
       $initial = $svc.Status.ToString()
       $success = $false
+      $st = $initial
 
       for ($i = 1; $i -le $Max; $i++) {
         if ($Operation -eq 'restart') {
@@ -367,12 +667,91 @@
       } else {
         Write-Output ("OK: {0} initial={1} final={2}" -f $Name, $initial, $st)
       }
-  loop: "{{ _iis_services_present }}"
+  loop: "{{ _iis_services_present_ordered }}"
   loop_control:
     label: "{{ item }}"
   register: _iis_svc_actions
   changed_when: false
   failed_when: false
+
+- name: Definir estado final igual ao inicial (op=info)
+  when:
+    - iis_manage_service_eff
+    - iis_service_operation_eff == 'info'
+  ansible.builtin.set_fact:
+    iis_services_details_final: "{{ iis_services_details_initial }}"
+    _iis_svc_actions: { "results": [] }
+
+- name: Coletar status dos serviços (BÁSICO) - final (quando operação != info)
+  when:
+    - iis_manage_service_eff
+    - iis_service_operation_eff != 'info'
+  ansible.windows.win_powershell:
+    script: |
+      $NamesRaw = "{{ _iis_services_ordered | join(',') }}"
+      $names = $NamesRaw.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_.Length -gt 0 }
+
+      $out = foreach ($n in $names) {
+        $svc = Get-Service -Name $n -ErrorAction SilentlyContinue
+        if ($svc) {
+          [pscustomobject]@{
+            Name  = $svc.Name
+            State = $svc.Status.ToString()
+          }
+        } else {
+          [pscustomobject]@{
+            Name    = $n
+            Missing = $true
+          }
+        }
+      }
+
+      $out | ConvertTo-Json -Compress
+  register: _iis_svc_basic_final_raw
+  changed_when: false
+  failed_when: false
+
+- name: Parse serviços (BÁSICO final) - JSON
+  when:
+    - iis_manage_service_eff
+    - iis_service_operation_eff != 'info'
+  ansible.builtin.set_fact:
+    _iis_svc_basic_final_parsed: >-
+      {{
+        (_iis_svc_basic_final_raw.output | default([]) | join('') | trim | default('[]'))
+        | from_json
+      }}
+
+- name: Normalizar lista de serviços BÁSICO (final) - sempre lista
+  when:
+    - iis_manage_service_eff
+    - iis_service_operation_eff != 'info'
+  ansible.builtin.set_fact:
+    _iis_svc_basic_final_all: >-
+      {{
+        [_iis_svc_basic_final_parsed]
+        if _iis_svc_basic_final_parsed is mapping
+        else (_iis_svc_basic_final_parsed | default([]))
+      }}
+
+- name: Criar dict de detalhes de serviços (BÁSICO final)
+  when:
+    - iis_manage_service_eff
+    - iis_service_operation_eff != 'info'
+  ansible.builtin.set_fact:
+    iis_services_details_final: >-
+      {%- set out = {} -%}
+      {%- for s in (_iis_svc_basic_final_all | default([])) -%}
+        {%- set _ = out.update({ (s.Name | string): {
+          'displayName': '',
+          'startMode': '',
+          'state': (s.State | default('') | string),
+          'status': '',
+          'pathName': '',
+          'missing': ((s.Missing is defined) and (s.Missing | bool))
+        }}) -%}
+      {%- endfor -%}
+      {{ out }}
 
 - name: Construir linhas do relatório (Serviços IIS)
   when: iis_manage_service_eff
@@ -381,23 +760,57 @@
       {%- set out = (_iis_rows | default([]) | list) -%}
       {%- set op = iis_service_operation_eff -%}
 
-      {%- for r in (_iis_svc_actions.results | default([])) -%}
-        {%- set msg = (
-              (r.output | default([]) | join('')) 
-              | default(r.host_out | default('')) 
-              | default(r.stdout | default('')) 
-              | default(r.stderr | default(''))
-            ) -%}
+      {%- for name in (_iis_services_present_ordered | default([])) -%}
+        {%- set d0 = (iis_services_details_initial.get(name, {}) if (iis_services_details_initial is defined) else {}) -%}
+        {%- set d1 = (iis_services_details_final.get(name, {}) if (iis_services_details_final is defined) else {}) -%}
 
-        {%- set ok = (r.rc | default(0) == 0) -%}
-        {%- set name = r.item -%}
+        {%- set initial = (d0.get('state','unknown') | string) -%}
+        {%- set final = (d1.get('state','unknown') | string) -%}
 
-        {%- set initial = 'unknown' -%}
-        {%- set final = 'unknown' -%}
-        {%- if 'initial=' in msg and 'final=' in msg -%}
-          {%- set rest = (msg.split('initial=')[1]) -%}
-          {%- set initial = (rest.split('final=')[0] | trim) -%}
-          {%- set final = (rest.split('final=')[1] | trim) -%}
+        {# se for info e estiver missing, força absent #}
+        {%- if op == 'info' and (d0.get('missing', false)) -%}
+          {%- set initial = 'absent' -%}
+          {%- set final = 'absent' -%}
+        {%- endif -%}
+
+        {# calcula OK #}
+        {%- if op == 'info' -%}
+          {%- set ok = (d0.get('missing', false) == false) -%}
+        {%- elif op in ['start','restart'] -%}
+          {%- set ok = (final == 'Running') -%}
+        {%- elif op == 'stop' -%}
+          {%- set ok = (final == 'Stopped') -%}
+        {%- else -%}
+          {%- set ok = (final in ['Running','Stopped']) -%}
+        {%- endif -%}
+
+        {%- set msg = '' -%}
+        {%- if op == 'info' -%}
+          {%- set msg = 'Apenas consulta (info)' -%}
+        {%- else -%}
+          {%- for r in (_iis_svc_actions.results | default([])) -%}
+            {%- if r.item == name -%}
+              {%- set msg = (
+                (r.output | default([]) | join(''))
+                | default(r.stdout | default(r.stderr | default('')))
+              ) -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+
+        {%- set info = '' -%}
+        {%- if op == 'info' -%}
+          {%- set disp = (d0.get('displayName','') | string) -%}
+          {%- if disp|length > 60 -%}{%- set disp = disp[0:60] ~ '…' -%}{%- endif -%}
+
+          {%- set path = (d0.get('pathName','') | string) -%}
+          {%- if path|length > 90 -%}{%- set path = path[0:90] ~ '…' -%}{%- endif -%}
+
+          {%- set info = (
+            'display=' ~ disp ~
+            '; startMode=' ~ (d0.get('startMode','')|string) ~
+            '; path=' ~ path
+          ) -%}
         {%- endif -%}
 
         {%- set _ = out.append({
@@ -407,6 +820,7 @@
               'initial': initial,
               'final': final,
               'ok': ok,
+              'info': info,
               'message': msg
             }) -%}
       {%- endfor -%}
@@ -419,6 +833,7 @@
               'initial': 'absent',
               'final': 'absent',
               'ok': false,
+              'info': 'absent',
               'message': 'Serviço não encontrado no host'
             }) -%}
       {%- endfor -%}
