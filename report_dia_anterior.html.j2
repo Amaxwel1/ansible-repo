@@ -1,367 +1,3 @@
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-  <meta charset="UTF-8" />
-  <title>Relatório - Mock Automation (Dia Anterior)</title>
-  <style>
-    body { font-family: Arial, sans-serif; font-size: 14px; }
-    h1, h2, h3 { color: #1f2937; }
-    table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
-    th, td { border: 1px solid #d1d5db; padding: 6px 8px; text-align: left; }
-    th { background: #e5e7eb; }
-    .ok { color: #16a34a; font-weight: bold; }
-    .fail { color: #dc2626; font-weight: bold; }
-  </style>
-</head>
-<body>
-  <h1>Relatório - Automação Dia Anterior (Mock)</h1>
-  <p>Gerado em: {{ ansible_date_time.date }} {{ ansible_date_time.time }}</p>
-  {% set steps = report.steps | default([]) %}
-  
-  {% if steps %}
-    <p><strong>STEP(s) selecionados:</strong></p>
-    <ul>
-      {% for s in steps %}
-        <li>{{ s }}</li>
-      {% endfor %}
-    </ul>
-  {% endif %} 
-
-  {# aliases pra facilitar e evitar undefined #}
-  {% set deploys = report.deploys | default({}) %}
-  {% set umdf = report.umdf | default({}) %}
-  {% set umdf_env = report.umdf_env | default({}) %}
-  {% set fix = report.fix | default({}) %}
-  {% set dbconf = report.db.config | default({}) %}
-  
-  {# contador de seções (1,2,3...) #}
-  {% set sec = namespace(idx=0) %}
-
-  {# 1) Imagens dos Deployments - só se tiver deploys #}
-  {% if deploys and deploys|length > 0 %}
-    {% set sec.idx = sec.idx + 1 %}
-    <h2>{{ sec.idx }}. Imagens dos Deployments (PRD → TH)</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Deployment</th>
-          <th>Imagem PRD (antes)</th>
-          <th>Imagem TH (antes)</th>
-          <th>Imagem TH (depois)</th>
-          <th>Alterado?</th>
-        </tr>
-      </thead>
-      <tbody>
-      {% for name, info in deploys.items() %}
-        <tr>
-          <td>{{ name }}</td>
-          <td>{{ info.prd_image_before }}</td>
-          <td>{{ info.th_image_before }}</td>
-          <td>{{ info.th_image_after }}</td>
-          <td>
-            {% if info.changed %}
-              <span class="ok">SIM</span>
-            {% else %}
-              NÃO
-            {% endif %}
-          </td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  {% endif %}
-
-  {# 2) UMDF (versão + hosts) - só se veio info de versão OU targets de host #}
-  {% if (umdf and umdf|length > 0) or (umdf_env.targets is defined and umdf_env.targets) %}
-    {% set sec.idx = sec.idx + 1 %}
-    <h2>{{ sec.idx }}. Status do UMDF</h2>
-
-    {% if umdf and umdf|length > 0 %}
-      <p>JAR TH atual: <strong>{{ umdf.hml_jar | default('N/A') }}</strong></p>
-      <p>JAR PRD atual: <strong>{{ umdf.prd_jar | default('N/A') }}</strong></p>
-      <p>Comparação TH x PRD:
-        {% if umdf.versions_match | default(false) %}
-          <span class="ok">OK (iguais)</span>
-        {% else %}
-          <span class="fail">DIFERENTES</span>
-        {% endif %}
-      </p>
-    {% endif %}
-
-    {% if umdf_env.targets is defined and umdf_env.targets %}
-      <h3>Validação de UMDF host (TH)</h3>
-      <p>Host TH esperado:
-        <strong>{{ umdf_env.expected_hml | default('N/A') }}</strong>
-      </p>
-      <table>
-        <tr>
-          <th>Namespace</th>
-          <th>DC</th>
-          <th>umdf_bmf_host</th>
-          <th>umdf_bvsp_host</th>
-          <th>bmf_ok</th>
-          <th>bvsp_ok</th>
-        </tr>
-        {% for row in umdf_env.targets %}
-        <tr>
-          <td>{{ row.namespace }}</td>
-          <td>{{ row.dc }}</td>
-          <td>{{ row.umdf_bmf_host }}</td>
-          <td>{{ row.umdf_bvsp_host }}</td>
-          <td>
-            {% if row.bmf_ok | default(false) %}
-              <span class="ok">OK</span>
-            {% else %}
-              <span class="fail">DIF</span>
-            {% endif %}
-          </td>
-          <td>
-            {% if row.bvsp_ok | default(false) %}
-              <span class="ok">OK</span>
-            {% else %}
-              <span class="fail">DIF</span>
-            {% endif %}
-          </td>
-        </tr>
-        {% endfor %}
-      </table>
-    {% endif %}
-  {% endif %}
-
-  {# 3) FIX / Heartbeat ou Voltar FLAVOUR, dependendo dos STEPs #}
-  {% set steps_is_empty = steps is iterable and (steps | length == 0) %}
-
-  {% set has_step_trocar =
-        (steps is iterable and (
-          'TROCAR FLAVOR' in steps
-          or 'TROCAR FLAVOUR' in steps
-        ))
-        or steps_is_empty
-  %}
-
-  {% set has_step_voltar =
-        steps is iterable
-        and (
-          'VOLTAR FLAVOR' in steps
-          or 'VOLTAR FLAVOUR' in steps
-        )
-  %}
-
-  {% if fix and fix|length > 0 and (has_step_trocar or has_step_voltar) %}
-    {% set sec.idx = sec.idx + 1 %}
-
-    {% if has_step_trocar %}
-      <h2>{{ sec.idx }}. Status do FIX / Heartbeat</h2>
-
-      <p>FLAVOUR ativo atual:
-        <strong>{{ fix.flavour_active | default('N/A') }}</strong>
-      </p>
-
-      <p>Heartbeat:
-        {% if fix.heartbeat_ok | default(false) %}
-          <span class="ok">OK</span>
-        {% else %}
-          <span class="fail">SEM HEARTBEAT</span>
-        {% endif %}
-      </p>
-      <p>Problema de MsgSeqNum detectado:
-        {% if fix.has_msgseq_issue | default(false) %}
-          <span class="fail">SIM</span>
-        {% else %}
-          NÃO
-        {% endif %}
-      </p>
-      <p>SESSION_RESTART aplicado:
-        {% if fix.session_restart_applied | default(false) %}
-          <span class="ok">SIM</span>
-        {% else %}
-          NÃO
-        {% endif %}
-      </p>
-
-    {% elif has_step_voltar %}
-      <h2>{{ sec.idx }}. FIX – Voltar FLAVOUR</h2>
-
-      <p>FLAVOUR ativo atual:
-        <strong>{{ fix.flavour_active | default('N/A') }}</strong>
-      </p>
-
-      {% if fix.restore_before is defined or fix.restore_after is defined %}
-        <p><strong>FLAVOUR antes do restore:</strong> {{ fix.restore_before | default('N/A') }}</p>
-        <p><strong>FLAVOUR após o restore:</strong> {{ fix.restore_after | default('N/A') }}</p>
-      {% endif %}
-
-      {% if fix.restore_ok is defined %}
-        <p>Status do restore:
-          {% if fix.restore_ok %}
-            <span class="ok">OK</span>
-          {% else %}
-            <span class="fail">FALHA</span>
-          {% endif %}
-        </p>
-      {% endif %}
-    {% endif %}
-  {% endif %}
-
-  {# 4) Banco – INSERTs / Configuração do Mock #}
-  {% set dbins = report.db.inserts | default({}) %}
-  {% if dbins.executed | default(false) %}
-    {% set sec.idx = sec.idx + 1 %}
-    <h2>{{ sec.idx }}. Banco de Dados – INSERTs / Configuração do Mock</h2>
-
-    {% set err_count = (dbins.errors_count | default(0) | int) %}
-    <p>
-      <strong>Status:</strong>
-      {% if err_count == 0 %}
-        <span class="ok">OK</span>
-      {% else %}
-        <span class="fail">COM ERROS ({{ err_count }})</span>
-      {% endif %}
-    </p>
-
-    <h3>Flavour (tb_fix_server_configuration_flavour)</h3>
-    {% if dbins.flavour is defined %}
-      <p>
-        {% if dbins.flavour.ok | default(false) %}
-          <span class="ok">OK</span>
-        {% else %}
-          <span class="fail">ERRO</span>
-        {% endif %}
-        {% if dbins.flavour.statusmessage is defined and dbins.flavour.statusmessage %}
-          — {{ dbins.flavour.statusmessage }}
-        {% endif %}
-        {% if dbins.flavour.msg is defined and dbins.flavour.msg %}
-          <br/><small>{{ dbins.flavour.msg }}</small>
-        {% endif %}
-      </p>
-    {% else %}
-      <p>Sem informação da inserção da flavour.</p>
-    {% endif %}
-
-    <h3>Lista de INSERTs executados</h3>
-    {% if dbins.items is defined and (dbins.items | length) > 0 %}
-      <table>
-        <thead>
-          <tr>
-            <th>Query</th>
-            <th>Resultado</th>
-            <th>Rowcount</th>
-            <th>Mensagem</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for r in dbins.items %}
-            {% set qname = (r.item.name if (r.item is defined and r.item.name is defined) else '—') %}
-            {% set failed = r.failed | default(false) %}
-            {% set rowcount = (r.rowcount | default(0) | int) %}
-            {% set statusmessage = r.statusmessage | default('') %}
-            <tr>
-              <td>{{ qname }}</td>
-              <td>
-                {% if failed %}
-                  <span class="fail">ERRO</span>
-                {% elif rowcount > 0 %}
-                  <span class="ok">INSERIU</span>
-                {% else %}
-                  <span>IGNORADO (já existia)</span>
-                {% endif %}
-              </td>
-              <td>{{ rowcount }}</td>
-              <td>
-                {% if failed %}
-                  {{ r.msg | default('Erro não informado') }}
-                {% else %}
-                  {{ statusmessage }}
-                {% endif %}
-              </td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    {% else %}
-      <p>Nenhum INSERT foi executado.</p>
-    {% endif %}
-  {% endif %}
-
-  {# 4) Banco – Configuração FIX - só se mock_flavour_id existir #}
-  {% if dbconf.mock_flavour_id is defined %}
-    {% set sec.idx = sec.idx + 1 %}
-    <h2>{{ sec.idx }}. Banco de Dados – Configuração FIX ({{ fix_flavour_target }})</h2>
-
-    <p><strong>ID Flavour:</strong> {{ dbconf.mock_flavour_id }}</p>
-
-    {# 4.1 Flavour #}
-    <h3>4.1 tb_fix_server_configuration_flavour</h3>
-    {% if dbconf.flavour %}
-      {% set flavour_cols = dbconf.flavour[0].keys() | list %}
-      <table>
-        <tr>
-          {% for col in flavour_cols %}
-            <th>{{ col }}</th>
-          {% endfor %}
-        </tr>
-        {% for row in dbconf.flavour %}
-          <tr>
-            {% for col in flavour_cols %}
-              <td>{{ row[col] }}</td>
-            {% endfor %}
-          </tr>
-        {% endfor %}
-      </table>
-    {% else %}
-      <p>Nenhuma linha na flavour.</p>
-    {% endif %}
-
-    {# 4.2 Session #}
-    <h3>4.2 tb_fix_server_configuration_session</h3>
-    {% if dbconf.session %}
-      {% set session_cols = dbconf.session[0].keys() | list %}
-      <table>
-        <tr>
-          {% for col in session_cols %}
-            <th>{{ col }}</th>
-          {% endfor %}
-        </tr>
-        {% for row in dbconf.session %}
-          <tr>
-            {% for col in session_cols %}
-              <td>{{ row[col] }}</td>
-            {% endfor %}
-          </tr>
-        {% endfor %}
-      </table>
-    {% else %}
-      <p>Nenhuma linha em session.</p>
-    {% endif %}
-
-    {# 4.3 Default #}
-    <h3>4.3 tb_fix_server_configuration_default</h3>
-    {% if dbconf.default %}
-      {% set default_cols = dbconf.default[0].keys() | list %}
-      <table>
-        <tr>
-          {% for col in default_cols %}
-            <th>{{ col }}</th>
-          {% endfor %}
-        </tr>
-        {% for row in dbconf.default %}
-          <tr>
-            {% for col in default_cols %}
-              <td>{{ row[col] }}</td>
-            {% endfor %}
-          </tr>
-        {% endfor %}
-      </table>
-    {% else %}
-      <p>Nenhuma linha em default.</p>
-    {% endif %}
-  {% endif %}
-
-</body>
-</html>
-
-
-
 -----------
 
 
@@ -565,51 +201,50 @@
       <pre>{{ dbins.flavour.stderr }}</pre>
     {% endif %}
 
-    <h3>Lista de INSERTs executados</h3>
-    {% if dbins.items is defined and (dbins.items | length) > 0 %}
-      <table>
-        <thead>
+  <h3>Lista de INSERTs executados</h3>
+  {% if dbins.results is defined and (dbins.results | length) > 0 %}
+    <table>
+      <thead>
+        <tr>
+          <th>Query</th>
+          <th>Resultado</th>
+          <th>RC</th>
+          <th>Detalhe</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in dbins.results %}
+          {% set qname = (r.item.name if (r.item is defined and r.item.name is defined) else '—') %}
+          {% set rc = (r.rc | default(0) | int) %}
+          {% set out = r.stdout | default('') %}
+          {% set err = r.stderr | default('') %}
           <tr>
-            <th>Query</th>
-            <th>Resultado</th>
-            <th>RC</th>
-            <th>Detalhe</th>
+            <td>{{ qname }}</td>
+            <td>
+              {% if rc != 0 %}
+                <span class="fail">ERRO</span>
+              {% elif 'INSERT 0 0' in out %}
+                IGNORADO (já existia)
+              {% elif 'INSERT 0 1' in out or 'INSERT 1' in out %}
+                <span class="ok">INSERIU</span>
+              {% else %}
+                OK
+              {% endif %}
+            </td>
+            <td>{{ rc }}</td>
+            <td>
+              {% if rc != 0 %}
+                {{ err if err else 'Erro não informado' }}
+              {% else %}
+                {{ out }}
+              {% endif %}
+            </td>
           </tr>
-        </thead>
-        <tbody>
-          {% for r in dbins.items %}
-            {% set qname = (r.item.name if (r.item is defined and r.item.name is defined) else '—') %}
-            {% set rc = (r.rc | default(0) | int) %}
-            {% set out = r.stdout | default('') %}
-            {% set err = r.stderr | default('') %}
-            <tr>
-              <td>{{ qname }}</td>
-              <td>
-                {% if rc != 0 %}
-                  <span class="fail">ERRO</span>
-                {% elif 'INSERT 0 0' in out %}
-                  IGNORADO (já existia)
-                {% elif 'INSERT 0 1' in out or 'INSERT 1' in out %}
-                  <span class="ok">INSERIU</span>
-                {% else %}
-                  OK
-                {% endif %}
-              </td>
-              <td>{{ rc }}</td>
-              <td>
-                {% if rc != 0 %}
-                  {{ err if err else 'Erro não informado' }}
-                {% else %}
-                  {{ out }}
-                {% endif %}
-              </td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    {% else %}
-      <p>Nenhum INSERT foi executado.</p>
-    {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p>Nenhum INSERT foi executado.</p>
   {% endif %}
 
   {% if dbconf.mock_flavour_id is defined %}
@@ -683,3 +318,4 @@
   {% endif %}
 </body>
 </html>
+
