@@ -78,7 +78,7 @@
         rc: "{{ flavour_insert.rc | default(0) }}"
         stdout: "{{ flavour_insert.stdout | default('') }}"
         stderr: "{{ flavour_insert.stderr | default('') }}"
-      items: "{{ db_inserts.results | default([]) }}"
+      results: "{{ db_inserts.results | default([]) }}"
       errors_count: >-
         {{
           (
@@ -90,3 +90,4 @@
           )
           + (1 if ((flavour_insert.rc | default(0) | int) != 0) else 0)
         }}
+
