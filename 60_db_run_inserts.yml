@@ -1,0 +1,89 @@
+---
+- name: Inserir flavour {{ fix_flavour_target }} no banco
+  community.postgresql.postgresql_query:
+    login_db: "{{ db.name }}"
+    login_host: "{{ db.host }}"
+    login_port: "{{ db.port }}"
+    login_user: "{{ db.user }}"
+    login_password: "{{ db.password }}"
+    autocommit: true
+    query: |
+      INSERT INTO tb_fix_server_configuration_flavour
+        (cd_flavour, ds_flavour, allow_dropcopy, queue_mq_fix_acceptor)
+      VALUES
+        ('AGORA-MOCK-TEST', 'Sessões de Mock com ambiente de Produção da Bolsa', false, NULL);
+  register: flavour_insert
+
+- name: Normalizar escolha de FEED-C DR
+  ansible.builtin.set_fact:
+    enable_feed_c_dr: >-
+      {{
+        (feed_c_dr_choice | default('Não') | lower)
+        in ['sim', 's', 'yes', 'y', 'true', '1']
+      }}
+
+- name: Carregar queries de inserts (dia anterior)
+  ansible.builtin.include_vars:
+    file: "queries/inserts.yml"
+
+- name: Carregar queries extras de FEED-C DR (se habilitado)
+  ansible.builtin.include_vars:
+    file: "queries/inserts_feed_c_dr.yml"
+  when: enable_feed_c_dr
+
+- name: Montar lista final de INSERTs (FEED-C DR primeiro, se houver)
+  ansible.builtin.set_fact:
+    _insert_queries_effective: >-
+      {{
+        (insert_queries_feed_c_dr | default([])) +
+        (insert_queries | default([]))
+      }}
+
+- name: Executar INSERTs de dia_anterior (idempotente e não-fatal)
+  community.postgresql.postgresql_query:
+    login_db: "{{ db.name }}"
+    login_host: "{{ db.host }}"
+    login_port: "{{ db.port }}"
+    login_user: "{{ db.user }}"
+    login_password: "{{ db.password }}"
+    autocommit: true
+    query: >-
+      {{
+        (item.sql | default('') | trim)
+        if (
+          (item.sql is not defined)
+          or ('insert into' not in (item.sql | lower))
+          or ('on conflict' in (item.sql | lower))
+        )
+        else (
+          (item.sql | trim)
+          | regex_replace(';\s*$', '')
+          ~ ' ON CONFLICT DO NOTHING;'
+        )
+      }}
+  loop: "{{ _insert_queries_effective }}"
+  loop_control:
+    label: "{{ item.name | default('SQL') }}"
+  register: db_inserts
+  ignore_errors: true
+
+- name: Montar resumo de inserts (para o report)
+  ansible.builtin.set_fact:
+    db_inserts_report:
+      executed: true
+      flavour:
+        ok: "{{ not (flavour_insert.failed | default(false)) }}"
+        statusmessage: "{{ flavour_insert.statusmessage | default('') }}"
+        msg: "{{ flavour_insert.msg | default('') }}"
+      items: "{{ db_inserts.results | default([]) }}"
+      errors_count: >-
+        {{
+          (
+            (db_inserts.results | default([]))
+            | selectattr('failed', 'defined')
+            | selectattr('failed')
+            | list
+            | length
+          )
+          + (1 if (flavour_insert.failed | default(false)) else 0)
+        }}
