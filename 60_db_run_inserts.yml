@@ -1,18 +1,19 @@
 ---
 - name: Inserir flavour {{ fix_flavour_target }} no banco
-  community.postgresql.postgresql_query:
-    login_db: "{{ db.name }}"
-    login_host: "{{ db.host }}"
-    login_port: "{{ db.port }}"
-    login_user: "{{ db.user }}"
-    login_password: "{{ db.password }}"
-    autocommit: true
-    query: |
-      INSERT INTO tb_fix_server_configuration_flavour
-        (cd_flavour, ds_flavour, allow_dropcopy, queue_mq_fix_acceptor)
-      VALUES
-        ('AGORA-MOCK-TEST', 'Sessões de Mock com ambiente de Produção da Bolsa', false, NULL);
+  ansible.builtin.shell: |
+    psql -h {{ db.host }} -p {{ db.port }} -U {{ db.user }} -d {{ db.name }} -X -q -v ON_ERROR_STOP=1 << 'EOF'
+    INSERT INTO tb_fix_server_configuration_flavour
+      (cd_flavour, ds_flavour, allow_dropcopy, queue_mq_fix_acceptor)
+    VALUES
+      ('AGORA-MOCK-TEST', 'Sessões de Mock com ambiente de Produção da Bolsa', false, NULL)
+    ON CONFLICT (cd_flavour) DO NOTHING;
+    EOF
   register: flavour_insert
+  failed_when: false
+  changed_when: false
+  environment:
+    PGPASSWORD: "{{ db.password }}"
+  delegate_to: AG-AH-CL-BD-166.agorasenior.corp
 
 - name: Normalizar escolha de FEED-C DR
   ansible.builtin.set_fact:
@@ -31,7 +32,7 @@
     file: "queries/inserts_feed_c_dr.yml"
   when: enable_feed_c_dr
 
-- name: Montar lista final de INSERTs (FEED-C DR primeiro, se houver)
+- name: Montar lista final de INSERTs
   ansible.builtin.set_fact:
     _insert_queries_effective: >-
       {{
@@ -39,15 +40,16 @@
         (insert_queries | default([]))
       }}
 
-- name: Executar INSERTs de dia_anterior (idempotente e não-fatal)
-  community.postgresql.postgresql_query:
-    login_db: "{{ db.name }}"
-    login_host: "{{ db.host }}"
-    login_port: "{{ db.port }}"
-    login_user: "{{ db.user }}"
-    login_password: "{{ db.password }}"
-    autocommit: true
-    query: >-
+- name: Executar INSERTs de dia_anterior
+  ansible.builtin.shell: |
+    psql -h {{ db.host }} -p {{ db.port }} -U {{ db.user }} -d {{ db.name }} -X -q -v ON_ERROR_STOP=1 << 'EOF'
+    {{ _sql_effective }}
+    EOF
+  loop: "{{ _insert_queries_effective }}"
+  loop_control:
+    label: "{{ item.name | default('INSERT') }}"
+  vars:
+    _sql_effective: >-
       {{
         (item.sql | default('') | trim)
         if (
@@ -61,29 +63,30 @@
           ~ ' ON CONFLICT DO NOTHING;'
         )
       }}
-  loop: "{{ _insert_queries_effective }}"
-  loop_control:
-    label: "{{ item.name | default('SQL') }}"
   register: db_inserts
-  ignore_errors: true
+  failed_when: false
+  changed_when: false
+  environment:
+    PGPASSWORD: "{{ db.password }}"
+  delegate_to: AG-AH-CL-BD-166.agorasenior.corp
 
-- name: Montar resumo de inserts (para o report)
+- name: Montar resumo de inserts
   ansible.builtin.set_fact:
     db_inserts_report:
       executed: true
       flavour:
-        ok: "{{ not (flavour_insert.failed | default(false)) }}"
-        statusmessage: "{{ flavour_insert.statusmessage | default('') }}"
-        msg: "{{ flavour_insert.msg | default('') }}"
+        rc: "{{ flavour_insert.rc | default(0) }}"
+        stdout: "{{ flavour_insert.stdout | default('') }}"
+        stderr: "{{ flavour_insert.stderr | default('') }}"
       items: "{{ db_inserts.results | default([]) }}"
       errors_count: >-
         {{
           (
             (db_inserts.results | default([]))
-            | selectattr('failed', 'defined')
-            | selectattr('failed')
+            | selectattr('rc', 'defined')
+            | selectattr('rc', 'ne', 0)
             | list
             | length
           )
-          + (1 if (flavour_insert.failed | default(false)) else 0)
+          + (1 if ((flavour_insert.rc | default(0) | int) != 0) else 0)
         }}
