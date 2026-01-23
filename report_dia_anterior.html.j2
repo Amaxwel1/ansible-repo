@@ -178,7 +178,7 @@
   {% if dbins.executed | default(false) %}
     {% set sec.idx = sec.idx + 1 %}
     <h2>{{ sec.idx }}. Banco de Dados – INSERTs / Configuração do Mock</h2>
-
+  
     {% set err_count = (dbins.errors_count | default(0) | int) %}
     <p><strong>Status:</strong>
       {% if err_count == 0 %}
@@ -187,7 +187,7 @@
         <span class="fail">COM ERROS ({{ err_count }})</span>
       {% endif %}
     </p>
-
+  
     <h3>Flavour (tb_fix_server_configuration_flavour)</h3>
     {% set frc = (dbins.flavour.rc | default(0) | int) %}
     <p>
@@ -200,51 +200,52 @@
     {% if dbins.flavour.stderr is defined and dbins.flavour.stderr %}
       <pre>{{ dbins.flavour.stderr }}</pre>
     {% endif %}
-
-  <h3>Lista de INSERTs executados</h3>
-  {% if dbins.results is defined and (dbins.results | length) > 0 %}
-    <table>
-      <thead>
-        <tr>
-          <th>Query</th>
-          <th>Resultado</th>
-          <th>RC</th>
-          <th>Detalhe</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for r in dbins.results %}
-          {% set qname = (r.item.name if (r.item is defined and r.item.name is defined) else '—') %}
-          {% set rc = (r.rc | default(0) | int) %}
-          {% set out = r.stdout | default('') %}
-          {% set err = r.stderr | default('') %}
+  
+    <h3>Lista de INSERTs executados</h3>
+    {% if dbins.results is defined and (dbins.results | length) > 0 %}
+      <table>
+        <thead>
           <tr>
-            <td>{{ qname }}</td>
-            <td>
-              {% if rc != 0 %}
-                <span class="fail">ERRO</span>
-              {% elif 'INSERT 0 0' in out %}
-                IGNORADO (já existia)
-              {% elif 'INSERT 0 1' in out or 'INSERT 1' in out %}
-                <span class="ok">INSERIU</span>
-              {% else %}
-                OK
-              {% endif %}
-            </td>
-            <td>{{ rc }}</td>
-            <td>
-              {% if rc != 0 %}
-                {{ err if err else 'Erro não informado' }}
-              {% else %}
-                {{ out }}
-              {% endif %}
-            </td>
+            <th>Query</th>
+            <th>Resultado</th>
+            <th>RC</th>
+            <th>Detalhe</th>
           </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  {% else %}
-    <p>Nenhum INSERT foi executado.</p>
+        </thead>
+        <tbody>
+          {% for r in dbins.results %}
+            {% set qname = (r.item.name if (r.item is defined and r.item.name is defined) else '—') %}
+            {% set rc = (r.rc | default(0) | int) %}
+            {% set out = r.stdout | default('') %}
+            {% set err = r.stderr | default('') %}
+            <tr>
+              <td>{{ qname }}</td>
+              <td>
+                {% if rc != 0 %}
+                  <span class="fail">ERRO</span>
+                {% elif 'INSERT 0 0' in out %}
+                  IGNORADO (já existia)
+                {% elif 'INSERT 0 1' in out or 'INSERT 1' in out %}
+                  <span class="ok">INSERIU</span>
+                {% else %}
+                  OK
+                {% endif %}
+              </td>
+              <td>{{ rc }}</td>
+              <td>
+                {% if rc != 0 %}
+                  {{ err if err else 'Erro não informado' }}
+                {% else %}
+                  {{ out }}
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p>Nenhum INSERT foi executado.</p>
+    {% endif %}
   {% endif %}
 
   {% if dbconf.mock_flavour_id is defined %}
@@ -318,4 +319,5 @@
   {% endif %}
 </body>
 </html>
+
 
