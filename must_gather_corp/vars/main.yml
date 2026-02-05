@@ -1,0 +1,12 @@
+---
+# vars file for must-gather-ansible
+shared_path: /home/ansible/must-gather
+must_gather_path: "{{ shared_path }}/tmp/must-temp"
+must_gather_file: "{{ must_gather_path }}/must-gather-{{ cluster_name }}.tar.gz"
+case_description: "Test create case in ansible"
+case_summary: "Test create case in ansible"
+case_severity: "4 (Low)"
+openshift_version: "4.20" ##" Azure Red Hat OpenShift"
+accountNumberRef: "5910538"
+product: OpenShift Container Platform #OpenShift Container Platform Azure Red Hat OpenShift
+case_type: "Customer Service"

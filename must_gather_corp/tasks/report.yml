@@ -1,0 +1,45 @@
+---
+- name: Stat do arquivo gerado (se existir)
+  ansible.builtin.stat:
+    path: "{{ must_gather_file | default('') }}"
+  register: _mg_stat
+  changed_when: false
+  failed_when: false
+
+- name: any_errors (sucesso = false)
+  ansible.builtin.set_fact:
+    any_errors: false
+  changed_when: false
+
+- name: Montar HTML final
+  ansible.builtin.set_fact:
+    send_mail_body: |
+      <style>
+        body { font-family: Arial, sans-serif; font-size: 13px; }
+        table, th, td { border:1px solid #d1d5db; border-collapse:collapse; padding:8px; }
+        th { background:#f3f4f6; text-align:left; }
+        code { background:#f3f4f6; padding:2px 4px; border-radius:4px; }
+      </style>
+
+      <h2>OpenShift Must-Gather</h2>
+      <p><b>Motivo:</b> {{ (motivo | default('N/D')) | e }}</p>
+
+      <table>
+        <tr><th>Job</th><td>#{{ awx_job_id | default(job_id | default('—')) }} - {{ awx_job_template_name | default('Must-Gather') }}</td></tr>
+        <tr><th>Início</th><td>{{ mg_start_time.stdout | default('—') }}</td></tr>
+        <tr><th>Fim</th><td>{{ mg_end_time.stdout | default('—') }}</td></tr>
+
+        <tr><th>Cluster</th><td>{{ cluster_name }}</td></tr>
+        <tr><th>Node</th><td><code>{{ best_master | default('—') }}</code></td></tr>
+
+        <tr><th>Tamanho</th><td>{{ (_mg_stat.stat.size | default(0)) }} bytes</td></tr>
+
+        <tr><th>Case</th><td>{{ case_id | default('—') }}</td></tr>
+      </table>
+  changed_when: false
+
+- name: Definir subject e stats (para job de envio de e-mail)
+  ansible.builtin.set_stats:
+    data:
+      send_mail_subject: "Ansible-Report - Job #{{ awx_job_id | default(job_id | default('—')) }} - {{ awx_job_template_name | default('Must-Gather') }} - {{ cluster_name | upper }} - SUCESSO"
+      send_mail_body: "{{ send_mail_body }}"

@@ -1,0 +1,47 @@
+---
+- name: Criar arquivo para senha do CIFS
+  ansible.builtin.copy:
+    dest: /tmp/ocp-must-gather-password-cifs
+    content: "{{ ocp_must_gather_cifs_password }}"
+    mode: "0600"
+
+- name: Criar diretório de montagem
+  ansible.builtin.file:
+    path: "{{ ocp_must_gather_cifs_mount_dir }}"
+    state: directory
+
+- name: Montar CIFS
+  ansible.builtin.shell: >-
+    mount "{{ ocp_must_gather_cifs_path }}" "{{ ocp_must_gather_cifs_mount_dir }}"
+    -o "username={{ ocp_must_gather_cifs_username }},password=$(cat /tmp/ocp-must-gather-password-cifs),domain={{ ocp_must_gather_cifs_domain }},rw,vers=3.0"
+  become_user: root
+  become: true
+
+- name: Ajustar paths para usar CIFS
+  ansible.builtin.set_fact:
+    must_gather_path: "{{ ocp_must_gather_cifs_mount_dir }}"
+    must_gather_file: "{{ ocp_must_gather_cifs_mount_dir }}/must-gather-{{ cluster_name }}.tar.gz"
+  delegate_to: localhost
+
+- name: verify if directory exist
+  ansible.builtin.file:
+    path: "{{ must_gather_path }}/{{ cluster_name }}"
+    state: directory
+  register: must_gather_dir
+  become_user: root
+  become: true
+
+- name: Clean storage directory if exists
+  ansible.builtin.file:
+    path: "{{ must_gather_path }}/{{ cluster_name }}"
+    state: absent
+  when: must_gather_dir.changed == false
+  become_user: root
+  become: true
+
+- name: Create a storage directory
+  ansible.builtin.file:
+    path: "{{ must_gather_path }}/{{ cluster_name }}"
+    state: directory
+  become_user: root
+  become: true

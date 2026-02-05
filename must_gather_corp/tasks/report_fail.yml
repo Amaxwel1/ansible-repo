@@ -1,0 +1,44 @@
+---
+- name: Contexto da falha
+  ansible.builtin.set_fact:
+    _fail_task: "{{ ansible_failed_task.name  | default('—') }}"
+    _fail_action: "{{ ansible_failed_task.action | default('—') }}"
+    _fail_msg: >-
+      {{
+        ansible_failed_result.msg
+          | default(ansible_failed_result | to_nice_json | default('Erro não mapeado'))
+      }}
+  changed_when: false
+
+- name: Montar HTML de falha
+  ansible.builtin.set_fact:
+    send_mail_body: |
+      <style>
+        body { font-family: Arial, sans-serif; font-size: 13px; }
+        table, th, td { border:1px solid #a2a2a2; border-collapse:collapse; padding:8px; }
+        th { background:#e0e0e0; text-align:left; }
+        pre { white-space:pre-wrap; }
+        code { background:#f3f4f6; padding:2px 4px; border-radius:4px; }
+      </style>
+
+      <h2 style="color:#b00020">Falha - OpenShift Must-Gather</h2>
+
+      <table>
+        <tr><th>Job</th><td>#{{ awx_job_id | default(job_id | default('—')) }} - {{ awx_job_template_name | default('Must-Gather') }}</td></tr>
+        <tr><th>Início</th><td>{{ mg_start_time.stdout | default('—') }}</td></tr>
+        <tr><th>Fim</th><td>{{ mg_end_time_fail.stdout | default('—') }}</td></tr>
+
+        <tr><th>Cluster</th><td>{{ cluster_name | default('—') }}</td></tr>
+        <tr><th>Node</th><td><code>{{ best_master | default('—') }}</code></td></tr>
+
+        <tr><th>Task</th><td>{{ _fail_task }}</td></tr>
+        <tr><th>Ação</th><td>{{ _fail_action }}</td></tr>
+        <tr><th>Mensagem</th><td><pre>{{ _fail_msg | e }}</pre></td></tr>
+      </table>
+  changed_when: false
+
+- name: E-mail – falha (set_stats)
+  ansible.builtin.set_stats:
+    data:
+      send_mail_subject: "Ansible-Report (FALHA) - Job #{{ awx_job_id | default(job_id | default('—')) }} - {{ awx_job_template_name | default('Must-Gather') }}"
+      send_mail_body: "{{ send_mail_body }}"

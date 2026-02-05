@@ -1,0 +1,91 @@
+---
+- name: Create a refresh token
+  ansible.builtin.shell: |
+    curl -sS https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token \
+      -d grant_type=refresh_token \
+      -d client_id=rhsm-api \
+      -d refresh_token={{ offline_token }}
+  register: access_token_out
+  no_log: true
+  delegate_to: localhost
+
+- name: Save access token in var
+  ansible.builtin.set_fact:
+    access_token: "{{ (access_token_out.stdout | from_json).access_token }}"
+  no_log: true
+  delegate_to: localhost
+
+- name: Create a case in Red Hat Portal
+  ansible.builtin.uri:
+    url: "https://api.access.redhat.com/support/v1/cases"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ access_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      product: "{{ product }}"
+      severity: "{{ case_severity }}"
+      version: "{{ openshift_version }}"
+      summary: "{{ case_summary }}"
+      description: "{{ case_description }}"
+      accountNumberRef: "{{ accountNumberRef }}"
+      openshiftClusterID: "{{ cluster_id[0] }}"
+      caseType: "{{ case_type }}"
+    return_content: true
+    status_code:
+      - 200
+      - 201
+  register: redhat_case_creation
+  delegate_to: localhost
+
+- name: Debug case details
+  ansible.builtin.debug:
+    var: redhat_case_creation.json
+  delegate_to: localhost
+
+- name: Extract Case ID from URL
+  ansible.builtin.set_fact:
+    case_id: "{{ redhat_case_creation.json.location[0].split('/')[-1] }}"
+  delegate_to: localhost
+
+- name: Debug created case
+  ansible.builtin.debug:
+    var: case_id
+  delegate_to: localhost
+
+- name: Check if attachment file exists
+  ansible.builtin.stat:
+    path: "{{ must_gather_file }}"
+  register: attachment_file
+
+- name: Debug attachment_file
+  ansible.builtin.debug:
+    var: attachment_file
+  delegate_to: localhost
+
+- name: Fail if file does not exist
+  ansible.builtin.fail:
+    msg: "The file {{ must_gather_file }} does not exist"
+  when: not attachment_file.stat.exists
+
+- name: Attach must-gather to the created case
+  ansible.builtin.uri:
+    url: "https://api.access.redhat.com/support/v1/cases/{{ case_id }}/attachments"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ access_token }}"
+    body_format: form-multipart
+    body:
+      file:
+        src: "{{ must_gather_file }}"
+        filename: "{{ must_gather_file | basename }}"
+        mime_type: "application/gzip"
+    status_code: [200, 201]
+    timeout: 1800
+  register: attachment_upload
+
+- name: Debug upload response
+  ansible.builtin.debug:
+    var: attachment_upload.json
+  delegate_to: localhost

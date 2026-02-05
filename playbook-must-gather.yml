@@ -1,0 +1,8 @@
+- name: Automacao de Must Gather para Openshift
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Adicionando role para o must gather
+      ansible.builtin.include_role:
+        name: must_gather_corp

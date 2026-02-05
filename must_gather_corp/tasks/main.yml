@@ -1,0 +1,65 @@
+---
+- name: Marcar início (report)
+  ansible.builtin.command: date +"%d/%m/%Y %H:%M:%S"
+  register: mg_start_time
+  changed_when: false
+  run_once: true
+
+- block:
+    - name: Definir cluster via mapa (survey)
+      ansible.builtin.set_fact:
+        cluster_name: "{{ ocp_must_gather_cluster | lower }}"
+        openshift_api_url: "{{ ocp_must_gather_clusters[ocp_must_gather_cluster | lower] }}"
+      when: (ocp_must_gather_cluster | default('') | trim) != ''
+
+    - name: Validar cluster selecionado existe no mapa
+      ansible.builtin.assert:
+        that:
+          - (ocp_must_gather_cluster | default('') | trim) != ''
+          - (ocp_must_gather_cluster | lower) in ocp_must_gather_clusters
+        fail_msg: "Cluster inválido: '{{ ocp_must_gather_cluster }}'. Opções: {{ ocp_must_gather_clusters.keys() | list }}"
+
+    - name: Info cluster logging
+      ansible.builtin.include_tasks: cluster_logging.yml
+
+    - name: Check nodes
+      ansible.builtin.include_tasks: check_nodes.yml
+
+    - name: Include storage path task
+      ansible.builtin.include_tasks: storage_path.yml
+
+    - name: Include collecting must gather task
+      ansible.builtin.include_tasks: collecting_must_gather.yml
+
+    - name: Include upload must gather task (cria case + anexa) - 그대로
+      ansible.builtin.include_tasks: upload_must_gather.yml
+
+    - name: Marcar fim (sucesso)
+      ansible.builtin.command: date +"%d/%m/%Y %H:%M:%S"
+      register: mg_end_time
+      changed_when: false
+      run_once: true
+
+    - name: Report (sucesso)
+      ansible.builtin.include_tasks: report.yml
+      run_once: true
+
+  rescue:
+    - name: Marcar fim (falha)
+      ansible.builtin.command: date +"%d/%m/%Y %H:%M:%S"
+      register: mg_end_time_fail
+      changed_when: false
+      run_once: true
+
+    - name: Report (falha)
+      ansible.builtin.include_tasks: report_fail.yml
+      run_once: true
+
+    - name: Aviso – falha tratada (sem abortar)
+      ansible.builtin.debug:
+        msg: "Falha tratada — report de falha foi gerado via set_stats."
+      run_once: true
+
+  always:
+    - name: Include cleaning logs task
+      ansible.builtin.include_tasks: cleaning_logs.yml

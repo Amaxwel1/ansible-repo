@@ -1,0 +1,74 @@
+---
+- name: Se survey informou node, usar ele
+  ansible.builtin.set_fact:
+    best_master: "{{ ocp_must_gather_node | trim }}"
+  when: (ocp_must_gather_node | default('') | trim) != ''
+  delegate_to: localhost
+
+- name: Get all Nodes
+  kubernetes.core.k8s_info:
+    kind: Node
+    api_version: v1
+    host: "{{ openshift_api_url }}"
+    api_key: "{{ openshift_auth_results['openshift_auth']['api_key'] }}"
+    verify_ssl: false
+  register: all_nodes
+  when: (ocp_must_gather_node | default('') | trim) == ''
+  delegate_to: localhost
+
+- name: Montar lista de candidatos WORKER Ready/schedulable (exclui master/control-plane)
+  ansible.builtin.set_fact:
+    worker_candidates: "{{ (worker_candidates | default([])) + [ {'name': item.metadata.name, 'eph': (item.status.allocatable['ephemeral-storage'] | default('0')) } ] }}"
+  when:
+    - (ocp_must_gather_node | default('') | trim) == ''
+    - item.status is defined
+    - (item.status.conditions | selectattr('type','equalto','Ready') | map(attribute='status') | first | default('False')) == 'True'
+    - not (item.spec.unschedulable | default(false))
+    - not ('node-role.kubernetes.io/master' in (item.metadata.labels | default({})))
+    - not ('node-role.kubernetes.io/control-plane' in (item.metadata.labels | default({})))
+  loop: "{{ all_nodes.resources | default([]) }}"
+  delegate_to: localhost
+
+- name: Falhar se não houver worker candidato
+  ansible.builtin.fail:
+    msg: "Não encontrei WORKER Ready/schedulable (excluindo masters/control-plane)."
+  when:
+    - (ocp_must_gather_node | default('') | trim) == ''
+    - (worker_candidates | default([]) | length) == 0
+  delegate_to: localhost
+
+- name: Converter eph para bytes (Ki/Mi/Gi) e escolher o maior
+  ansible.builtin.set_fact:
+    best_master: >-
+      {{
+        (worker_candidates_bytes
+          | sort(attribute='bytes')
+        )[-1].name
+      }}
+  vars:
+    worker_candidates_bytes: >-
+      {%- set out = [] -%}
+      {%- for n in (worker_candidates | default([])) -%}
+        {%- set v = (n.eph | string) -%}
+        {%- if v.endswith('Ki') -%}
+          {%- set b = (v[:-2] | int) * 1024 -%}
+        {%- elif v.endswith('Mi') -%}
+          {%- set b = (v[:-2] | int) * 1024**2 -%}
+        {%- elif v.endswith('Gi') -%}
+          {%- set b = (v[:-2] | int) * 1024**3 -%}
+        {%- elif v.endswith('Ti') -%}
+          {%- set b = (v[:-2] | int) * 1024**4 -%}
+        {%- else -%}
+          {%- set b = (v | regex_replace('[^0-9]','') | int) -%}
+        {%- endif -%}
+        {%- set _ = out.append({'name': n.name, 'bytes': b}) -%}
+      {%- endfor -%}
+      {{ out }}
+  when: (ocp_must_gather_node | default('') | trim) == ''
+  delegate_to: localhost
+  run_once: true
+
+- name: Debug node escolhido
+  ansible.builtin.debug:
+    msg: "Must-Gather será executado no node: {{ best_master }}"
+  delegate_to: localhost

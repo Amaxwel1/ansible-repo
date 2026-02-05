@@ -1,0 +1,76 @@
+---
+- name: Check and Collecting Must Gather
+  block:
+    - name: Log in and run must-gather
+      ansible.builtin.shell: |
+        oc login -u {{ ocp_user }} -p {{ ocp_password }} {{ openshift_api_url }} {{ '--insecure-skip-tls-verify' if (ocp_must_gather_insecure_skip_tls_verify | default(true) | bool) else '' }}
+        oc adm must-gather \
+          --node-selector="kubernetes.io/hostname={{ best_master }}" \
+          --dest-dir="{{ must_gather_path }}/{{ cluster_name }}"
+      register: must_gather_out
+      become: true
+      become_user: root
+
+    - name: Verificar se o must-gather criou diretório must-gather.local.* no dest-dir
+      ansible.builtin.shell: |
+        set -o pipefail
+        find "{{ must_gather_path }}/{{ cluster_name }}" -maxdepth 1 -type d -name 'must-gather.local.*' | head -n 1
+      register: _mg_dir
+      changed_when: false
+      become: true
+      become_user: root
+
+    - name: Falhar se não foi possível baixar o output do must-gather
+      ansible.builtin.fail:
+        msg: "Must-gather não conseguiu baixar output. Erro: {{ must_gather_out.stderr | default(must_gather_out.stdout) }}"
+      when: (_mg_dir.stdout | default('') | trim) == ''
+
+    - name: Create a tar.gz archive of the must-gather
+      ansible.builtin.archive:
+        path: "{{ must_gather_path }}/{{ cluster_name }}"
+        dest: "{{ must_gather_path }}/must-gather-{{ cluster_name }}.tar.gz"
+        format: gz
+      become: true
+      become_user: root
+
+    - name: Remover diretório temporário do must-gather após compactar
+      ansible.builtin.file:
+        path: "{{ must_gather_path }}/{{ cluster_name }}"
+        state: absent
+      become: true
+      become_user: root
+
+  rescue:
+    - name: Obter lista de namespaces
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+      register: all_namespaces
+      delegate_to: localhost
+
+    - name: Filtrar namespaces que começam com 'openshift-must-gather-'
+      ansible.builtin.set_fact:
+        must_gather_namespaces: >-
+          {{
+            all_namespaces.resources
+            | map(attribute='metadata.name')
+            | list
+            | select('match', '^openshift-must-gather-.*')
+            | list
+          }}
+      changed_when: false
+
+    - name: Deletar cada namespace must-gather
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ item }}"
+      loop: "{{ must_gather_namespaces }}"
+      delegate_to: localhost
+
+    - name: Display namespace deletion result
+      ansible.builtin.debug:
+        msg: "Must-gather namespaces removidos: {{ must_gather_namespaces | default([]) }}"
