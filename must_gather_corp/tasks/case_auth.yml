@@ -1,0 +1,81 @@
+- name: Create access token (offline -> access)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    curl -sS https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token \
+      -d grant_type=refresh_token \
+      -d client_id=rhsm-api \
+      -d refresh_token={{ offline_token }}
+  args:
+    executable: /bin/bash
+  register: access_token_out
+  no_log: true
+  delegate_to: localhost
+  run_once: true
+
+- name: Save access token
+  ansible.builtin.set_fact:
+    access_token: "{{ (access_token_out.stdout | from_json).access_token }}"
+  no_log: true
+  delegate_to: localhost
+  run_once: true
+
+- name: Use existing case when provided
+  ansible.builtin.set_fact:
+    case_id: "{{ ocp_must_gather_existing_case_id | trim }}"
+    case_mode: "attach_only"
+  when: (ocp_must_gather_existing_case_id | default('') | trim) != ''
+  delegate_to: localhost
+  run_once: true
+
+- name: Validate Case ID format when provided
+  ansible.builtin.assert:
+    that:
+      - (case_id | string) is match('^[0-9]+$')
+    fail_msg: "Case ID inválido: '{{ case_id }}'. Informe somente números."
+  when: (ocp_must_gather_existing_case_id | default('') | trim) != ''
+  delegate_to: localhost
+  run_once: true
+
+- name: Create a case when not provided
+  ansible.builtin.uri:
+    url: "https://api.access.redhat.com/support/v1/cases"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ access_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      product: "{{ product }}"
+      severity: "{{ case_severity }}"
+      version: "{{ openshift_version }}"
+      summary: "{{ case_summary }}"
+      description: "{{ case_description }}"
+      accountNumberRef: "{{ accountNumberRef }}"
+      openshiftClusterID: "{{ cluster_id[0] }}"
+      caseType: "{{ case_type }}"
+    return_content: true
+    status_code: [200, 201]
+  register: redhat_case_creation
+  delegate_to: localhost
+  when: (ocp_must_gather_existing_case_id | default('') | trim) == ''
+  run_once: true
+
+- name: Extract Case ID when created
+  ansible.builtin.set_fact:
+    case_id: "{{ redhat_case_creation.json.location[0].split('/')[-1] }}"
+    case_mode: "created"
+  delegate_to: localhost
+  when: (ocp_must_gather_existing_case_id | default('') | trim) == ''
+  run_once: true
+
+- name: Validate case exists (GET) when attach_only
+  ansible.builtin.uri:
+    url: "https://api.access.redhat.com/support/v1/cases/{{ case_id }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ access_token }}"
+    status_code: [200]
+  register: _case_get
+  delegate_to: localhost
+  when: (case_mode | default('')) == 'attach_only'
+  run_once: true

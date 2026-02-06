@@ -1,0 +1,74 @@
+- name: Check if attachment file exists
+  ansible.builtin.stat:
+    path: "{{ must_gather_file }}"
+    get_checksum: true
+    checksum_algorithm: sha1
+    get_mime: true
+  register: attachment_file
+  become: true
+  become_user: root
+
+- name: Fail if file does not exist
+  ansible.builtin.fail:
+    msg: "Arquivo não existe no host: {{ must_gather_file }}"
+  when: not attachment_file.stat.exists
+
+- name: Validate gzip before upload
+  ansible.builtin.shell: |
+    set -euo pipefail
+    gzip -t "{{ must_gather_file }}"
+  args:
+    executable: /bin/bash
+  changed_when: false
+  become: true
+  become_user: root
+
+- name: Upload attachment via curl
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    RESP="/tmp/rh_attach_{{ case_id }}.resp"
+    CODE="/tmp/rh_attach_{{ case_id }}.code"
+
+    curl -sS --fail \
+      --connect-timeout 20 \
+      --max-time 3600 \
+      --retry 3 --retry-delay 10 --retry-connrefused \
+      -o "$RESP" -w "%{http_code}" > "$CODE" \
+      -H "Authorization: Bearer {{ access_token }}" \
+      -F "file=@{{ must_gather_file }};type=application/gzip;filename={{ must_gather_file | basename }}" \
+      "https://api.access.redhat.com/support/v1/cases/{{ case_id }}/attachments"
+
+    echo "HTTP=$(cat "$CODE")"
+    tail -c 1200 "$RESP" || true
+  args:
+    executable: /bin/bash
+  register: attachment_upload
+  no_log: true
+  changed_when: true
+  become: true
+  become_user: root
+
+- name: Build upload report
+  ansible.builtin.set_fact:
+    mg_size_bytes: "{{ attachment_file.stat.size | int }}"
+    mg_size_human: >-
+      {{
+        (
+          ((attachment_file.stat.size | int) / 1024 / 1024 / 1024) | round(2) | string ~ " GB"
+        ) if ((attachment_file.stat.size | int) >= (1024**3)) else
+        (
+          ((attachment_file.stat.size | int) / 1024 / 1024) | round(2) | string ~ " MB"
+        )
+      }}
+  changed_when: false
+
+- name: Upload report
+  ansible.builtin.debug:
+    msg:
+      - "case_id={{ case_id }}"
+      - "file={{ must_gather_file }}"
+      - "size={{ mg_size_human }}"
+      - "sha1={{ attachment_file.stat.checksum | default('n/a') }}"
+      - "{{ attachment_upload.stdout | default('') }}"
+      - "{{ attachment_upload.stderr | default('') }}"
