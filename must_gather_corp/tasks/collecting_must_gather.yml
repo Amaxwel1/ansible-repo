@@ -1,35 +1,81 @@
 ---
 - name: Check and Collecting Must Gather
   block:
-    - name: Log in and run must-gather
-      ansible.builtin.shell: |
-        oc login -u {{ ocp_user }} -p {{ ocp_password }} {{ openshift_api_url }} {{ '--insecure-skip-tls-verify' if (ocp_must_gather_insecure_skip_tls_verify | default(true) | bool) else '' }}
-        oc adm must-gather \
-          --node-selector="kubernetes.io/hostname={{ best_master }}" \
-          --dest-dir="{{ must_gather_path }}/{{ cluster_name }}"
-      register: must_gather_out
+    - name: Ensure dest-dir exists
+      ansible.builtin.file:
+        path: "{{ must_gather_path }}/{{ cluster_name }}"
+        state: directory
+        mode: "0755"
       become: true
       become_user: root
 
-    - name: Verificar se o must-gather criou diretório must-gather.local.* no dest-dir
+    - name: OpenShift login
       ansible.builtin.shell: |
-        set -o pipefail
-        find "{{ must_gather_path }}/{{ cluster_name }}" -maxdepth 1 -type d -name 'must-gather.local.*' | head -n 1
-      register: _mg_dir
+        oc login -u {{ ocp_user }} -p {{ ocp_password }} {{ openshift_api_url }} {{ '--insecure-skip-tls-verify' if (ocp_must_gather_insecure_skip_tls_verify | default(true) | bool) else '' }}
+      args:
+        executable: /bin/bash
+      register: oc_login_out
+      changed_when: false
+      no_log: true
+      become: true
+      become_user: root
+
+    - name: Run must-gather (default)
+      ansible.builtin.shell: |
+        oc adm must-gather \
+          --node-selector="kubernetes.io/hostname={{ best_master }}" \
+          --dest-dir="{{ must_gather_path }}/{{ cluster_name }}"
+      args:
+        executable: /bin/bash
+      register: must_gather_out
+      become: true
+      become_user: root
+      when: (ocp_must_gather_command | default('') | trim) == ''
+
+    - name: Run must-gather (custom)
+      ansible.builtin.shell: |
+        {{ ocp_must_gather_command }} \
+          --node-selector="kubernetes.io/hostname={{ best_master }}" \
+          --dest-dir="{{ must_gather_path }}/{{ cluster_name }}"
+      args:
+        executable: /bin/bash
+      register: must_gather_out
+      become: true
+      become_user: root
+      when: (ocp_must_gather_command | default('') | trim) != ''
+
+    - name: Verificar se dest-dir recebeu conteúdo
+      ansible.builtin.shell: |
+        set -e
+        DEST="{{ must_gather_path }}/{{ cluster_name }}"
+        test -d "$DEST"
+        test "$(ls -A "$DEST" 2>/dev/null | wc -l)" -gt 0
+      args:
+        executable: /bin/bash
+      register: _mg_has_content
       changed_when: false
       become: true
       become_user: root
 
-    - name: Falhar se não foi possível baixar o output do must-gather
+    - name: Falhar se must-gather não gravou nada no dest-dir
       ansible.builtin.fail:
-        msg: "Must-gather não conseguiu baixar output. Erro: {{ must_gather_out.stderr | default(must_gather_out.stdout) }}"
-      when: (_mg_dir.stdout | default('') | trim) == ''
+        msg: "Must-gather não gravou conteúdo em {{ must_gather_path }}/{{ cluster_name }}. Erro: {{ must_gather_out.stderr | default(must_gather_out.stdout) }}"
+      when: _mg_has_content.rc != 0
 
     - name: Create a tar.gz archive of the must-gather
       ansible.builtin.archive:
         path: "{{ must_gather_path }}/{{ cluster_name }}"
         dest: "{{ must_gather_path }}/must-gather-{{ cluster_name }}.tar.gz"
         format: gz
+      become: true
+      become_user: root
+
+    - name: Validar gzip gerado
+      ansible.builtin.shell: |
+        gzip -t "{{ must_gather_path }}/must-gather-{{ cluster_name }}.tar.gz"
+      args:
+        executable: /bin/bash
+      changed_when: false
       become: true
       become_user: root
 
@@ -74,3 +120,13 @@
     - name: Display namespace deletion result
       ansible.builtin.debug:
         msg: "Must-gather namespaces removidos: {{ must_gather_namespaces | default([]) }}"
+
+    - name: Logout OpenShift (best-effort)
+      ansible.builtin.shell: |
+        oc logout || true
+      args:
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
+      become: true
+      become_user: root
