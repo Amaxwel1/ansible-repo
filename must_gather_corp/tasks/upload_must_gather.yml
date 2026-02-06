@@ -15,6 +15,21 @@
   no_log: true
   delegate_to: localhost
 
+- name: Usar Case existente quando informado no survey
+  ansible.builtin.set_fact:
+    case_id: "{{ ocp_must_gather_existing_case_id | trim }}"
+    case_mode: "attach_only"
+  when: (ocp_must_gather_existing_case_id | default('') | trim) != ''
+  delegate_to: localhost
+
+- name: Validar formato do Case ID (somente números) quando informado
+  ansible.builtin.assert:
+    that:
+      - (case_id | string) is match('^[0-9]+$')
+    fail_msg: "Case ID inválido: '{{ case_id }}'. Informe somente números."
+  when: (ocp_must_gather_existing_case_id | default('') | trim) != ''
+  delegate_to: localhost
+
 - name: Create a case in Red Hat Portal
   ansible.builtin.uri:
     url: "https://api.access.redhat.com/support/v1/cases"
@@ -33,59 +48,89 @@
       openshiftClusterID: "{{ cluster_id[0] }}"
       caseType: "{{ case_type }}"
     return_content: true
-    status_code:
-      - 200
-      - 201
+    status_code: [200, 201]
   register: redhat_case_creation
   delegate_to: localhost
+  when: (ocp_must_gather_existing_case_id | default('') | trim) == ''
 
-- name: Debug case details
-  ansible.builtin.debug:
-    var: redhat_case_creation.json
-  delegate_to: localhost
-
-- name: Extract Case ID from URL
+- name: Extract Case ID from response
   ansible.builtin.set_fact:
     case_id: "{{ redhat_case_creation.json.location[0].split('/')[-1] }}"
+    case_mode: "created"
   delegate_to: localhost
+  when: (ocp_must_gather_existing_case_id | default('') | trim) == ''
 
-- name: Debug created case
-  ansible.builtin.debug:
-    var: case_id
+- name: Validar que o Case existe (GET) quando attach_only
+  ansible.builtin.uri:
+    url: "https://api.access.redhat.com/support/v1/cases/{{ case_id }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ access_token }}"
+    status_code: [200]
+  register: _case_get
   delegate_to: localhost
+  when: (case_mode | default('')) == 'attach_only'
 
 - name: Check if attachment file exists
   ansible.builtin.stat:
     path: "{{ must_gather_file }}"
+    get_checksum: true
+    checksum_algorithm: sha1
+    get_mime: true
   register: attachment_file
-
-- name: Debug attachment_file
-  ansible.builtin.debug:
-    var: attachment_file
-  delegate_to: localhost
 
 - name: Fail if file does not exist
   ansible.builtin.fail:
-    msg: "The file {{ must_gather_file }} does not exist"
+    msg: "Arquivo não existe no host: {{ must_gather_file }}"
   when: not attachment_file.stat.exists
 
-- name: Attach must-gather to the created case
-  ansible.builtin.uri:
-    url: "https://api.access.redhat.com/support/v1/cases/{{ case_id }}/attachments"
-    method: POST
-    headers:
-      Authorization: "Bearer {{ access_token }}"
-    body_format: form-multipart
-    body:
-      file:
-        src: "{{ must_gather_file }}"
-        filename: "{{ must_gather_file | basename }}"
-        mime_type: "application/gzip"
-    status_code: [200, 201]
-    timeout: 1800
-  register: attachment_upload
+- name: Validar gzip antes do upload
+  ansible.builtin.shell: |
+    set -e
+    gzip -t "{{ must_gather_file }}"
+  args:
+    executable: /bin/bash
+  changed_when: false
+  become: true
+  become_user: root
 
-- name: Debug upload response
+- name: Upload attachment via curl
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    RESP="/tmp/rh_attach_{{ case_id }}.resp"
+    CODE="/tmp/rh_attach_{{ case_id }}.code"
+
+    curl -sS --fail \
+      --connect-timeout 20 \
+      --max-time 3600 \
+      --retry 3 --retry-delay 10 --retry-connrefused \
+      -o "$RESP" -w "%{http_code}" > "$CODE" \
+      -H "Authorization: Bearer {{ access_token }}" \
+      -F "file=@{{ must_gather_file }};type=application/gzip;filename={{ must_gather_file | basename }}" \
+      "https://api.access.redhat.com/support/v1/cases/{{ case_id }}/attachments"
+
+    echo "HTTP=$(cat "$CODE")"
+    tail -c 600 "$RESP" || true
+  args:
+    executable: /bin/bash
+  register: attachment_upload
+  no_log: true
+  changed_when: true
+  become: true
+  become_user: root
+
+- name: Fail se upload não retornou 200/201
+  ansible.builtin.fail:
+    msg: "Upload falhou. Saída: {{ attachment_upload.stdout | default('') }} {{ attachment_upload.stderr | default('') }}"
+  when: attachment_upload.rc != 0
+
+- name: Debug upload output (curl)
   ansible.builtin.debug:
-    var: attachment_upload.json
-  delegate_to: localhost
+    msg:
+      - "case_id={{ case_id }}"
+      - "file={{ must_gather_file }}"
+      - "size={{ attachment_file.stat.size | default('n/a') }}"
+      - "sha1={{ attachment_file.stat.checksum | default('n/a') }}"
+      - "{{ attachment_upload.stdout | default('') }}"
+      - "{{ attachment_upload.stderr | default('') }}"
