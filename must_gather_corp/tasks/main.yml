@@ -28,11 +28,14 @@
     - name: Include storage path task
       ansible.builtin.include_tasks: storage_path.yml
 
+    - name: Create case
+      ansible.builtin.include_tasks: case_auth.yml
+
     - name: Include collecting must gather task
       ansible.builtin.include_tasks: collecting_must_gather.yml
 
-    - name: Include upload must gather task (cria case + anexa) - 그대로
-      ansible.builtin.include_tasks: upload_must_gather.yml
+    - name: Attach must gather in the case
+      ansible.builtin.include_tasks: attach_must_gather.yml
 
     - name: Marcar fim (sucesso)
       ansible.builtin.command: date +"%d/%m/%Y %H:%M:%S"
