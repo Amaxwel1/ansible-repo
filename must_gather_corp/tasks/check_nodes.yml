@@ -18,7 +18,7 @@
 
 - name: Montar lista de candidatos WORKER Ready/schedulable (exclui master/control-plane)
   ansible.builtin.set_fact:
-    worker_candidates: "{{ (worker_candidates | default([])) + [ {'name': item.metadata.name, 'eph': (item.status.allocatable['ephemeral-storage'] | default('0')) } ] }}"
+    worker_candidates: "{{ (worker_candidates | default([])) + [ item.metadata.name ] }}"
   when:
     - (ocp_must_gather_node | default('') | trim) == ''
     - item.status is defined
@@ -37,38 +37,89 @@
     - (worker_candidates | default([]) | length) == 0
   delegate_to: localhost
 
-- name: Converter eph para bytes (Ki/Mi/Gi) e escolher o maior
+- name: Gerar kubeconfig temporário via oc login (isolado)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    KCFG="/tmp/kcfg_mg_{{ cluster_name }}.yaml"
+    rm -f "$KCFG"
+
+    oc login -u {{ ocp_user }} -p {{ ocp_password }} {{ openshift_api_url }} \
+      {{ '--insecure-skip-tls-verify' if (ocp_must_gather_insecure_skip_tls_verify | default(true) | bool) else '' }} \
+      --kubeconfig="$KCFG" >/dev/null
+
+    oc whoami --kubeconfig="$KCFG" >/dev/null
+
+    printf '%s\n' "$KCFG"
+  args:
+    executable: /bin/bash
+  register: _kcfg_path
+  delegate_to: localhost
+  run_once: true
+  changed_when: false
+  no_log: true
+  when: (ocp_must_gather_node | default('') | trim) == ''
+
+- name: Set kubeconfig path fact
   ansible.builtin.set_fact:
-    best_master: >-
-      {{
-        (worker_candidates_bytes
-          | sort(attribute='bytes')
-        )[-1].name
-      }}
-  vars:
-    worker_candidates_bytes: >-
-      {%- set out = [] -%}
-      {%- for n in (worker_candidates | default([])) -%}
-        {%- set v = (n.eph | string) -%}
-        {%- if v.endswith('Ki') -%}
-          {%- set b = (v[:-2] | int) * 1024 -%}
-        {%- elif v.endswith('Mi') -%}
-          {%- set b = (v[:-2] | int) * 1024**2 -%}
-        {%- elif v.endswith('Gi') -%}
-          {%- set b = (v[:-2] | int) * 1024**3 -%}
-        {%- elif v.endswith('Ti') -%}
-          {%- set b = (v[:-2] | int) * 1024**4 -%}
-        {%- else -%}
-          {%- set b = (v | regex_replace('[^0-9]','') | int) -%}
-        {%- endif -%}
-        {%- set _ = out.append({'name': n.name, 'bytes': b}) -%}
-      {%- endfor -%}
-      {{ out }}
+    ocp_mg_kubeconfig: "{{ _kcfg_path.stdout | trim }}"
+  delegate_to: localhost
+  run_once: true
+  when: (ocp_must_gather_node | default('') | trim) == ''
+
+- name: Coletar espaço livre do filesystem do node (via oc debug + df)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    NODE="{{ item }}"
+    oc debug node/"$NODE" --quiet -- chroot /host bash -lc '
+      if df -B1 /sysroot >/dev/null 2>&1; then
+        df -B1 /sysroot | awk "NR==2{print \$4}"
+      else
+        df -B1 / | awk "NR==2{print \$4}"
+      fi
+    '
+  args:
+    executable: /bin/bash
+  register: _node_free
+  changed_when: false
+  failed_when: false
+  when: (ocp_must_gather_node | default('') | trim) == ''
+  loop: "{{ worker_candidates | default([]) }}"
+  delegate_to: localhost
+  environment:
+    KUBECONFIG: "{{ ocp_mg_kubeconfig }}"
+
+- name: Montar lista node_free_bytes com resultados válidos
+  ansible.builtin.set_fact:
+    node_free_bytes: "{{ (node_free_bytes | default([])) + [ {'name': item.item, 'free': (item.stdout | default('0') | trim | int)} ] }}"
+  when:
+    - (ocp_must_gather_node | default('') | trim) == ''
+    - item.rc is defined
+    - item.rc == 0
+    - (item.stdout | default('') | trim | regex_search('^[0-9]+$')) is not none
+  loop: "{{ _node_free.results | default([]) }}"
+  delegate_to: localhost
+
+- name: Falhar se não consegui medir espaço livre em nenhum node (oc debug falhou)
+  ansible.builtin.fail:
+    msg: >-
+      Não consegui medir espaço livre via 'oc debug node/...'.
+      Verifique permissões (cluster-admin), SCC/PSA, e se o oc debug está permitido no ambiente.
+  when:
+    - (ocp_must_gather_node | default('') | trim) == ''
+    - (node_free_bytes | default([]) | length) == 0
+  delegate_to: localhost
+
+- name: Escolher node com MAIOR espaço livre
+  ansible.builtin.set_fact:
+    best_master: "{{ (node_free_bytes | sort(attribute='free'))[-1].name }}"
   when: (ocp_must_gather_node | default('') | trim) == ''
   delegate_to: localhost
   run_once: true
 
-- name: Debug node escolhido
+- name: Debug node escolhido (e espaço livre)
   ansible.builtin.debug:
-    msg: "Must-Gather será executado no node: {{ best_master }}"
+    msg: >-
+      Must-Gather será executado no node: {{ best_master }}
+      (free bytes={{ (node_free_bytes | selectattr('name','equalto',best_master) | map(attribute='free') | first | default('N/A')) }})
+  when: (ocp_must_gather_node | default('') | trim) == ''
   delegate_to: localhost
