@@ -9,6 +9,8 @@
   ansible.builtin.file:
     path: "{{ ocp_must_gather_cifs_mount_dir }}"
     state: directory
+  become_user: root
+  become: true
 
 - name: Montar CIFS
   ansible.builtin.shell: >-
