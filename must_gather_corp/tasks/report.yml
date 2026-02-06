@@ -6,6 +6,20 @@
   changed_when: false
   failed_when: false
 
+- name: Calcular tamanho human-readable
+  ansible.builtin.set_fact:
+    mg_size_bytes: "{{ _mg_stat.stat.size | default(0) | int }}"
+    mg_size_mb: "{{ (( _mg_stat.stat.size | default(0) | int ) / 1048576) | round(2) }}"
+    mg_size_gb: "{{ (( _mg_stat.stat.size | default(0) | int ) / 1073741824) | round(2) }}"
+    mg_size_human: >-
+      {{
+        ( (( _mg_stat.stat.size | default(0) | int ) / 1073741824) | round(2) | string ) ~ ' GB'
+        if ( (_mg_stat.stat.size | default(0) | int ) >= 1073741824 )
+        else
+        ( (( _mg_stat.stat.size | default(0) | int ) / 1048576) | round(2) | string ) ~ ' MB'
+      }}
+  changed_when: false
+
 - name: any_errors (sucesso = false)
   ansible.builtin.set_fact:
     any_errors: false
@@ -32,7 +46,7 @@
         <tr><th>Cluster</th><td>{{ cluster_name }}</td></tr>
         <tr><th>Node</th><td><code>{{ best_master | default('—') }}</code></td></tr>
 
-        <tr><th>Tamanho</th><td>{{ (_mg_stat.stat.size | default(0)) }} bytes</td></tr>
+        <tr><th>Tamanho</th><td>{{ mg_size_human }}</td></tr>
 
         <tr><th>Case</th><td>{{ case_id | default('—') }}</td></tr>
       </table>
