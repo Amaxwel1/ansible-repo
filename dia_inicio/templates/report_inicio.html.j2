@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <title>Relatório - Mock Início do Dia</title>
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 14px; }
+    h1, h2, h3 { color: #1f2937; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+    th, td { border: 1px solid #d1d5db; padding: 6px 8px; text-align: left; }
+    th { background: #e5e7eb; }
+    .ok { color: #16a34a; font-weight: bold; }
+    .fail { color: #dc2626; font-weight: bold; }
+    .mono { font-family: "Courier New", monospace; }
+    pre { white-space: pre-wrap; font-family: "Courier New", monospace; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Relatório - Automação Início do Dia</h1>
+  <p>Gerado em: {{ ansible_date_time.date }} {{ ansible_date_time.time }}</p>
+
+  {# aliases pra não repetir report.xxx toda hora #}
+  {% set exch    = report.exchange_calendar | default({}) %}
+  {% set mkt     = report.marketdata        | default({}) %}
+  {% set umdf    = report.umdf              | default({}) %}
+  {% set streams = report.streams           | default({}) %}
+  {% set dds     = report.dds_stream        | default({}) %}
+  {% set jobs    = report.jobs              | default({}) %}
+  {% set cheetah = report.cheetah           | default({}) %}
+  {% set fix     = report.fix               | default({}) %}
+
+  {# contador de seções principais #}
+  {% set sec = namespace(idx=0) %}
+
+  {# 1) Calendário de Pregão - só se houver linhas #}
+  {% if exch.rows is defined and exch.rows %}
+    {% set sec.idx = sec.idx + 1 %}
+    <h2>{{ sec.idx }}. Calendário de Pregão (tb_exchange_calendar)</h2>
+
+    {% set rows = exch.rows | sort(attribute='dt_trade_day') %}
+    {% set hoje = rows[-1:] %}
+    {% set outros = rows[0:-1] %}
+
+    <h3>{{ sec.idx }}.1 Dia de pregão ativo para o mock</h3>
+    {% if hoje and hoje[0] is mapping %}
+      {% set r = hoje[0] %}
+      <table>
+        <tr><th>Campo</th><th>Valor</th></tr>
+        {% for k, v in r.items() %}
+          <tr>
+            <th>{{ k }}</th>
+            <td>{{ v }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% endif %}
+
+    {% if outros %}
+      <h3>{{ sec.idx }}.2 Dias anteriores fechados</h3>
+      {% for r in outros %}
+        <table>
+          <tr><th>Campo</th><th>Valor</th></tr>
+          {% for k, v in r.items() %}
+            <tr>
+              <th>{{ k }}</th>
+              <td>{{ v }}</td>
+            </tr>
+          {% endfor %}
+        </table>
+      {% endfor %}
+    {% endif %}
+  {% endif %}
+
+  {# 2) Status do FIX / Heartbeat - só se fix tiver conteúdo #}
+  {% if fix %}
+    {% set sec.idx = sec.idx + 1 %}
+    <h2>{{ sec.idx }}. Status do FIX / Heartbeat</h2>
+
+    <p>FLAVOUR ativo atual:
+      <strong>{{ fix.flavour_active | default('N/A') }}</strong>
+    </p>
+  
+    <p>Heartbeat:
+      {% if fix.heartbeat_ok | default(false) %}
+        <span class="ok">OK</span>
+      {% else %}
+        <span class="fail">SEM HEARTBEAT</span>
+      {% endif %}
+    </p>
+    <p>Problema de MsgSeqNum detectado:
+      {% if fix.has_msgseq_issue | default(false) %}
+        <span class="fail">SIM</span>
+      {% else %}
+        NÃO
+      {% endif %}
+    </p>
+    <p>SESSION_RESTART aplicado:
+      {% if fix.session_restart_applied | default(false) %}
+        <span class="ok">SIM</span>
+      {% else %}
+        NÃO
+      {% endif %}
+    </p>
+  {% endif %}
+
+  {# 3) Marketdata – Papel carregado pelo stream-job #}
+  {% if mkt.stream_loaded_rowcount is defined
+        or (mkt.stream_loaded_rows is defined and mkt.stream_loaded_rows) %}
+    {% set sec.idx = sec.idx + 1 %}
+    <h2>{{ sec.idx }}. Marketdata – Papel carregado pelo stream-job</h2>
+
+    {% set stream_count = mkt.stream_loaded_rowcount | default('0') %}
+    <p><strong>Quantidade de linhas retornadas:</strong> {{ stream_count }}</p>
+
+    {% if mkt.stream_loaded_rows is defined and mkt.stream_loaded_rows %}
+      {% set spcols = mkt.stream_loaded_rows[0].keys() | list %}
+      <table>
+        <tr>
+          {% for c in spcols %}<th>{{ c }}</th>{% endfor %}
+        </tr>
+        {% for row in mkt.stream_loaded_rows %}
+          <tr>
+            {% for c in spcols %}
+              <td>{{ row[c] }}</td>
+            {% endfor %}
+          </tr>
+        {% endfor %}
+      </table>
+    {% endif %}
+  {% endif %}
+
+  {# 4) Jobs – Logs recentes (só se tiver algum log) #}
+  {% set has_jobs =
+       (jobs.cadastro_papel is defined)
+       or (jobs.stock_cache is defined)
+       or (jobs.start_day is defined)
+  %}
+  {% if has_jobs %}
+    {% set sec.idx = sec.idx + 1 %}
+    <h2>{{ sec.idx }}. Jobs – Logs recentes</h2>
+
+    {% macro render_job(name, label) %}
+      {% if jobs[name] is defined %}
+        {% set j = jobs[name] %}
+        <h3>{{ label }}</h3>
+
+        <p><strong>Pod:</strong> <span class="mono">{{ j.pod | default('N/A') }}</span></p>
+
+        {% set sh = j.start_human | default('') %}
+        {% set eh = j.end_human | default('') %}
+        {% set inicio_hhmm = (sh[11:16] if sh|length >= 16 else 'N/A') %}
+        {% set fim_hhmm    = (eh[11:16] if eh|length >= 16 else 'N/A') %}
+
+        <p><strong>Início:</strong> {{ inicio_hhmm }}</p>
+        <p><strong>Fim:</strong> {{ fim_hhmm }}</p>
+
+        {% set dur_s = (j.duration_seconds | default(0) | int) %}
+        {% set dur_min = ((dur_s + 59) // 60) %}
+        <p><strong>Duração:</strong> {{ dur_min }} min</p>
+
+        {% set log = j.log_tail | default('') %}
+        {% if log %}
+          {% set all_lines = log.splitlines() %}
+          {% set max_lines = 30 %}
+          {% set last_lines = (all_lines[-max_lines:] if all_lines|length > max_lines else all_lines) %}
+          <p><strong>Últimas {{ last_lines|length }} linhas do log:</strong></p>
+          <pre>{{ last_lines | join('\n') }}</pre>
+        {% else %}
+          <p>Sem logs capturados.</p>
+        {% endif %}
+
+        {% if j.exit_ok | default(false) %}
+          <p>Status: <span class="ok">Sucesso (exit#3)</span></p>
+        {% else %}
+          <p>Status: <span class="fail">Sem sucesso (não encontrou exit#3)</span></p>
+        {% endif %}
+      {% endif %}
+    {% endmacro %}
+
+    {{ render_job('cadastro_papel', 'cadastro-papel') }}
+    {{ render_job('stock_cache', 'stock-cache') }}
+    {{ render_job('start_day', 'start-day') }}
+  {% endif %}
+
+  {# 5) UMDF – Canais #}
+  {% if umdf.channels is defined and umdf.channels %}
+    {% set sec.idx = sec.idx + 1 %}
+    <h2>{{ sec.idx }}. UMDF – Canais</h2>
+    <p><strong>Início UMDF:</strong> {{ umdf.start_time | default('N/A') }}</p>
+    <p>Limite de DELTA: {{ umdf.delta_threshold | default(30) }}</p>
+
+    <table>
+      <tr>
+        <th>Canal</th>
+        <th>Delta</th>
+        <th>Status</th>
+      </tr>
+      {% for ch in umdf.channels %}
+        <tr>
+          <td>{{ ch.canal }}</td>
+          <td>{{ ch.delta }}</td>
+          <td>
+            {% if (ch.delta | int) > (umdf.delta_threshold | default(30) | int) %}
+              <span class="fail">ALTO</span>
+            {% else %}
+              <span class="ok">OK</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </table>
+
+    {% if umdf.high_delta is defined and umdf.high_delta %}
+      <p><strong>Canais com DELTA acima do limite:</strong></p>
+      <ul>
+        {% for ch in umdf.high_delta %}
+          <li>Canal {{ ch.canal }} – DELTA {{ ch.delta }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  {% endif %}
+
+  {# 6) Streams – Marketdata #}
+  {% if streams.channels is defined and streams.channels %}
+    {% set sec.idx = sec.idx + 1 %}
+    <h2>{{ sec.idx }}. Streams – Marketdata</h2>
+    <p><strong>Início Streams:</strong> {{ streams.start_time | default('N/A') }}</p>
+    <p><strong>Telnet:</strong> {{ streams.telnet_endpoint | default('N/A') }}</p>
+    <p><strong>Canais sincronizados:</strong> {{ streams.synced_count | default(0) }}</p>
+
+    {% if streams.synced_channels is defined and streams.synced_channels %}
+      <p><strong>Lista (canais):</strong> {{ streams.synced_channels | join(', ') }}</p>
+    {% endif %}
+    <p>Limite de DELTA: {{ streams.delta_threshold | default(30) }}</p>
+
+    <table>
+      <tr>
+        <th>Namespace</th>
+        <th>Pod</th>
+        <th>Canal</th>
+        <th>Delta</th>
+        <th>Status</th>
+      </tr>
+      {% for ch in streams.channels %}
+        <tr>
+          <td>{{ ch.namespace }}</td>
+          <td>{{ ch.pod }}</td>
+          <td>{{ ch.canal }}</td>
+          <td>{{ ch.delta }}</td>
+          <td>
+            {% if (ch.delta | int) > (streams.delta_threshold | default(30) | int) %}
+              <span class="fail">ALTO</span>
+            {% else %}
+              <span class="ok">OK</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% endif %}
+
+  {# 7) DDS-Stream – Testes de Telnet e Canais #}
+  {% set dds_has_data =
+       (dds.namespace is defined and dds.namespace)
+       or (dds.pod is defined and dds.pod)
+       or (dds.tests is defined and dds.tests)
+       or (dds.channels is defined and dds.channels)
+  %}
+  {% if dds_has_data %}
+    {% set sec.idx = sec.idx + 1 %}
+    <h2>{{ sec.idx }}. DDS-Stream – Testes de Telnet e Canais</h2>
+
+    <p>
+      <strong>Namespace:</strong> {{ dds.namespace | default('N/A') }}<br/>
+      <strong>Pod:</strong> {{ dds.pod | default('N/A') }}
+    </p>
+
+    {% if dds.tests is defined and dds.tests %}
+      <h3>{{ sec.idx }}.1 Testes de Telnet</h3>
+      <table>
+        <tr>
+          <th>Teste</th>
+          <th>Host</th>
+          <th>Porta</th>
+          <th>Status</th>
+        </tr>
+        {% for t in dds.tests %}
+          <tr>
+            <td>{{ t.name }}</td>
+            <td>{{ t.host }}</td>
+            <td>{{ t.port }}</td>
+            <td>
+              {% if t.ok %}
+                <span class="ok">OK</span>
+              {% else %}
+                <span class="fail">FALHA</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% endif %}
+
+    {% if dds.channels is defined and dds.channels %}
+      <h3>{{ sec.idx }}.2 Canais DDS (LIST)</h3>
+      <p>Limite de DELTA: {{ dds.delta_threshold | default('N/A') }}</p>
+      <table>
+        <tr>
+          <th>Canal</th>
+          <th>Delta</th>
+          <th>Status</th>
+        </tr>
+        {% for ch in dds.channels %}
+          <tr>
+            <td>{{ ch.canal }}</td>
+            <td>{{ ch.delta }}</td>
+            <td>
+              {% if dds.delta_threshold is defined and dds.delta_threshold is not none %}
+                {% if (ch.delta | int) > (dds.delta_threshold | int) %}
+                  <span class="fail">ALTO</span>
+                {% else %}
+                  <span class="ok">OK</span>
+                {% endif %}
+              {% else %}
+                <span class="ok">N/A</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% endif %}
+  {% endif %}
+
+  {# 8) Cheetah – Pods reiniciados #}
+  {% set has_cheetah_data =
+       (cheetah.pods is defined and cheetah.pods)
+       or (cheetah.delete_output is defined and cheetah.delete_output)
+  %}
+  {% if has_cheetah_data %}
+    {% set sec.idx = sec.idx + 1 %}
+    <h2>{{ sec.idx }}. Cheetah – Pods reiniciados</h2>
+
+    {% if cheetah.delete_output is defined and cheetah.delete_output %}
+      <h3>{{ sec.idx }}.1 Saída do delete</h3>
+      <pre>{{ cheetah.delete_output }}</pre>
+    {% endif %}
+
+    <h3>{{ sec.idx }}.2 Status dos pods após recriação</h3>
+    <p>
+      Status geral:
+      {% if cheetah.all_running %}
+        <span class="ok">Todos os pods estão em Running.</span>
+      {% else %}
+        <span class="fail">Há pods que não estão em Running.</span>
+      {% endif %}
+    </p>
+
+    {% if cheetah.pods is defined and cheetah.pods %}
+      <table>
+        <tr>
+          <th>Pod</th>
+          <th>Fase</th>
+        </tr>
+        {% for p in cheetah.pods %}
+          <tr>
+            <td>{{ p.name }}</td>
+            <td>
+              {% if p.phase == 'Running' %}
+                <span class="ok">{{ p.phase }}</span>
+              {% else %}
+                <span class="fail">{{ p.phase }}</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% endif %}
+  {% endif %}
+
+</body>
+</html>

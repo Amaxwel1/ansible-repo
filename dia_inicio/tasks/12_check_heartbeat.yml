@@ -1,0 +1,88 @@
+---
+- name: Descobrir pod atual do FIX server
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    oc -n {{ fix_ns_name }} \
+      get pods -l deploymentconfig={{ fix_dc_name }} \
+      -o jsonpath='{.items[0].metadata.name}'
+  register: fix_pod
+  changed_when: false
+
+- name: Verificar heartbeat nos logs do pod
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    oc -n {{ fix_ns_name }} \
+      logs {{ fix_pod.stdout }} --since=5m | egrep -i "{{ heartbeat_pattern }}"
+  register: heartbeat_check
+  failed_when: false
+  changed_when: false
+
+- name: Definir flag de heartbeat_ok
+  ansible.builtin.set_fact:
+    heartbeat_ok: "{{ heartbeat_check.rc == 0 }}"
+
+- name: Inicializar flag session_restart_applied
+  ansible.builtin.set_fact:
+    session_restart_applied: false
+
+- name: Coletar logs de event/message quando não há heartbeat
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    oc -n {{ fix_ns_name }} \
+      exec {{ fix_pod.stdout }} -- \
+      sh -c 'cat {{ fix_log_dir }}/*.event.log {{ fix_log_dir }}/*.message.log 2>/dev/null || true'
+  register: fix_full_logs
+  when: not heartbeat_ok
+  changed_when: false
+
+- name: Verificar possíveis problemas de MsgSeqNum
+  ansible.builtin.set_fact:
+    has_msgseq_issue: "{{ (fix_full_logs.stdout | default('')) is search(msgseq_pattern) }}"
+  when: not heartbeat_ok
+
+- name: Ajustar SESSION_RESTART=Y em caso de problema de sequência
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    oc -n {{ fix_ns_name }} \
+      set env dc/{{ fix_dc_name }} {{ session_restart_env_name }}={{ session_restart_env_value }} --overwrite
+  when:
+    - not heartbeat_ok
+    - has_msgseq_issue | default(false)
+  register: session_restart_patch
+
+- name: Aguardar rollout após SESSION_RESTART
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    oc -n {{ fix_ns_name }} \
+      rollout status dc/{{ fix_dc_name }} --timeout={{ rollout_timeout_seconds }}s
+  when:
+    - not heartbeat_ok
+    - has_msgseq_issue | default(false)
+  register: session_restart_rollout
+  changed_when: false
+
+- name: Aguardar alguns minutos para o pod subir
+  ansible.builtin.pause:
+    seconds: "{{ fix_flavour_pause | int }}"
+  when:
+    - not heartbeat_ok
+    - has_msgseq_issue | default(false)
+
+- name: Marcar session_restart_applied como true se o patch foi aplicado
+  ansible.builtin.set_fact:
+    session_restart_applied: true
+  when:
+    - not heartbeat_ok
+    - has_msgseq_issue | default(false)
+    - session_restart_patch is defined
+    - "'rc' in session_restart_patch"
+    - session_restart_patch.rc == 0
+    - session_restart_rollout is not defined
+      or ("rc" in session_restart_rollout and session_restart_rollout.rc | default(0) == 0)
+
+- name: Montar resumo do FIX para o relatório
+  ansible.builtin.set_fact:
+    fix_report:
+      heartbeat_ok: "{{ heartbeat_ok | default(false) }}"
+      has_msgseq_issue: "{{ has_msgseq_issue | default(false) }}"
+      session_restart_applied: "{{ session_restart_applied | default(false) }}"

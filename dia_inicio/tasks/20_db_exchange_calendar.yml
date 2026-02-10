@@ -1,0 +1,46 @@
+---
+- name: Carregar queries de calendário
+  ansible.builtin.include_vars:
+    file: "queries/exchange_calendar.yml"
+
+- name: Fechar dias anteriores (update)
+  community.postgresql.postgresql_query:
+    login_db: "{{ db.name }}"
+    login_host: "{{ db.host }}"
+    login_port: "{{ db.port }}"
+    login_user: "{{ db.user }}"
+    login_password: "{{ db.password }}"
+    autocommit: true
+    query: "{{ exchange_calendar_queries.close_previous_days.sql }}"
+  register: db_close_prev
+  changed_when: true
+
+- name: Inserir/atualizar dia de pregão alvo
+  community.postgresql.postgresql_query:
+    login_db: "{{ db.name }}"
+    login_host: "{{ db.host }}"
+    login_port: "{{ db.port }}"
+    login_user: "{{ db.user }}"
+    login_password: "{{ db.password }}"
+    autocommit: true
+    query: "{{ exchange_calendar_queries.insert_trade_day.sql }}"
+  register: db_insert_trade_day
+  changed_when: true
+
+- name: Validar D-1 e D no calendário
+  community.postgresql.postgresql_query:
+    login_db: "{{ db.name }}"
+    login_host: "{{ db.host }}"
+    login_port: "{{ db.port }}"
+    login_user: "{{ db.user }}"
+    login_password: "{{ db.password }}"
+    query: "{{ exchange_calendar_queries.check_prev_and_current.sql }}"
+  register: db_check_prev_current
+  changed_when: false
+
+- name: Montar resumo exchange_calendar
+  ansible.builtin.set_fact:
+    inicio_db_exchange_report:
+      close_previous_status: "{{ db_close_prev.statusmessage | default('') }}"
+      trade_day_status: "{{ db_insert_trade_day.statusmessage | default('') }}"
+      rows: "{{ db_check_prev_current.query_result | default([]) }}"
