@@ -1,0 +1,89 @@
+---
+- name: Mock Automation - Dia Início
+  hosts: localhost
+  gather_facts: false
+  environment:
+    TZ: "America/Sao_Paulo"
+
+  pre_tasks:
+    - name: Pular fim do dia se STEP não pedir FINALIZAR MOCK
+      ansible.builtin.meta: end_play
+      when: STEP is defined and 'FINALIZAR MOCK' in STEP
+
+  tasks:
+    - name: Marcar início
+      ansible.builtin.command: date +"%d/%m/%Y %H:%M:%S"
+      register: start_time
+      changed_when: false
+
+    - name: Executar Automação do Mock
+      block:
+        - name: Rodar role dia_inicio
+          ansible.builtin.include_role:
+            name: dia_inicio
+      rescue:
+        - name: Marcar fim (falha)
+          ansible.builtin.command: date +"%d/%m/%Y %H:%M:%S"
+          register: end_time_fail
+          changed_when: false
+
+        - name: Definir diretório temporário
+          ansible.builtin.set_fact:
+            tmpdir: "{{ tmpdir | default('/tmp/mock-dia-inicio-' ~ (awx_job_id | default(job_id | default('noid')))) }}"
+
+        - name: Definir arquivo de log (se existir)
+          ansible.builtin.set_fact:
+            log_file: "{{ log_file | default(tmpdir ~ '/mock-dia-inicio-' ~ (awx_job_id | default(job_id | default('noid'))) ~ '.log') }}"
+
+        - name: Tail do log (se existir)
+          ansible.builtin.shell: |
+            [ -f "{{ log_file }}" ] && tail -n 200 "{{ log_file }}" || true
+          register: _tail
+          changed_when: false
+          failed_when: false
+
+        - name: Contexto da falha
+          ansible.builtin.set_fact:
+            _fail_task: "{{ ansible_failed_task.name  | default('—') }}"
+            _fail_action: "{{ ansible_failed_task.action | default('—') }}"
+            _fail_msg: >-
+              {{
+                ansible_failed_result.msg
+                  | default(ansible_failed_result | to_nice_json | default('Erro não mapeado'))
+              }}
+
+        - name: E-mail – falha (set_stats)
+          ansible.builtin.set_stats:
+            data:
+              send_mail_subject: "Ansible-Report (FALHA) - Job #{{ awx_job_id | default(job_id | default('—')) }} - {{ awx_job_template_name | default('Mock Dia Início') }}"
+              send_mail_attachments: >-
+                {{
+                  [ log_file ]
+                  if (_tail.stdout is defined and (_tail.stdout | length > 0))
+                  else []
+                }}
+              send_mail_cifs: false
+              send_mail_body: |
+                <style>
+                table, th, td { border:1px solid #a2a2a2; border-collapse:collapse; padding:8px; }
+                th { background:#e0e0e0; }
+                pre { white-space:pre-wrap; }
+                </style>
+
+                <h2 style="color:#b00020">Falha na automação Mock - Dia Início</h2>
+                <table>
+                  <tr><th>Task</th><td>{{ _fail_task }}</td></tr>
+                  <tr><th>Ação</th><td>{{ _fail_action }}</td></tr>
+                  <tr><th>Mensagem</th><td><pre>{{ _fail_msg }}</pre></td></tr>
+                </table>
+
+                {% if _tail.stdout is defined and (_tail.stdout | length > 0) %}
+                <h3>Últimas linhas do log</h3>
+                <pre>{{ _tail.stdout | e }}</pre>
+                {% endif %}
+
+        - name: Aviso – falha tratada (sem abortar)
+          ansible.builtin.debug:
+            msg: "Falha tratada: {{ _fail_task }} / {{ _fail_action }} — e-mail de falha será enviado."
+
+- import_playbook: dia_fim/play_dia_final.yml

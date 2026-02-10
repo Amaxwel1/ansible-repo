@@ -1,0 +1,82 @@
+- name: Definir alvos de validação de UMDF (env vars)
+  ansible.builtin.set_fact:
+    umdf_env_targets:
+      - namespace: cheetah
+        dc: b3-bmf-book-data-adapter
+      - namespace: cheetah
+        dc: b3-bvsp-book-data-adapter
+      - namespace: cheetah
+        dc: b3-candle-data-adapter
+      - namespace: cheetah
+        dc: b3-data-adapter
+      - namespace: cheetah
+        dc: b3-dedo-duro-data-adapter
+      - namespace: cheetah
+        dc: b3-news-data-adapter
+      - namespace: cheetah
+        dc: b3-trade-data-adapter
+      - namespace: cheetah
+        dc: b3-volume-delta-data-adapter
+      - namespace: ag-bkg-mock-dds-th
+        dc: stream
+      - namespace: ag-bkg-mock-marketdata-th
+        dc: cadastro-papel-job
+      - namespace: ag-bkg-mock-marketdata-th
+        dc: stream-job
+
+- name: Inicializar lista de resultados de UMDF env
+  ansible.builtin.set_fact:
+    umdf_env_report_list: []
+
+- name: Coletar envs umdf_*_host em cada DC
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    BMF=$(oc -n {{ item.namespace }} set env dc/{{ item.dc }} --list | awk -F'=' '$1=="umdf_bmf_host"{print $2}')
+    BVSP=$(oc -n {{ item.namespace }} set env dc/{{ item.dc }} --list | awk -F'=' '$1=="umdf_bvsp_host"{print $2}')
+    echo "${BMF}|${BVSP}"
+  register: umdf_env_cmd
+  loop: "{{ umdf_env_targets }}"
+  loop_control:
+    label: "{{ item.namespace }}/{{ item.dc }}"
+  changed_when: false
+  failed_when: false
+
+- name: Montar lista de resultados de UMDF env
+  ansible.builtin.set_fact:
+    umdf_env_report_list: >-
+      {{
+        umdf_env_report_list
+        + [
+            {
+              "namespace": item.item.namespace,
+              "dc": item.item.dc,
+              "umdf_bmf_host": _bmf,
+              "umdf_bvsp_host": _bvsp,
+              "expected_hml": expected,
+              "bmf_ok": bmf_ok_calc | bool,
+              "bvsp_ok": bvsp_ok_calc | bool
+            }
+          ]
+      }}
+  vars:
+    expected: "{{ umdf_host_hml | default('') }}"
+    _parts: "{{ (item.stdout | default('')) | split('|') }}"
+    _bmf: "{{ _parts[0] | default('') | trim }}"
+    _bvsp: "{{ _parts[1] | default('') | trim if _parts | length > 1 else '' }}"
+
+    bmf_ok_calc: >-
+      {{ true
+         if item.item.dc == 'b3-bvsp-book-data-adapter'
+         else (_bmf == expected) }}
+    bvsp_ok_calc: >-
+      {{ true
+         if item.item.dc == 'b3-bmf-book-data-adapter'
+         else (_bvsp == expected) }}
+  loop: "{{ umdf_env_cmd.results | default([]) }}"
+  changed_when: false
+
+- name: Montar resumo final de UMDF hosts para relatório
+  ansible.builtin.set_fact:
+    umdf_env_report:
+      expected_hml: "{{ umdf_host_hml | default('') }}"
+      targets: "{{ umdf_env_report_list | default([]) }}"

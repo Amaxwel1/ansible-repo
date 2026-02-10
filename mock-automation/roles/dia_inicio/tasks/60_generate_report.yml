@@ -1,0 +1,74 @@
+---
+- name: Garantir ansible_date_time disponível para o template
+  ansible.builtin.setup:
+    gather_subset:
+      - "!all"
+      - "!min"
+      - "date_time"
+  when: ansible_date_time is not defined
+
+- name: Garantir tmpdir do início do dia
+  ansible.builtin.set_fact:
+    inicio_tmpdir: "{{ paths.tmpdir | default('/tmp/mock-inicio-' ~ (job_id | default('noid'))) }}"
+
+- name: Criar diretório tmp
+  ansible.builtin.file:
+    path: "{{ inicio_tmpdir }}"
+    state: directory
+    mode: "0755"
+
+- name: Definir arquivo de relatório
+  ansible.builtin.set_fact:
+    inicio_report_file: "{{ inicio_tmpdir }}/report_inicio.html"
+
+- name: Capturar FLAVOUR atual do FIX para o relatório
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    oc -n {{ fix_ns_name }} \
+      get dc {{ fix_dc_name }} \
+      -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="FLAVOUR")].value}'
+  register: fix_flavour_active
+  changed_when: false
+  failed_when: false
+
+- name: Normalizar FLAVOUR ativo para relatório
+  ansible.builtin.set_fact:
+    fix_flavour_active_value: "{{ (fix_flavour_active.stdout | default('') | trim) | default('N/A', true) }}"
+
+- name: Montar fix_report_final com FLAVOUR ativo
+  ansible.builtin.set_fact:
+    fix_report_final: >-
+      {{
+        (fix_report | default({}))
+        | combine({'flavour_active': fix_flavour_active_value})
+      }}
+  when: fix_report is defined
+
+- name: Montar report (objeto consolidado)
+  ansible.builtin.set_fact:
+    report:
+      exchange_calendar: "{{ inicio_db_exchange_report | default({}) }}"
+      marketdata: "{{ inicio_db_marketdata_report | default({}) }}"
+      umdf: "{{ inicio_umdf_report | default({}) }}"
+      streams: "{{ inicio_streams_report | default({}) }}"
+      dds_stream: "{{ inicio_dds_stream_report | default({}) }}"
+      jobs: "{{ inicio_jobs_report | default({}) }}"
+      cheetah: "{{ inicio_cheetah_report | default({}) }}"
+      fix: "{{ fix_report_final | default({}) }}"
+
+- name: Montar objeto de relatório (alias)
+  ansible.builtin.set_fact:
+    inicio_report: "{{ report }}"
+
+- name: Renderizar HTML do início do dia
+  ansible.builtin.template:
+    src: report_inicio.html.j2
+    dest: "{{ inicio_report_file }}"
+
+- name: set_stats para e-mail
+  ansible.builtin.set_stats:
+    data:
+      send_mail_subject: "Ansible-Report - Mock Início do Dia - Job #{{ awx_job_id | default(job_id) }}"
+      send_mail_attachments: []
+      send_mail_cifs: false
+      send_mail_body: "{{ lookup('file', inicio_report_file) }}"

@@ -1,0 +1,80 @@
+---
+- name: Buscar id_flavour do {{ fix_flavour_target }}
+  community.postgresql.postgresql_query:
+    login_db: "{{ db.name }}"
+    login_host: "{{ db.host }}"
+    login_port: "{{ db.port }}"
+    login_user: "{{ db.user }}"
+    login_password: "{{ db.password }}"
+    query: >
+      SELECT id_flavour
+      FROM tb_fix_server_configuration_flavour
+      WHERE cd_flavour = '{{ fix_flavour_target }}';
+  register: flavour_id_query
+  changed_when: false
+
+- name: Definir mock_flavour_id
+  ansible.builtin.set_fact:
+    mock_flavour_id: >-
+      {{
+        flavour_id_query.query_result[0].id_flavour
+        if (flavour_id_query.query_result is defined
+            and (flavour_id_query.query_result | length) > 0
+            and (flavour_id_query.query_result[0].id_flavour is defined))
+        else None
+      }}
+
+- name: Coletar linha da flavour (snapshot)
+  community.postgresql.postgresql_query:
+    login_db: "{{ db.name }}"
+    login_host: "{{ db.host }}"
+    login_port: "{{ db.port }}"
+    login_user: "{{ db.user }}"
+    login_password: "{{ db.password }}"
+    query: >
+      SELECT *
+      FROM tb_fix_server_configuration_flavour
+      WHERE id_flavour = {{ mock_flavour_id }};
+  when: mock_flavour_id is not none
+  register: db_flavour_snapshot
+  changed_when: false
+
+- name: Coletar sessão (snapshot)
+  community.postgresql.postgresql_query:
+    login_db: "{{ db.name }}"
+    login_host: "{{ db.host }}"
+    login_port: "{{ db.port }}"
+    login_user: "{{ db.user }}"
+    login_password: "{{ db.password }}"
+    query: >
+      SELECT *
+      FROM tb_fix_server_configuration_session
+      WHERE id_flavour = {{ mock_flavour_id }}
+      ORDER BY "key";
+  when: mock_flavour_id is not none
+  register: db_session_snapshot
+  changed_when: false
+
+- name: Coletar defaults (snapshot)
+  community.postgresql.postgresql_query:
+    login_db: "{{ db.name }}"
+    login_host: "{{ db.host }}"
+    login_port: "{{ db.port }}"
+    login_user: "{{ db.user }}"
+    login_password: "{{ db.password }}"
+    query: >
+      SELECT *
+      FROM tb_fix_server_configuration_default
+      WHERE id_flavour = {{ mock_flavour_id }}
+      ORDER BY "key";
+  when: mock_flavour_id is not none
+  register: db_default_snapshot
+  changed_when: false
+
+- name: Montar resumo de DB (snapshot final)
+  ansible.builtin.set_fact:
+    db_config_report:
+      mock_flavour_id: "{{ mock_flavour_id }}"
+      flavour: "{{ db_flavour_snapshot.query_result | default([]) if mock_flavour_id is not none else [] }}"
+      session: "{{ db_session_snapshot.query_result | default([]) if mock_flavour_id is not none else [] }}"
+      default: "{{ db_default_snapshot.query_result | default([]) if mock_flavour_id is not none else [] }}"

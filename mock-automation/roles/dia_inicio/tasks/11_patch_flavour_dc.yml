@@ -1,0 +1,19 @@
+---
+- name: Ajustar FLAVOUR no DC {{ fix_dc_name }} (TH)
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    oc -n {{ fix_ns_name }} \
+      set env dc/{{ fix_dc_name }} FLAVOUR={{ fix_flavour_target }} --overwrite
+  register: patch_flavour
+
+- name: Aguardar rollout do DC {{ fix_dc_name }}
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    oc -n {{ fix_ns_name }} \
+      rollout status dc/{{ fix_dc_name }} --timeout={{ rollout_timeout_seconds }}s
+  register: rollout_flavour
+  changed_when: false
+
+- name: Aguardar alguns minutos para o pod subir
+  ansible.builtin.pause:
+    seconds: "{{ fix_flavour_pause | int }}"

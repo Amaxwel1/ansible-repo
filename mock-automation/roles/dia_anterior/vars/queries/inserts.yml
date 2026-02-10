@@ -1,0 +1,189 @@
+---
+insert_queries:
+  # ==== DEFAULTS (tb_fix_server_configuration_default) ====
+  - name: "Default - ConnectionType"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_default (id_flavour, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              'ConnectionType', 'initiator');
+
+  - name: "Default - ReconnectInterval"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_default (id_flavour, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              'ReconnectInterval', '60');
+
+  - name: "Default - ValidOrderTypes"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_default (id_flavour, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              'ValidOrderTypes', '1,2,4,A,K');
+
+  - name: "Default - Charset"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_default (id_flavour, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              'Charset', 'ISO_8859-1');
+
+  - name: "Default - FileLogPath"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_default (id_flavour, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              'FileLogPath', './initiator/log');
+
+  - name: "Default - FileStorePath"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_default (id_flavour, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              'FileStorePath', 'initiator/filestore');
+
+  - name: "Default - LogPath"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_default (id_flavour, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              'LogPath', 'initiator/log');
+
+  - name: "Default - FileLogHeartbeats"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_default (id_flavour, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              'FileLogHeartbeats', 'Y');
+
+  - name: "Default - FileIncludeMilliseconds"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_default (id_flavour, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              'FileIncludeMilliseconds', 'N');
+
+  - name: "Default - FileIncludeTimeStampForMessages"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_default (id_flavour, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              'FileIncludeTimeStampForMessages', 'N');
+
+  - name: "Default - ScreenLogEvents"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_default (id_flavour, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              'ScreenLogEvents', 'N');
+
+  - name: "Default - ScreenLogShowIncoming"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_default (id_flavour, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              'ScreenLogShowIncoming', 'N');
+
+  - name: "Default - ScreenLogShowOutgoing"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_default (id_flavour, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              'ScreenLogShowOutgoing', 'N');
+
+  - name: "Default - ScreenLogShowHeartBeats"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_default (id_flavour, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              'ScreenLogShowHeartBeats', 'N');
+
+  - name: "Default - BeginString"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_default (id_flavour, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              'BeginString', 'FIX.4.4');
+
+  - name: "Default - EndTime"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_default (id_flavour, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              'EndTime', '23:59:59');
+
+  - name: "Default - StartTime"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_default (id_flavour, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              'StartTime', '04:59:00');
+
+  # ==== SESSIONS (tb_fix_server_configuration_session) ====
+  - name: "Session - BeginString"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_session (id_flavour, id_session, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              1, 'BeginString', 'FIX.4.4');
+
+  - name: "Session - HeartBtInt"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_session (id_flavour, id_session, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              1, 'HeartBtInt', '30');
+
+  - name: "Session - DataDictionary"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_session (id_flavour, id_session, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              1, 'DataDictionary', './configuration/FIX_DICTIONARY_EQUITIES.xml');
+
+  - name: "Session - MillisecondsInTimeStamp"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_session (id_flavour, id_session, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              1, 'MillisecondsInTimeStamp', 'N');
+
+  - name: "Session - SessionQualifier"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_session (id_flavour, id_session, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              1, 'SessionQualifier', 'DMA');
+
+  - name: "Session - QueueMQ"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_session (id_flavour, id_session, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              1, 'QueueMQ', 'FIX.SAINDO.PAQUETA');
+
+  - name: "Session - ResetOnLogon"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_session (id_flavour, id_session, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              1, 'ResetOnLogon', 'N');
+
+  - name: "Session - Text"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_session (id_flavour, id_session, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              1, 'Text', 'Valebroker 1.0');
+
+  - name: "Session - SocketConnectHost"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_session (id_flavour, id_session, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              1, 'SocketConnectHost', '179.127.212.233');
+
+  - name: "Session - SocketConnectPort"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_session (id_flavour, id_session, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              1, 'SocketConnectPort', '61108');
+
+  - name: "Session - SenderCompID"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_session (id_flavour, id_session, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              1, 'SenderCompID', 'CAGOA859');
+
+  - name: "Session - TargetCompID"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_session (id_flavour, id_session, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              1, 'TargetCompID', 'OE108');
+
+  - name: "Session - username"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_session (id_flavour, id_session, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              1, 'username', 'CAGOA859');
+
+  - name: "Session - password"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_session (id_flavour, id_session, "key", value)
+      VALUES ((SELECT id_flavour FROM tb_fix_server_configuration_flavour WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+              1, 'password', 'bXJ-)+$IuW:v');

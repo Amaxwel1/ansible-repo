@@ -1,0 +1,74 @@
+---
+- name: Enviar relatório de serviços
+  hosts: localhost
+  gather_facts: false
+  vars:
+    # Defaults (podem ser sobrescritos via Survey / Extra Vars)
+    mail_host: "mailhog.email.svc.cluster.local"
+    mail_delegate: ""
+    mail_port: 1025
+    mail_from: "automacao@lab.local"
+    mail_to: "destinatario@lab.local"
+    mail_cc: ""
+    mail_bcc: ""
+    mail_subtype: "html"
+    mail_subject_default: "Ansible Report - Job #{{ awx_job_id }} - {{ awx_job_template_name }}"
+    mail_debug: false
+  tasks:
+    - name: Normaliza subject (usa se já foi definido em set_stats)
+      set_fact:
+        _final_subject: >-
+          {{
+            (send_mail_subject | default(mail_subject_default))
+              | trim
+          }}
+
+    - name: Corpo default se não fornecido
+      set_fact:
+        send_mail_body: |
+          <h3>Resultado do Job #{{ awx_job_id }}</h3>
+          <p>Nenhum artefato <code>send_mail_body</code> foi publicado pelos plays anteriores.</p>
+      when: send_mail_body is not defined or (send_mail_body | trim | length) == 0
+
+    - name: Debug (opcional) – mostra primeiros 400 chars
+      debug:
+        msg:
+          - "Subject: {{ _final_subject }}"
+          - "Body (início): {{ (send_mail_body | regex_replace('\\s+',' ') )[0:400] }}"
+          - "Attachments: {{ send_mail_attachments | default([]) }}"
+      when: mail_debug | bool
+
+    - name: Envia e-mail delegate host
+      community.general.mail:
+        host: "{{ mail_host }}"
+        port: "{{ mail_port }}"
+        from: "{{ mail_from }}"
+        to: "{{ mail_to }}"
+        cc: "{{ mail_cc if mail_cc|length > 0 else omit }}"
+        bcc: "{{ mail_bcc if mail_bcc|length > 0 else omit }}"
+        subject: "{{ _final_subject }}"
+        subtype: "{{ mail_subtype }}"
+        body: "{{ send_mail_body }}"
+        attach: "{{ send_mail_attachments | default([]) }}"
+      register: mail_result
+      delegate_to: "{{ mail_delegate }}"
+      when: mail_delegate | length > 0
+
+    - name: Envia e-mail
+      community.general.mail:
+        host: "{{ mail_host }}"
+        port: "{{ mail_port }}"
+        from: "{{ mail_from }}"
+        to: "{{ mail_to }}"
+        cc: "{{ mail_cc if mail_cc|length > 0 else omit }}"
+        bcc: "{{ mail_bcc if mail_bcc|length > 0 else omit }}"
+        subject: "{{ _final_subject }}"
+        subtype: "{{ mail_subtype }}"
+        body: "{{ send_mail_body }}"
+        attach: "{{ send_mail_attachments | default([]) }}"
+      register: mail_result
+
+    - name: Aviso de envio
+      debug:
+        msg: "E-mail enviado com status: {{ mail_result.msg | default('ok') }}"
+      when: mail_debug | bool

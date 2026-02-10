@@ -1,0 +1,37 @@
+---
+- name: Capturar FLAVOUR atual do DC {{ fix_dc_name }} (TH)
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    oc -n {{ fix_ns_name }} \
+      get dc {{ fix_dc_name }} \
+      -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="FLAVOUR")].value}'
+  register: fix_flavour_before
+  changed_when: false
+  failed_when: false
+
+- name: Registrar FLAVOUR anterior (se existir)
+  ansible.builtin.set_fact:
+    fix_flavour_previous: "{{ fix_flavour_before.stdout | default('') }}"
+  when:
+    - fix_flavour_before is defined
+    - fix_flavour_before.stdout is defined
+    - fix_flavour_before.stdout | length > 0
+
+- name: Ajustar FLAVOUR no DC {{ fix_dc_name }} (TH)
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    oc -n {{ fix_ns_name }} \
+      set env dc/{{ fix_dc_name }} FLAVOUR={{ fix_flavour_target }} --overwrite
+  register: patch_flavour
+
+- name: Aguardar rollout do DC {{ fix_dc_name }}
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    oc -n {{ fix_ns_name }} \
+      rollout status dc/{{ fix_dc_name }} --timeout={{ rollout_timeout_seconds }}s
+  register: rollout_flavour
+  changed_when: false
+
+- name: Aguardar alguns minutos para o pod subir
+  ansible.builtin.pause:
+    seconds: "{{ fix_flavour_pause | int }}"

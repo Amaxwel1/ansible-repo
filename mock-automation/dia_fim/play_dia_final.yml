@@ -1,0 +1,256 @@
+---
+- name: Mock - Fim do Dia
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    ocp_clusters:
+      TH:
+        api_url: "https://api.cluster-kwcm4.dynamic.redhatworkshops.io:6443"
+
+    cluster_th_name: "TH"
+
+    ocp_user: ""
+    ocp_password: ""
+
+    ocp_insecure_skip_tls_verify: false
+
+    db:
+      name: mockdb
+      host: postgres.postgres.svc.cluster.local
+      port: 5432
+      user: mockuser
+      password: "mockpassword"
+
+    oms_namespace_th: ag-bkg-mock-oms-th
+
+    paths:
+      kubeconfig_th: "/tmp/mock-kc-th-{{ awx_job_id | default('local') }}"
+      tmpdir: "/tmp/mock-dia-fim-{{ awx_job_id | default('local') }}"
+
+    kubeconfig_th: "{{ paths.kubeconfig_th }}"
+  #   umdf_backup_host: host onde existe /umdfserver e onde o mount será feito
+  pre_tasks:
+    - name: Pular fim do dia se STEP não pedir FINALIZAR MOCK
+      ansible.builtin.meta: end_play
+      when: "'FINALIZAR MOCK' not in STEP"
+
+  tasks:
+    - name: Garantir ansible_date_time disponível
+      ansible.builtin.setup:
+        gather_subset:
+          - "!all"
+          - "!min"
+          - "date_time"
+      when: ansible_date_time is not defined
+
+    - name: Garantir tmpdir
+      ansible.builtin.set_fact:
+        fim_tmpdir: "{{ paths.tmpdir | default('/tmp/mock-fim-' ~ (awx_job_id | default('noid'))) }}"
+
+    - name: Garantir relatório do fim do dia
+      ansible.builtin.set_fact:
+        fim_report_file: "{{ fim_tmpdir }}/report_fim.html"
+
+    - name: Criar diretório tmp do fim do dia
+      ansible.builtin.file:
+        path: "{{ fim_tmpdir }}"
+        state: directory
+        mode: "0755"
+
+    - name: oc login TH
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ paths.kubeconfig_th }}"
+        mkdir -p "$(dirname "$KUBECONFIG")"
+        : > "$KUBECONFIG"
+
+        oc logout >/dev/null 2>&1 || true
+
+        oc login "{{ ocp_clusters[cluster_th_name].api_url }}" \
+          -u "{{ ocp_user }}" \
+          -p "{{ ocp_password }}" \
+          --insecure-skip-tls-verify \
+          >/dev/null
+
+        oc whoami
+      register: oc_login_th
+      changed_when: false
+
+    - name: Executar fim do mock (ajuste FLAVOUR + lookup flavour + cleanup DB)
+      block:
+        - name: Obter FLAVOUR atual do DC fix-server-paqueta
+          ansible.builtin.shell: |
+            export KUBECONFIG="{{ kubeconfig_th }}"
+            oc -n {{ oms_namespace_th }} set env dc/fix-server-paqueta --list | grep '^FLAVOUR=' || true
+          register: fix_env_before
+          changed_when: false
+
+        - name: Ajustar FLAVOUR=PAQUETA no DC fix-server-paqueta
+          ansible.builtin.shell: |
+            export KUBECONFIG="{{ kubeconfig_th }}"
+            oc -n {{ oms_namespace_th }} set env dc/fix-server-paqueta FLAVOUR=PAQUETA
+          register: fix_env_set
+          changed_when: "'updated' in (fix_env_set.stdout | default(''))"
+
+        - name: Obter FLAVOUR após ajuste
+          ansible.builtin.shell: |
+            export KUBECONFIG="{{ kubeconfig_th }}"
+            oc -n {{ oms_namespace_th }} set env dc/fix-server-paqueta --list | grep '^FLAVOUR=' || true
+          register: fix_env_after
+          changed_when: false
+
+        - name: Montar resumo do ajuste de FLAVOUR
+          ansible.builtin.set_fact:
+            fim_fix_server_report:
+              namespace: "{{ oms_namespace_th }}"
+              dc: "fix-server-paqueta"
+              flavour_before: "{{ fix_env_before.stdout | default('N/A') }}"
+              flavour_after: "{{ fix_env_after.stdout | default('N/A') }}"
+              command_stdout: "{{ fix_env_set.stdout | default('') }}"
+              command_stderr: "{{ fix_env_set.stderr | default('') }}"
+
+        - name: Buscar último id_flavour em tb_fix_server_configuration_flavour
+          community.postgresql.postgresql_query:
+            login_db: "{{ db.name }}"
+            login_host: "{{ db.host }}"
+            login_port: "{{ db.port }}"
+            login_user: "{{ db.user }}"
+            login_password: "{{ db.password }}"
+            autocommit: true
+            query: |
+              SELECT id_flavour
+              FROM tb_fix_server_configuration_flavour
+              ORDER BY id_flavour DESC
+              LIMIT 1;
+          register: flavour_lookup
+          changed_when: false
+
+        - name: Definir mock_flavour_id a partir da query
+          ansible.builtin.set_fact:
+            mock_flavour_id: "{{ flavour_lookup.query_result[0].id_flavour }}"
+          when:
+            - flavour_lookup.query_result is defined
+            - flavour_lookup.query_result | length > 0
+
+        - name: Remover flavour mock no banco - tb_fix_server_configuration_session
+          community.postgresql.postgresql_query:
+            login_db: "{{ db.name }}"
+            login_host: "{{ db.host }}"
+            login_port: "{{ db.port }}"
+            login_user: "{{ db.user }}"
+            login_password: "{{ db.password }}"
+            autocommit: true
+            query: |
+              DELETE FROM tb_fix_server_configuration_session
+              WHERE id_flavour = {{ mock_flavour_id }};
+          when: mock_flavour_id is defined
+          register: fim_db_del_session
+          changed_when: true
+
+        - name: Remover flavour mock no banco - tb_fix_server_configuration_default
+          community.postgresql.postgresql_query:
+            login_db: "{{ db.name }}"
+            login_host: "{{ db.host }}"
+            login_port: "{{ db.port }}"
+            login_user: "{{ db.user }}"
+            login_password: "{{ db.password }}"
+            autocommit: true
+            query: |
+              DELETE FROM tb_fix_server_configuration_default
+              WHERE id_flavour = {{ mock_flavour_id }};
+          when: mock_flavour_id is defined
+          register: fim_db_del_default
+          changed_when: true
+
+        - name: Remover flavour mock no banco - tb_fix_server_configuration_flavour
+          community.postgresql.postgresql_query:
+            login_db: "{{ db.name }}"
+            login_host: "{{ db.host }}"
+            login_port: "{{ db.port }}"
+            login_user: "{{ db.user }}"
+            login_password: "{{ db.password }}"
+            autocommit: true
+            query: |
+              DELETE FROM tb_fix_server_configuration_flavour
+              WHERE id_flavour = {{ mock_flavour_id }};
+          when: mock_flavour_id is defined
+          register: fim_db_del_flavour
+          changed_when: true
+
+        - name: Consolidar informações de cleanup no banco
+          ansible.builtin.set_fact:
+            fim_db_cleanup:
+              session: "{{ fim_db_del_session | default({}) }}"
+              default: "{{ fim_db_del_default | default({}) }}"
+              flavour: "{{ fim_db_del_flavour | default({}) }}"
+
+        - name: Montar resumo do cleanup no banco
+          ansible.builtin.set_fact:
+            fim_db_flavour_report:
+              flavour_id: "{{ mock_flavour_id | default('N/A') }}"
+              found: "{{ mock_flavour_id is defined }}"
+              ok: >-
+                {{
+                  (mock_flavour_id is defined)
+                  and not (
+                    fim_db_del_session.failed  | default(false)
+                    or fim_db_del_default.failed | default(false)
+                    or fim_db_del_flavour.failed | default(false)
+                  )
+                }}
+              raw_result: "{{ fim_db_cleanup | default({}) }}"
+
+      #     - name: Montar compartilhamento Valemobi em /media
+      #       ansible.builtin.mount:
+      #         path: /media
+      #         src: "//10.222.86.81/valemobi"
+      #         fstype: cifs
+      #         opts: "user=m528385,domain=corp.bradesco"
+      #         state: mounted
+      #       delegate_to: "{{ umdf_backup_host }}"
+      #       become: true
+      #
+      #     - name: Parar UMDF (./stop.sh em /umdfserver)
+      #       ansible.builtin.command: ./stop.sh
+      #       args:
+      #         chdir: /umdfserver
+      #       delegate_to: "{{ umdf_backup_host }}"
+      #       become: true
+      #
+      #     - name: Compactar pasta data e enviar para /media
+      #       ansible.builtin.command: >
+      #         tar -czf /media/data{{ ansible_date_time.date | regex_replace('-', '') }}.tar.gz data/
+      #       args:
+      #         chdir: /umdfserver
+      #       delegate_to: "{{ umdf_backup_host }}"
+      #       become: true
+
+      rescue:
+        - name: Montar relatório de fim com erro
+          ansible.builtin.set_fact:
+            fim_fix_server_report: "{{ fim_fix_server_report | default({}) }}"
+            fim_db_flavour_report: "{{ fim_db_flavour_report | default({}) }}"
+            fim_error:
+              message: "Falha na execução da automação de fim do mock. Verificar logs do job no AWX."
+
+      always:
+        - name: Montar objeto final de relatório
+          ansible.builtin.set_fact:
+            fim_report:
+              fix_server: "{{ fim_fix_server_report | default({}) }}"
+              db_flavour: "{{ fim_db_flavour_report | default({}) }}"
+              error: "{{ fim_error | default({}) }}"
+
+        - name: Renderizar HTML do fim do mock
+          ansible.builtin.template:
+            src: report_fim.html.j2
+            dest: "{{ fim_report_file }}"
+
+        - name: Publicar dados para o e-mail
+          ansible.builtin.set_stats:
+            data:
+              send_mail_subject: "Ansible-Report - Mock Fim do Dia - Job #{{ awx_job_id | default(job_id) }}"
+              send_mail_attachments: []
+              send_mail_cifs: false
+              send_mail_body: "{{ lookup('file', fim_report_file) }}"

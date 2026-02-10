@@ -1,0 +1,86 @@
+---
+# Clusters OCP
+ocp_clusters:
+  PRD:
+    api_url: "https://api.crc.testing:6443"
+  TH:
+    api_url: "https://api.cluster-kwcm4.dynamic.redhatworkshops.io:6443"
+
+cluster_prd_name: "PRD"
+cluster_th_name: "TH"
+
+# configuração por deployment (namespace + nome real do DC)
+deploy_settings:
+  cadastro-papel:
+    dc_name: "cadastro-papel-job"
+    prd_namespace: "ag-bkg-mock-marketdata-prd"
+    th_namespace: "ag-bkg-mock-marketdata-th"
+    container: "cadastro-papel-job"
+
+  stock-cache:
+    dc_name: "stock-cache-job"
+    prd_namespace: "ag-bkg-mock-marketdata-prd"
+    th_namespace: "ag-bkg-mock-marketdata-th"
+    container: "stock-cache-job"
+
+  start-day:
+    dc_name: "start-day-job"
+    prd_namespace: "ag-bkg-mock-marketdata-prd"
+    th_namespace: "ag-bkg-mock-marketdata-th"
+    container: "start-day-job"
+
+  stream-job:
+    dc_name: "stream-job"
+    prd_namespace: "ag-bkg-mock-marketdata-prd"
+    th_namespace: "ag-bkg-mock-marketdata-th"
+    container: "stream-job"
+
+  dds-stream:
+    dc_name: "stream"
+    prd_namespace: "ag-bkg-mock-dds-prd"
+    th_namespace: "ag-bkg-mock-dds-th"
+    container: "stream"
+
+ocp_user: ""
+ocp_password: ""
+
+# Caminhos temporários e report
+paths:
+  kubeconfig_prd: "/tmp/mock-kc-prd-{{ awx_job_id | default('local') }}"
+  kubeconfig_th: "/tmp/mock-kc-th-{{ awx_job_id | default('local') }}"
+  tmpdir: "/tmp/mock-dia-anterior-{{ awx_job_id | default('local') }}"
+
+report_file: "{{ paths.tmpdir }}/mock-dia-anterior-{{ awx_job_id | default('local') }}.html"
+
+# UMDF (valebroker)
+umdf_host_hml: "192.168.0.115"
+umdf_host_prd: "192.168.122.34"
+umdf_dir: "/umdf-server/bin"
+umdf_expected_jar: "valebroker-umdf-1.1.7.jar"
+
+# FIX server
+fix_dc_name: "fix-server-paqueta"
+fix_ns_name: "ag-bkg-mock-oms-th"
+flavour_previous: PAQUETA
+
+fix_flavour_target: "AGORA-MOCK-TEST"
+fix_log_dir: "/opt/valemobi/initiator/logs"
+fix_flavour_restore_after: true
+
+fix_flavour_pause: 50
+
+heartbeat_pattern: "35=0|heartbeat"
+msgseq_pattern: "MsgSeqNum"
+session_restart_env_name: "SESSION_RESTART"
+session_restart_env_value: "Y"
+rollout_timeout_seconds: 200
+
+enable_feed_c_dr: false
+
+# Banco PostgreSQL
+db:
+  host: "postgres.postgres.svc.cluster.local"
+  port: 5432
+  name: "mockdb"
+  user: "mockuser"
+  password: "mockpassword"

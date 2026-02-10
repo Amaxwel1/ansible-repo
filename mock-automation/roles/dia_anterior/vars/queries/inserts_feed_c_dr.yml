@@ -1,0 +1,12 @@
+---
+insert_queries_feed_c_dr:
+  - name: "Session FEED-C DR - SocketConnectHost especial"
+    sql: |
+      INSERT INTO tb_fix_server_configuration_session (id_flavour, id_session, "key", value)
+      VALUES (
+        (SELECT id_flavour FROM tb_fix_server_configuration_flavour
+         WHERE cd_flavour = 'AGORA-MOCK-TEST'),
+        1,
+        'SocketConnectHost',
+        '179.127.216.233'
+      );

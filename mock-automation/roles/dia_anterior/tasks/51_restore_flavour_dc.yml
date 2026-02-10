@@ -1,0 +1,45 @@
+---
+- name: Obter FLAVOUR antes do restore
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    oc -n {{ fix_ns_name }} set env dc/{{ fix_dc_name }} --list | grep '^FLAVOUR=' || true
+  register: fix_restore_before
+  changed_when: false
+
+- name: Definir valor anterior do FLAVOUR
+  ansible.builtin.set_fact:
+    fix_original: "{{ flavour_previous }}"
+
+- name: Restaurar FLAVOUR original
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    oc -n {{ fix_ns_name }} set env dc/{{ fix_dc_name }} FLAVOUR={{ fix_original }}
+  register: fix_restore_cmd
+  changed_when: "'updated' in (fix_restore_cmd.stdout | default(''))"
+
+- name: Aguardar rollout do DC {{ fix_dc_name }} após restore do FLAVOUR
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    oc -n {{ fix_ns_name }} \
+      rollout status dc/{{ fix_dc_name }} --timeout={{ rollout_timeout_seconds }}s
+  register: rollout_flavour_restore
+  changed_when: false
+
+- name: Obter FLAVOUR após restore
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    oc -n {{ fix_ns_name }} set env dc/{{ fix_dc_name }} --list | grep '^FLAVOUR=' || true
+  register: fix_restore_after
+  changed_when: false
+
+- name: Enriquecer fix_report com dados de restore
+  ansible.builtin.set_fact:
+    fix_report: >-
+      {{
+        (fix_report | default({}))
+        | combine({
+            'restore_before': fix_restore_before.stdout | default(''),
+            'restore_after': fix_restore_after.stdout | default(''),
+            'restore_ok': (fix_restore_cmd.rc | default(0) == 0)
+          }, recursive=True)
+      }}

@@ -1,0 +1,52 @@
+---
+- name: Garantir diretório temporário
+  ansible.builtin.file:
+    path: "{{ paths.tmpdir }}"
+    state: directory
+    mode: "0755"
+
+- name: Login nos clusters PRD e TH
+  import_tasks: 10_login_clusters.yml
+
+- name: Sincronizar imagens de Deploy entre PRD -> TH
+  import_tasks: 20_sync_deploy_images.yml
+  when: STEP is not defined or 'VERIFICAR IMAGENS' in STEP
+
+- name: Verificar IP dos umdf
+  import_tasks: 21_check_ips_umdf.yml
+  when: STEP is not defined or 'VERIFICAR UMDF' in STEP
+
+- name: Verificar versão do UMDF (valebroker)
+  import_tasks: 30_check_umdf_version.yml
+  when: STEP is not defined or 'VERIFICAR UMDF' in STEP
+
+- name: Ajustar FLAVOUR do DC e aguardar rollout
+  import_tasks: 40_patch_flavour_dc.yml
+  when: STEP is not defined
+    or 'PATCH FLAVOUR' in STEP
+    or 'TROCAR FLAVOR' in STEP
+
+- name: Verificar heartbeat/MsgSeqNum e remediação
+  import_tasks: 50_check_heartbeat.yml
+  when: STEP is not defined
+    or 'PATCH FLAVOUR' in STEP
+    or 'TROCAR FLAVOR' in STEP
+
+- name: Restaurar flavour
+  import_tasks: 51_restore_flavour_dc.yml
+  when: STEP is not defined or 'VOLTAR FLAVOR' in STEP
+
+- name: Executar inserts/configurações no banco
+  import_tasks: 60_db_run_inserts.yml
+  when: STEP is not defined
+    or 'QUERYS FLAVOUR' in STEP
+    or 'VALIDAR QUERYS' in STEP
+
+- name: check do banco
+  import_tasks: 70_db_check.yml
+  when: STEP is not defined
+    or 'QUERYS FLAVOUR' in STEP
+    or 'VALIDAR QUERYS' in STEP
+
+- name: Gerar relatório HTML
+  import_tasks: 80_generate_report.yml

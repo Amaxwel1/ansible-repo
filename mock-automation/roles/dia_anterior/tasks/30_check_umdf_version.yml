@@ -1,0 +1,49 @@
+---
+- name: Listar JAR do UMDF em HML
+  ansible.builtin.shell: |
+    ls {{ umdf_dir }}/valebroker-umdf-*.jar
+  delegate_to: "{{ umdf_host_hml }}"
+  register: umdf_ls_hml
+  changed_when: false
+  failed_when: umdf_ls_hml.rc not in [0, 2]
+
+- name: Definir versão atual do UMDF em HML (se existir)
+  ansible.builtin.set_fact:
+    umdf_hml_jar: "{{ (umdf_ls_hml.stdout_lines | default(['']))[0] | basename }}"
+
+- name: Listar JAR do UMDF em PRD
+  ansible.builtin.shell: |
+    ls {{ umdf_dir }}/valebroker-umdf-*.jar
+  delegate_to: "{{ umdf_host_prd }}"
+  register: umdf_ls_prd
+  changed_when: false
+  failed_when: umdf_ls_prd.rc not in [0, 2]
+
+- name: Definir versão atual do UMDF em PRD (se existir)
+  ansible.builtin.set_fact:
+    umdf_prd_jar: "{{ (umdf_ls_prd.stdout_lines | default(['']))[0] | basename }}"
+
+- name: Definir flags de comparação do UMDF
+  ansible.builtin.set_fact:
+    umdf_versions_match: >-
+      {{
+        (umdf_hml_jar | default('')) != ''
+        and (umdf_prd_jar | default('')) != ''
+        and umdf_hml_jar == umdf_prd_jar
+      }}
+    umdf_expected_match: >-
+      {{
+        umdf_expected_jar is defined
+        and (umdf_expected_jar | length) > 0
+        and (umdf_hml_jar | default('')) == umdf_expected_jar
+        and (umdf_prd_jar | default('')) == umdf_expected_jar
+      }}
+
+- name: Construir resumo do UMDF para o relatório
+  ansible.builtin.set_fact:
+    umdf_report:
+      hml_jar: "{{ umdf_hml_jar | default('') }}"
+      prd_jar: "{{ umdf_prd_jar | default('') }}"
+      expected_jar: "{{ umdf_expected_jar | default('N/A') }}"
+      versions_match: "{{ umdf_versions_match | default(false) }}"
+      expected_match: "{{ umdf_expected_match | default(false) }}"

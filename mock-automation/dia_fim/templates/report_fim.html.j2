@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <title>Relatório - Mock Fim do Dia</title>
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 14px; }
+    h1, h2, h3 { color: #1f2937; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+    th, td { border: 1px solid #d1d5db; padding: 6px 8px; text-align: left; }
+    th { background: #e5e7eb; }
+    .ok { color: #16a34a; font-weight: bold; }
+    .fail { color: #dc2626; font-weight: bold; }
+    .mono { font-family: "Courier New", monospace; }
+    pre { white-space: pre-wrap; font-family: "Courier New", monospace; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Relatório - Mock Fim do Dia</h1>
+  <p>Gerado em: {{ ansible_date_time.date }} {{ ansible_date_time.time }}</p>
+
+  {% set fix = fim_report.fix_server | default({}) %}
+  {% set db  = fim_report.db_flavour | default({}) %}
+  {% set err = fim_report.error | default({}) %}
+
+  {% if err.message is defined and err.message %}
+    <h2 style="color:#dc2626;">⚠ Erro geral na automação</h2>
+    <p>{{ err.message }}</p>
+    <hr/>
+  {% endif %}
+
+  <!-- 1. FIX Server - FLAVOUR -->
+  <h2>1. FIX Server - FLAVOUR</h2>
+
+  {% if fix %}
+    <p>
+      <strong>Namespace:</strong> {{ fix.namespace | default('N/A') }}<br/>
+      <strong>DeploymentConfig:</strong> {{ fix.dc | default('fix-server-paqueta') }}
+    </p>
+
+    <table>
+      <tr><th>Campo</th><th>Valor</th></tr>
+      <tr>
+        <th>FLAVOUR antes</th>
+        <td><code>{{ fix.flavour_before | default('N/A') }}</code></td>
+      </tr>
+      <tr>
+        <th>FLAVOUR depois</th>
+        <td><code>{{ fix.flavour_after | default('N/A') }}</code></td>
+      </tr>
+    </table>
+  {% else %}
+    <p>Dados do ajuste de FLAVOUR não disponíveis.</p>
+  {% endif %}
+
+  <!-- 2. Cleanup de flavour no banco -->
+  <h2>2. Cleanup de flavour no banco</h2>
+
+  {% if db %}
+    <p>
+      <strong>ID do flavour:</strong> {{ db.flavour_id | default('N/A') }}<br/>
+      <strong>Status:</strong>
+      {% if db.ok | default(false) %}
+        <span class="ok">OK</span>
+      {% else %}
+        <span class="fail">ERRO (ver detalhes no job / logs do Ansible)</span>
+      {% endif %}
+    </p>
+  {% else %}
+    <p>Dados de cleanup no banco não disponíveis.</p>
+  {% endif %}
+
+</body>
+</html>

@@ -1,0 +1,40 @@
+---
+- name: oc login PRD
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ paths.kubeconfig_prd }}"
+    mkdir -p "$(dirname "$KUBECONFIG")"
+    : > "$KUBECONFIG"
+
+    oc logout >/dev/null 2>&1 || true
+
+    oc login "{{ ocp_clusters[cluster_prd_name].api_url }}" \
+      -u "{{ ocp_user }}" \
+      -p "{{ ocp_password }}" \
+      --insecure-skip-tls-verify \
+      >/dev/null
+
+    oc whoami
+  register: oc_login_prd
+  changed_when: false
+  no_log: true
+
+- name: oc login TH
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    mkdir -p "$(dirname "$KUBECONFIG")"
+    : > "$KUBECONFIG"
+
+    oc logout >/dev/null 2>&1 || true
+
+    oc login "{{ ocp_clusters[cluster_th_name].api_url }}" \
+      -u "{{ ocp_user }}" \
+      -p "{{ ocp_password }}" \
+      --insecure-skip-tls-verify \
+      >/dev/null
+
+    oc whoami
+  register: oc_login_th
+  changed_when: false
+  no_log: true

@@ -1,0 +1,159 @@
+---
+- name: Definir lista de deploy_ids a partir do deploy_settings
+  ansible.builtin.set_fact:
+    deploy_ids: "{{ deploy_settings.keys() | list }}"
+
+- name: Coletar imagens dos DCs no PRD (antes)
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_prd }}"
+    oc -n {{ deploy_settings[item].prd_namespace }} \
+      get dc {{ deploy_settings[item].dc_name }} \
+      -o jsonpath='{.spec.template.spec.containers[0].image}'
+  loop: "{{ deploy_ids }}"
+  register: prd_dc_images_before
+  changed_when: false
+
+- name: Coletar imagens dos DCs no TH (antes)
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    oc -n {{ deploy_settings[item].th_namespace }} \
+      get dc {{ deploy_settings[item].dc_name }} \
+      -o jsonpath='{.spec.template.spec.containers[0].image}'
+  loop: "{{ deploy_ids }}"
+  register: th_dc_images_before
+  changed_when: false
+
+- name: Montar mapa de imagens PRD (antes)
+  ansible.builtin.set_fact:
+    prd_dc_images_map: >-
+      {{
+        prd_dc_images_map | default({}) |
+        combine({ item.item: item.stdout })
+      }}
+  loop: "{{ prd_dc_images_before.results }}"
+  changed_when: false
+
+- name: Montar mapa de imagens TH (antes)
+  ansible.builtin.set_fact:
+    th_dc_images_before_map: >-
+      {{
+        th_dc_images_before_map | default({}) |
+        combine({ item.item: item.stdout })
+      }}
+  loop: "{{ th_dc_images_before.results }}"
+  changed_when: false
+
+- name: Construir mapa de tags PRD (antes)
+  ansible.builtin.set_fact:
+    prd_dc_tags_map: >-
+      {{
+        prd_dc_tags_map | default({}) |
+        combine({
+          item.key: (
+            item.value
+            | regex_replace('^.+:', '')
+          )
+        })
+      }}
+  loop: "{{ prd_dc_images_map | dict2items }}"
+  changed_when: false
+
+- name: Construir mapa de tags TH (antes)
+  ansible.builtin.set_fact:
+    th_dc_tags_before_map: >-
+      {{
+        th_dc_tags_before_map | default({}) |
+        combine({
+          item.key: (
+            item.value
+            | regex_replace('^.+:', '')
+          )
+        })
+      }}
+  loop: "{{ th_dc_images_before_map | dict2items }}"
+  changed_when: false
+
+- name: Construir mapa de imagens alvo em TH (mesmo registry, tag de PRD)
+  ansible.builtin.set_fact:
+    th_dc_images_target_map: >-
+      {{
+        th_dc_images_target_map | default({}) |
+        combine({
+          item: (
+            th_dc_images_before_map[item] | default('')
+          )
+          | regex_replace(':[^:/]+$', ':' ~ (prd_dc_tags_map[item] | default('')))
+        })
+      }}
+  loop: "{{ deploy_ids }}"
+  changed_when: false
+
+- name: Ajustar imagens dos DCs em TH para bater com a TAG de PRD
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    IMAGE="{{ th_dc_images_target_map[item] | trim }}"
+    oc -n {{ deploy_settings[item].th_namespace }} \
+      set image dc/{{ deploy_settings[item].dc_name }} {{ deploy_settings[item].container | default('app') }}=${IMAGE}
+  loop: "{{ deploy_ids }}"
+  when: >
+    (prd_dc_tags_map[item] | default('')) !=
+    (th_dc_tags_before_map[item] | default(''))
+  register: sync_dcs
+
+- name: Coletar imagens dos DCs no TH (depois)
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    oc -n {{ deploy_settings[item].th_namespace }} \
+      get dc {{ deploy_settings[item].dc_name }} \
+      -o jsonpath='{.spec.template.spec.containers[0].image}'
+  loop: "{{ deploy_ids }}"
+  register: th_dc_images_after
+  changed_when: false
+
+- name: Montar mapa de imagens TH (depois)
+  ansible.builtin.set_fact:
+    th_dc_images_after_map: >-
+      {{
+        th_dc_images_after_map | default({}) |
+        combine({ item.item: item.stdout })
+      }}
+  loop: "{{ th_dc_images_after.results }}"
+  changed_when: false
+
+- name: Construir mapa de tags TH (depois)
+  ansible.builtin.set_fact:
+    th_dc_tags_after_map: >-
+      {{
+        th_dc_tags_after_map | default({}) |
+        combine({
+          item.key: (
+            item.value
+            | regex_replace('^.+:', '')
+          )
+        })
+      }}
+  loop: "{{ th_dc_images_after_map | dict2items }}"
+  changed_when: false
+
+- name: Montar relatório de sincronização de imagens (com TAGS)
+  ansible.builtin.set_fact:
+    deploy_sync_report: >-
+      {{
+        deploy_sync_report | default({}) |
+        combine({
+          item: {
+            'prd_image_before': prd_dc_images_map[item] | default(''),
+            'th_image_before': th_dc_images_before_map[item] | default(''),
+            'th_image_after': th_dc_images_after_map[item] | default(''),
+            'prd_tag': prd_dc_tags_map[item] | default(''),
+            'th_tag_before': th_dc_tags_before_map[item] | default(''),
+            'th_tag_after': th_dc_tags_after_map[item] | default(''),
+            'changed': (
+              th_dc_tags_before_map[item] | default('')
+              != th_dc_tags_after_map[item] | default('')
+            )
+          }
+        })
+      }}
+  loop: "{{ deploy_ids }}"
+  changed_when: false

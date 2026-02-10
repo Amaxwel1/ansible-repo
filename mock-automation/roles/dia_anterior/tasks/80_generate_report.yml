@@ -1,0 +1,76 @@
+---
+- name: Capturar FLAVOUR atual do FIX para o relatório
+  ansible.builtin.shell: |
+    export KUBECONFIG="{{ paths.kubeconfig_th }}"
+    oc -n {{ fix_ns_name }} \
+      get dc {{ fix_dc_name }} \
+      -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="FLAVOUR")].value}'
+  register: fix_flavour_active
+  changed_when: false
+  failed_when: false
+
+- name: Normalizar FLAVOUR ativo para relatório
+  ansible.builtin.set_fact:
+    fix_flavour_active_value: "{{ (fix_flavour_active.stdout | default('') | trim) | default('N/A', true) }}"
+
+- name: Montar fix_report_final com FLAVOUR ativo
+  ansible.builtin.set_fact:
+    fix_report_final: >-
+      {{
+        (fix_report | default({}))
+        | combine({'flavour_active': fix_flavour_active_value})
+      }}
+  when: fix_report is defined
+
+- name: Normalizar STEPs do survey
+  ansible.builtin.set_fact:
+    report_steps: "{{ STEP | default([]) }}"
+
+- name: Montar objeto de relatório consolidado
+  ansible.builtin.set_fact:
+    report:
+      steps: "{{ report_steps | default([]) }}"
+      deploys: "{{ deploy_sync_report | default({}) }}"
+      umdf: "{{ umdf_report | default({}) }}"
+      umdf_env: "{{ umdf_env_report | default({}) }}"
+      fix: "{{ fix_report_final | default({}) }}"
+      db:
+        config: "{{ db_config_report | default({}) }}"
+        inserts: "{{ db_inserts_report | default({}) }}"
+
+- name: Garantir ansible_date_time disponível para o template
+  ansible.builtin.setup:
+    gather_subset:
+      - "!all"
+      - "!min"
+      - "date_time"
+  when: ansible_date_time is not defined
+
+- name: Garantir tmpdir definido
+  ansible.builtin.set_fact:
+    tmpdir: "{{ tmpdir | default('/tmp/mock-dia-anterior-' ~ (awx_job_id | default(job_id | default('local')))) }}"
+
+- name: Ensure tmpdir exists
+  ansible.builtin.file:
+    path: "{{ tmpdir }}"
+    state: directory
+    mode: "0755"
+
+- name: Define report_file (fixo no tmpdir)
+  ansible.builtin.set_fact:
+    report_file: "{{ tmpdir }}/report.html"
+
+- name: Render HTML report
+  ansible.builtin.template:
+    src: report_dia_anterior.html.j2
+    dest: "{{ report_file }}"
+
+- name: Compat var for email play
+  ansible.builtin.set_fact:
+    tmp_path_local: "{{ tmpdir }}"
+
+- name: set_stats para play de e-mail (corpo HTML)
+  ansible.builtin.set_stats:
+    data:
+      send_mail_subject: "Ansible-Report - Job #{{ awx_job_id | default(job_id | default('—')) }} - {{ awx_job_template_name | default('Mock Dia Anterior') }}"
+      send_mail_body: "{{ lookup('file', report_file) }}"
