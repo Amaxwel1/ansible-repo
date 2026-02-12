@@ -1,0 +1,42 @@
+---
+- name: DB Log Parser -> set_stats for Email Workflow
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    ansible_url: "https://aap-new-aap.apps-crc.testing"
+
+  tasks:
+    - name: Normalize incoming vars
+      ansible.builtin.set_fact:
+        _host: "{{ hostname | default('N/A') }}"
+        _db: "{{ db_name | default('N/A') }}"
+        _file: "{{ log_file | default('N/A') }}"
+        _err: "{{ error | default('N/A') }}"
+        _ts: "{{ timestamp | default('N/A') }}"
+
+    - name: Build simple email HTML
+      ansible.builtin.set_fact:
+        send_mail_body: |
+          <h2 style="color:#b00020">Falha de conexão com o banco detectada</h2>
+          <p>Não teve conexão com o banco.</p>
+          <ul>
+            <li><b>Host:</b> {{ _host }}</li>
+            <li><b>Base:</b> {{ _db }}</li>
+            <li><b>Arquivo:</b> {{ _file }}</li>
+            <li><b>Timestamp:</b> {{ _ts }}</li>
+            <li><b>Erro:</b> {{ _err }}</li>
+          </ul>
+          <p><b>Executor:</b> {{ tower_user_name | default(awx_user_name | default(ansible_env.USER | default('desconhecido'))) }}</p>
+          <p><b>Job ID:</b> <a href="{{ ansible_url }}/#/jobs/playbook/{{ awx_job_id }}">{{ awx_job_id }}</a></p>
+
+    - name: set_stats for email workflow (compatible with your email template)
+      ansible.builtin.set_stats:
+        data:
+          send_mail_subject: "Ansible-Alert (DB) - Job #{{ awx_job_id }} - Sem conexão ({{ _db }})"
+          send_mail_body: "{{ send_mail_body }}"
+          send_mail_attachments: []
+          send_mail_cifs: "{{ send_mail_cifs | default(false) }}"
+          send_mail_cifs_path: "{{ send_mail_cifs_path | default('') }}"
+          send_mail_cifs_address: "{{ send_mail_cifs_address | default({}) }}"
+          cifs_workgroup: "{{ cifs_workgroup | default('agorasenior.corp') }}"
