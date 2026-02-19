@@ -24,3 +24,6 @@ ocp_user: ""
 ocp_password: ""
 
 offline_token: 
+
+rh_portal_user: 
+ocp_must_gather_case_token: 
