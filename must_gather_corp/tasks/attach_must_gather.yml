@@ -13,7 +13,7 @@
     msg: "Arquivo não existe no host: {{ must_gather_file }}"
   when: not attachment_file.stat.exists
 
-- name: Validate gzip before upload
+- name: Validate gzip before attach
   ansible.builtin.shell: |
     set -euo pipefail
     gzip -t "{{ must_gather_file }}"
@@ -23,31 +23,21 @@
   become: true
   become_user: root
 
-- name: Upload attachment via curl
-  ansible.builtin.shell: |
-    set -euo pipefail
-
-    RESP="/tmp/rh_attach_{{ case_id }}.resp"
-    CODE="/tmp/rh_attach_{{ case_id }}.code"
-
-    curl -sS --fail \
-      --connect-timeout 20 \
-      --max-time 3600 \
-      --retry 3 --retry-delay 10 --retry-connrefused \
-      -o "$RESP" -w "%{http_code}" > "$CODE" \
-      -H "Authorization: Bearer {{ access_token }}" \
-      -F "file=@{{ must_gather_file }};type=application/gzip;filename={{ must_gather_file | basename }}" \
-      "https://api.access.redhat.com/support/v1/cases/{{ case_id }}/attachments"
-
-    echo "HTTP=$(cat "$CODE")"
-    tail -c 1200 "$RESP" || true
-  args:
-    executable: /bin/bash
-  register: attachment_upload
-  no_log: true
-  changed_when: true
+- name: Ensure sshpass is available
+  ansible.builtin.package:
+    name: sshpass
+    state: present
   become: true
   become_user: root
+  failed_when: false
+
+- name: Ensure nc is available
+  ansible.builtin.package:
+    name: nc
+    state: present
+  become: true
+  become_user: root
+  failed_when: false
 
 - name: Build upload report
   ansible.builtin.set_fact:
@@ -63,6 +53,39 @@
       }}
   changed_when: false
 
+- name: Validate SFTP inputs
+  ansible.builtin.assert:
+    that:
+      - (case_id | default('') | trim) != ''
+      - (ocp_must_gather_case_token | default('') | trim) != ''
+      - (rh_portal_user | default('') | trim) != ''
+    fail_msg: "Para anexar via SFTP, informe case_id, ocp_must_gather_case_token e rh_portal_user."
+  changed_when: false
+
+- name: Upload must-gather via SFTP
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    sshpass -p "{{ ocp_must_gather_case_token }}" \
+      sftp -P 80 \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o "ProxyCommand nc --proxy {{ ocp_must_gather_proxy }} --proxy-auth {{ ocp_must_gather_proxy_auth }} --proxy-type http %h %p" \
+        "{{ rh_portal_user }}@sftp.access.redhat.com" <<EOF
+      cd {{ rh_portal_user }}
+      put {{ must_gather_file }} {{ case_id }}_{{ must_gather_file | basename }}
+      bye
+      EOF
+  args:
+    executable: /bin/bash
+  register: sftp_upload
+  no_log: true
+  become: true
+  become_user: root
+  until: sftp_upload.rc == 0
+  retries: 3
+  delay: 10
+
 - name: Upload report
   ansible.builtin.debug:
     msg:
@@ -70,5 +93,6 @@
       - "file={{ must_gather_file }}"
       - "size={{ mg_size_human }}"
       - "sha1={{ attachment_file.stat.checksum | default('n/a') }}"
-      - "{{ attachment_upload.stdout | default('') }}"
-      - "{{ attachment_upload.stderr | default('') }}"
+      - "sftp_rc={{ sftp_upload.rc | default('n/a') }}"
+      - "sftp_stdout={{ (sftp_upload.stdout | default('')) | regex_replace('\\n+$','') }}"
+      - "sftp_stderr={{ (sftp_upload.stderr | default('')) | regex_replace('\\n+$','') }}"
