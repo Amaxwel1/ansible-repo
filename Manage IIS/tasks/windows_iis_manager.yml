@@ -31,24 +31,51 @@
       - iis_service_operation_eff in ['start','stop','restart','info']
     fail_msg: "Operação inválida. Use start|stop|restart|info."
 
-- name: Verificar se módulo WebAdministration/IIS está disponível
+- name: Coletar Application Pools do IIS (básico) e validar WebAdministration
   when: iis_manage_pools_eff
   ansible.windows.win_powershell:
     script: |
-      if (-not (Get-Module -ListAvailable -Name WebAdministration)) {
-        Write-Output "MISSING_WEBADMIN"
-      } else {
-        Write-Output "OK"
+      $result = [ordered]@{
+        webadmin = "ok"
+        pools = @()
       }
-  register: webadmin_check
+
+      try {
+        Import-Module WebAdministration -ErrorAction Stop
+      } catch {
+        $result.webadmin = "missing"
+        $result.pools = @()
+        $result | ConvertTo-Json -Compress
+        exit 0
+      }
+
+      $result.pools = Get-IISAppPool | ForEach-Object {
+        [pscustomobject]@{
+          Name  = $_.Name
+          State = $_.State.ToString()
+        }
+      }
+
+      $result | ConvertTo-Json -Compress
+  register: iis_pools_bundle_raw
   changed_when: false
   failed_when: false
+
+- name: Parse bundle de pools
+  when: iis_manage_pools_eff
+  ansible.builtin.set_fact:
+    _iis_pools_bundle: >-
+      {{
+        (iis_pools_bundle_raw.output | default([]) | join('') | trim
+          | default('{"webadmin":"missing","pools":[]}', true)
+        )
+        | from_json
+      }}
 
 - name: Registrar erro e encerrar host se IIS/WebAdministration não estiver instalado
   when:
     - iis_manage_pools_eff
-    - webadmin_check is defined
-    - "'MISSING_WEBADMIN' in (webadmin_check.output | default([]) | join(''))"
+    - (_iis_pools_bundle.webadmin | default('missing')) != 'ok'
   block:
     - ansible.builtin.set_fact:
         iis_host_report:
@@ -58,42 +85,12 @@
           error: "Módulo WebAdministration/IIS não encontrado neste host."
     - ansible.builtin.meta: end_host
 
-- name: Coletar Application Pools do IIS (BÁSICO)
-  when: iis_manage_pools_eff
-  ansible.windows.win_powershell:
-    script: |
-      Import-Module WebAdministration
-      $pools = Get-IISAppPool | Select-Object Name, @{Name='State';Expression={$_.State.ToString()}}
-      $pools | ConvertTo-Json -Compress
-  register: iis_pools_basic_raw
-  changed_when: false
-  failed_when: false
-
-- name: Parse pools básico (inicial) - JSON
-  when: iis_manage_pools_eff
-  ansible.builtin.set_fact:
-    _iis_pools_basic_parsed: >-
-      {{
-        (iis_pools_basic_raw.output | default([]) | join('') | trim | default('[]'))
-        | from_json
-      }}
-
-- name: Normalizar lista de pools (inicial) - sempre lista
-  when: iis_manage_pools_eff
-  ansible.builtin.set_fact:
-    _iis_pools_basic_all: >-
-      {{
-        [_iis_pools_basic_parsed]
-        if _iis_pools_basic_parsed is mapping
-        else (_iis_pools_basic_parsed | default([]))
-      }}
-
 - name: "Criar dicionário { pool: state } (estado inicial)"
   when: iis_manage_pools_eff
   ansible.builtin.set_fact:
     iis_pools_states_initial: >-
       {%- set out = {} -%}
-      {%- for p in (_iis_pools_basic_all | default([])) -%}
+      {%- for p in (_iis_pools_bundle.pools | default([])) -%}
         {%- set _ = out.update({ (p.Name | string): (p.State | string) }) -%}
       {%- endfor -%}
       {{ out }}
@@ -156,21 +153,26 @@
   changed_when: false
   failed_when: false
 
-- name: Parse INFO pools (dict) ou set vazio
-  when: iis_manage_pools_eff
+- name: Parse INFO pools (dict) quando operação=info
+  when:
+    - iis_manage_pools_eff
+    - iis_pool_operation_eff == 'info'
   ansible.builtin.set_fact:
     iis_pools_details_initial: >-
       {{
-        (iis_pool_operation_eff == 'info')
-        | ternary(
-            (
-              (iis_pools_info_raw.output | default([]) | join('') | trim)
-              | default('{}', true)
-              | from_json
-            ),
-            {}
-          )
+        (
+          (iis_pools_info_raw.output | default([]) | join('') | trim)
+          | default('{}', true)
+          | from_json
+        )
       }}
+
+- name: Definir INFO pools vazio quando operação != info
+  when:
+    - iis_manage_pools_eff
+    - iis_pool_operation_eff != 'info'
+  ansible.builtin.set_fact:
+    iis_pools_details_initial: {}
 
 - name: Determinar pools alvo (todos ou apenas os informados)
   when: iis_manage_pools_eff
@@ -221,9 +223,12 @@
   ansible.windows.win_powershell:
     script: |
       Import-Module WebAdministration
-      $Name = "{{ item }}"
       $Operation = "{{ iis_pool_operation_eff }}"
       $Max = {{ iis_pool_max_retries_eff }}
+      $NamesJson = @'
+      {{ _iis_pools_needing_action | to_json }}
+      '@
+      $Names = $NamesJson | ConvertFrom-Json
 
       function Get-PoolState([string]$n) {
         $p = Get-IISAppPool -Name $n -ErrorAction SilentlyContinue
@@ -231,65 +236,78 @@
         return $p.State.ToString()
       }
 
-      $initial = Get-PoolState $Name
-      if ($initial -eq "MISSING") {
-        Write-Output ("MISSING: {0}" -f $Name)
-        exit 2
-      }
+      $results = @()
 
-      $success = $false
-      $st = $initial
-      $lastErr = ""
+      foreach ($Name in $Names) {
+        $initial = Get-PoolState $Name
+        $final = $initial
+        $success = $false
+        $lastErr = ""
 
-      for ($i = 1; $i -le $Max; $i++) {
-
-        try {
-          if ($Operation -eq "restart") {
-            $cur = Get-PoolState $Name
-            if ($cur -ne "Stopped") {
-              Stop-WebAppPool -Name $Name -ErrorAction Stop | Out-Null
-              Start-Sleep -Seconds 2
-            }
-            Start-WebAppPool -Name $Name -ErrorAction Stop | Out-Null
-
-          } elseif ($Operation -eq "stop") {
-            $cur = Get-PoolState $Name
-            if ($cur -ne "Stopped") {
-              Stop-WebAppPool -Name $Name -ErrorAction Stop | Out-Null
-            }
-
-          } else {
-            $cur = Get-PoolState $Name
-            if ($cur -ne "Started") {
-              Start-WebAppPool -Name $Name -ErrorAction Stop | Out-Null
-            }
-          }
-
-        } catch {
-          $lastErr = $_.Exception.Message
+        if ($initial -eq "MISSING") {
+          $results += [pscustomobject]@{ item=$Name; ok=$false; initial=$initial; final=$final; message=("MISSING: {0}" -f $Name) }
+          continue
         }
 
-        Start-Sleep -Seconds 2
-        $st = Get-PoolState $Name
+        for ($i = 1; $i -le $Max; $i++) {
+          try {
+            if ($Operation -eq "restart") {
+              $cur = Get-PoolState $Name
+              if ($cur -ne "Stopped") { Stop-WebAppPool -Name $Name -ErrorAction Stop | Out-Null; Start-Sleep -Seconds 2 }
+              Start-WebAppPool -Name $Name -ErrorAction Stop | Out-Null
+            } elseif ($Operation -eq "stop") {
+              $cur = Get-PoolState $Name
+              if ($cur -ne "Stopped") { Stop-WebAppPool -Name $Name -ErrorAction Stop | Out-Null }
+            } else {
+              $cur = Get-PoolState $Name
+              if ($cur -ne "Started") { Start-WebAppPool -Name $Name -ErrorAction Stop | Out-Null }
+            }
+          } catch {
+            $lastErr = $_.Exception.Message
+          }
 
-        if (($Operation -in @("start","restart")) -and ($st -eq "Started")) { $success = $true; break }
-        if (($Operation -eq "stop") -and ($st -eq "Stopped")) { $success = $true; break }
+          Start-Sleep -Seconds 2
+          $final = Get-PoolState $Name
+
+          if (($Operation -in @("start","restart")) -and ($final -eq "Started")) { $success = $true; break }
+          if (($Operation -eq "stop") -and ($final -eq "Stopped")) { $success = $true; break }
+        }
+
+        if (-not $success) {
+          $msg = ("FAILED: {0} initial={1} final={2}" -f $Name, $initial, $final)
+          if ($lastErr) { $msg = $msg + " err=" + $lastErr }
+          $results += [pscustomobject]@{ item=$Name; ok=$false; initial=$initial; final=$final; message=$msg }
+        } else {
+          $results += [pscustomobject]@{ item=$Name; ok=$true; initial=$initial; final=$final; message=("OK: {0} initial={1} final={2}" -f $Name, $initial, $final) }
+        }
       }
 
-      if (-not $success) {
-        $msg = ("FAILED: {0} initial={1} final={2}" -f $Name, $initial, $st)
-        if ($lastErr) { $msg = $msg + " err=" + $lastErr }
-        Write-Output $msg
-        exit 1
-      } else {
-        Write-Output ("OK: {0} initial={1} final={2}" -f $Name, $initial, $st)
-      }
-  register: iis_pools_actions
+      $results | ConvertTo-Json -Compress
+  register: iis_pools_actions_batch
   changed_when: false
   failed_when: false
-  loop: "{{ _iis_pools_needing_action }}"
-  loop_control:
-    label: "{{ item }}"
+
+- name: Normalizar resultado batch de pools no formato esperado (iis_pools_actions.results)
+  when:
+    - iis_manage_pools_eff
+    - iis_pool_operation_eff != 'info'
+    - (_iis_pools_needing_action | length) > 0
+  ansible.builtin.set_fact:
+    iis_pools_actions:
+      results: >-
+        {%- set raw = (
+              (iis_pools_actions_batch.output | default([]) | join('') | trim)
+              | default('[]', true)
+              | from_json
+            ) -%}
+        {%- set out = [] -%}
+        {%- for r in (raw if (raw is sequence) else [raw]) -%}
+          {%- set _ = out.append({
+                'item': (r.item | default('') | string),
+                'output': [ (r.message | default('') | string) ]
+              }) -%}
+        {%- endfor -%}
+        {{ out }}
 
 - name: Definir estado final igual ao inicial (op=info)
   when:
@@ -446,9 +464,9 @@
         {%- if s not in ordered -%}{%- set _ = ordered.append(s) -%}{%- endif -%}
       {%- endfor -%}
       {%- if iis_service_operation_eff == 'stop' -%}
-        {{ ordered | reverse | list }}
+        {{ (ordered | reverse | list) | unique | list }}
       {%- else -%}
-        {{ ordered }}
+        {{ ordered | unique | list }}
       {%- endif -%}
 
 - name: Coletar informações dos serviços (INFO) - inicial (somente quando operação=info)
@@ -624,55 +642,82 @@
   ansible.builtin.set_fact:
     _iis_services_missing: "{{ (_iis_services_missing | default([])) | difference(_iis_services_present_ordered | default([])) }}"
 
-- name: Executar operação nos serviços do IIS com retries (Windows)
+- name: Executar operação nos serviços do IIS com retries
   when:
     - iis_manage_service_eff
     - iis_service_operation_eff != 'info'
     - (_iis_services_present_ordered | length) > 0
   ansible.windows.win_powershell:
     script: |
-      $Name = "{{ item }}"
       $Operation = "{{ iis_service_operation_eff }}"
       $Max = {{ iis_service_max_retries_eff }}
+      $NamesJson = @'
+      {{ _iis_services_present_ordered | to_json }}
+      '@
+      $Names = $NamesJson | ConvertFrom-Json
 
-      $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
-      if (-not $svc) {
-        Write-Output ("MISSING: {0}" -f $Name)
-        exit 2
-      }
+      $results = @()
 
-      $initial = $svc.Status.ToString()
-      $success = $false
-      $st = $initial
-
-      for ($i = 1; $i -le $Max; $i++) {
-        if ($Operation -eq 'restart') {
-          Restart-Service -Name $Name -Force -ErrorAction SilentlyContinue
-        } elseif ($Operation -eq 'stop') {
-          Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
-        } else {
-          Start-Service -Name $Name -ErrorAction SilentlyContinue
+      foreach ($Name in $Names) {
+        $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+        if (-not $svc) {
+          $results += [pscustomobject]@{ item=$Name; ok=$false; initial="MISSING"; final="MISSING"; message=("MISSING: {0}" -f $Name) }
+          continue
         }
 
-        Start-Sleep -Seconds 2
-        $st = (Get-Service -Name $Name -ErrorAction SilentlyContinue).Status.ToString()
+        $initial = $svc.Status.ToString()
+        $final = $initial
+        $success = $false
 
-        if (($Operation -in @('start','restart')) -and ($st -eq 'Running')) { $success = $true; break }
-        if (($Operation -eq 'stop') -and ($st -eq 'Stopped')) { $success = $true; break }
+        for ($i = 1; $i -le $Max; $i++) {
+          if ($Operation -eq 'restart') {
+            Restart-Service -Name $Name -Force -ErrorAction SilentlyContinue
+          } elseif ($Operation -eq 'stop') {
+            Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
+          } else {
+            Start-Service -Name $Name -ErrorAction SilentlyContinue
+          }
+
+          Start-Sleep -Seconds 2
+          $final = (Get-Service -Name $Name -ErrorAction SilentlyContinue).Status.ToString()
+
+          if (($Operation -in @('start','restart')) -and ($final -eq 'Running')) { $success = $true; break }
+          if (($Operation -eq 'stop') -and ($final -eq 'Stopped')) { $success = $true; break }
+        }
+
+        if (-not $success) {
+          $results += [pscustomobject]@{ item=$Name; ok=$false; initial=$initial; final=$final; message=("FAILED: {0} initial={1} final={2}" -f $Name, $initial, $final) }
+        } else {
+          $results += [pscustomobject]@{ item=$Name; ok=$true; initial=$initial; final=$final; message=("OK: {0} initial={1} final={2}" -f $Name, $initial, $final) }
+        }
       }
 
-      if (-not $success) {
-        Write-Output ("FAILED: {0} initial={1} final={2}" -f $Name, $initial, $st)
-        exit 1
-      } else {
-        Write-Output ("OK: {0} initial={1} final={2}" -f $Name, $initial, $st)
-      }
-  loop: "{{ _iis_services_present_ordered }}"
-  loop_control:
-    label: "{{ item }}"
-  register: _iis_svc_actions
+      $results | ConvertTo-Json -Compress
+  register: _iis_svc_actions_batch
   changed_when: false
   failed_when: false
+
+- name: Normalizar resultado batch de serviços no formato esperado (_iis_svc_actions.results)
+  when:
+    - iis_manage_service_eff
+    - iis_service_operation_eff != 'info'
+    - (_iis_services_present_ordered | length) > 0
+  ansible.builtin.set_fact:
+    _iis_svc_actions:
+      results: >-
+        {%- set raw = (
+              (_iis_svc_actions_batch.output | default([]) | join('') | trim)
+              | default('[]', true)
+              | from_json
+            ) -%}
+        {%- set out = [] -%}
+        {%- for r in (raw if (raw is sequence) else [raw]) -%}
+          {%- set _ = out.append({
+                'item': (r.item | default('') | string),
+                'output': [ (r.message | default('') | string) ]
+              }) -%}
+        {%- endfor -%}
+        {{ out }}
 
 - name: Definir estado final igual ao inicial (op=info)
   when:
@@ -767,13 +812,11 @@
         {%- set initial = (d0.get('state','unknown') | string) -%}
         {%- set final = (d1.get('state','unknown') | string) -%}
 
-        {# se for info e estiver missing, força absent #}
         {%- if op == 'info' and (d0.get('missing', false)) -%}
           {%- set initial = 'absent' -%}
           {%- set final = 'absent' -%}
         {%- endif -%}
 
-        {# calcula OK #}
         {%- if op == 'info' -%}
           {%- set ok = (d0.get('missing', false) == false) -%}
         {%- elif op in ['start','restart'] -%}
