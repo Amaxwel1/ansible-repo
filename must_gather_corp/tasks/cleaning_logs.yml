@@ -1,26 +1,44 @@
----
 - name: cleaning directory {{ must_gather_path }}/{{ cluster_name }}
   ansible.builtin.file:
     path: "{{ must_gather_path }}/{{ cluster_name }}"
     state: absent
   failed_when: false
+  become: true
+  become_user: root
 
 - name: Remove tar.gz
   ansible.builtin.file:
     path: "{{ must_gather_file }}"
     state: absent
   failed_when: false
+  become: true
+  become_user: root
+
+- name: Verificar se CIFS ainda está montado
+  ansible.builtin.command: mountpoint -q "{{ ocp_must_gather_cifs_mount_dir }}"
+  register: _mg_mp_now
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: root
 
 - name: Desmontar CIFS
   ansible.builtin.shell: |
-    umount {{ ocp_must_gather_cifs_mount_dir }}
+    umount "{{ ocp_must_gather_cifs_mount_dir }}"
+  args:
+    executable: /bin/bash
   changed_when: false
   failed_when: false
-  become_user: root
   become: true
+  become_user: root
+  when:
+    - (_mg_we_mounted | default(false) | bool)
+    - _mg_mp_now.rc == 0
 
 - name: Apagar arquivo de senha CIFS
   ansible.builtin.file:
     path: /tmp/ocp-must-gather-password-cifs
     state: absent
   failed_when: false
+  become: true
+  become_user: root
