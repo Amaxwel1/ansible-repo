@@ -44,9 +44,12 @@
         <tr><th>Fim</th><td>{{ mg_end_time.stdout | default('—') }}</td></tr>
 
         <tr><th>Cluster</th><td>{{ cluster_name }}</td></tr>
-        <tr><th>Node</th><td><code>{{ best_master | default('—') }}</code></td></tr>
+        <tr><th>Gerar Must-Gather</th><td>{{ 'SIM' if (ocp_must_gather_generate_eff | default(true)) else 'NÃO' }}</td></tr>
 
+        {% if ocp_must_gather_generate_eff | default(true) %}
+        <tr><th>Node</th><td><code>{{ best_master | default('—') }}</code></td></tr>
         <tr><th>Tamanho</th><td>{{ mg_size_human }}</td></tr>
+        {% endif %}
 
         <tr><th>Case</th><td>{{ case_id | default('—') }}</td></tr>
       </table>
