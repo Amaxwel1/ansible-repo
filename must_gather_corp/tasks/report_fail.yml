@@ -29,7 +29,11 @@
         <tr><th>Fim</th><td>{{ mg_end_time_fail.stdout | default('—') }}</td></tr>
 
         <tr><th>Cluster</th><td>{{ cluster_name | default('—') }}</td></tr>
+
+        <tr><th>Gerar Must-Gather</th><td>{{ 'SIM' if (ocp_must_gather_generate_eff | default(true)) else 'NÃO' }}</td></tr>
+        {% if ocp_must_gather_generate_eff | default(true) %}
         <tr><th>Node</th><td><code>{{ best_master | default('—') }}</code></td></tr>
+        {% endif %}
 
         <tr><th>Task</th><td>{{ _fail_task }}</td></tr>
         <tr><th>Ação</th><td>{{ _fail_action }}</td></tr>
