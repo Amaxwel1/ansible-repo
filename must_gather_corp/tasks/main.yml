@@ -1,4 +1,3 @@
----
 - name: Marcar início (report)
   ansible.builtin.command: date +"%d/%m/%Y %H:%M:%S"
   register: mg_start_time
@@ -19,23 +18,37 @@
           - (ocp_must_gather_cluster | lower) in ocp_must_gather_clusters
         fail_msg: "Cluster inválido: '{{ ocp_must_gather_cluster }}'. Opções: {{ ocp_must_gather_clusters.keys() | list }}"
 
+    - name: Normalizar flag Gerar Must-Gather (survey Sim/Não)
+      ansible.builtin.set_fact:
+        ocp_must_gather_generate_eff: >-
+          {{
+            (ocp_must_gather_generate | default(true))
+            if ((ocp_must_gather_generate | default(true)) is boolean)
+            else ((ocp_must_gather_generate | string | lower | trim) in ['sim','s','yes','y','true','1','on'])
+          }}
+      changed_when: false
+
     - name: Info cluster logging
       ansible.builtin.include_tasks: cluster_logging.yml
 
     - name: Check nodes
       ansible.builtin.include_tasks: check_nodes.yml
+      when: (ocp_must_gather_generate_eff | default(true) | bool)
 
     - name: Include storage path task
       ansible.builtin.include_tasks: storage_path.yml
+      when: (ocp_must_gather_generate_eff | default(true) | bool)
 
-    - name: Create case
+    - name: Create/Use case
       ansible.builtin.include_tasks: case_auth.yml
 
     - name: Include collecting must gather task
       ansible.builtin.include_tasks: collecting_must_gather.yml
+      when: (ocp_must_gather_generate_eff | default(true) | bool)
 
     - name: Attach must gather in the case
       ansible.builtin.include_tasks: attach_must_gather.yml
+      when: (ocp_must_gather_generate_eff | default(true) | bool)
 
     - name: Marcar fim (sucesso)
       ansible.builtin.command: date +"%d/%m/%Y %H:%M:%S"
