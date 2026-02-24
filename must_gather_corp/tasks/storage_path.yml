@@ -1,23 +1,69 @@
----
 - name: Criar arquivo para senha do CIFS
   ansible.builtin.copy:
     dest: /tmp/ocp-must-gather-password-cifs
     content: "{{ ocp_must_gather_cifs_password }}"
     mode: "0600"
+  no_log: true
+  become: true
+  become_user: root
 
 - name: Criar diretório de montagem
   ansible.builtin.file:
     path: "{{ ocp_must_gather_cifs_mount_dir }}"
     state: directory
-  become_user: root
   become: true
+  become_user: root
+
+- name: Verificar se o mountpoint já está montado
+  ansible.builtin.command: mountpoint -q "{{ ocp_must_gather_cifs_mount_dir }}"
+  register: _mg_mountpoint
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: root
+
+- name: Validar share montado
+  ansible.builtin.shell: |
+    set -euo pipefail
+    mount | awk '$3=="{{ ocp_must_gather_cifs_mount_dir }}" {print $1; exit 0}'
+  args:
+    executable: /bin/bash
+  register: _mg_mounted_src
+  changed_when: false
+  failed_when: false
+  when: _mg_mountpoint.rc == 0
+  become: true
+  become_user: root
+
+- name: Falhar se mountpoint já estiver montado com outro share
+  ansible.builtin.fail:
+    msg: >-
+      {{ ocp_must_gather_cifs_mount_dir }} já está montado em {{ _mg_mounted_src.stdout | default('') }},
+      esperado: {{ ocp_must_gather_cifs_path }}.
+      Desmonte o volume ou use outro mount_dir.
+  when:
+    - _mg_mountpoint.rc == 0
+    - (_mg_mounted_src.stdout | default('') | trim) != ''
+    - (ocp_must_gather_cifs_path | trim) != ''
+    - (_mg_mounted_src.stdout | trim) != (ocp_must_gather_cifs_path | trim)
+  become: true
+  become_user: root
 
 - name: Montar CIFS
-  ansible.builtin.shell: >-
+  ansible.builtin.shell: >
     mount "{{ ocp_must_gather_cifs_path }}" "{{ ocp_must_gather_cifs_mount_dir }}"
     -o "username={{ ocp_must_gather_cifs_username }},password=$(cat /tmp/ocp-must-gather-password-cifs),domain={{ ocp_must_gather_cifs_domain }},rw,vers=3.0"
-  become_user: root
+  args:
+    executable: /bin/bash
   become: true
+  become_user: root
+  when: _mg_mountpoint.rc != 0
+  register: _mg_mount_cmd
+
+- name: Marcar se este job montou o CIFS
+  ansible.builtin.set_fact:
+    _mg_we_mounted: "{{ (_mg_mountpoint.rc != 0) }}"
+  changed_when: false
 
 - name: Ajustar paths para usar CIFS
   ansible.builtin.set_fact:
@@ -30,20 +76,20 @@
     path: "{{ must_gather_path }}/{{ cluster_name }}"
     state: directory
   register: must_gather_dir
-  become_user: root
   become: true
+  become_user: root
 
 - name: Clean storage directory if exists
   ansible.builtin.file:
     path: "{{ must_gather_path }}/{{ cluster_name }}"
     state: absent
   when: must_gather_dir.changed == false
-  become_user: root
   become: true
+  become_user: root
 
 - name: Create a storage directory
   ansible.builtin.file:
     path: "{{ must_gather_path }}/{{ cluster_name }}"
     state: directory
-  become_user: root
   become: true
+  become_user: root
