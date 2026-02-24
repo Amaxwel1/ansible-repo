@@ -19,6 +19,7 @@ ocp_must_gather_cifs_password: "{{ ansible_password }}"
 ocp_must_gather_node: ""
 ocp_must_gather_command: ""
 ocp_must_gather_existing_case_id: ""
+ocp_must_gather_generate: true
 
 ocp_user: ""
 ocp_password: ""
