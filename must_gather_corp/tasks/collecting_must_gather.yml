@@ -9,9 +9,21 @@
       become: true
       become_user: root
 
-    - name: OpenShift login
+    - name: Definir kubeconfig isolado por job/cluster
+      ansible.builtin.set_fact:
+        ocp_mg_kubeconfig_mg: "/tmp/kcfg_mg_{{ cluster_name }}_{{ awx_job_id | default('noid') }}.yaml"
+      changed_when: false
+      become: true
+      become_user: root
+
+    - name: OpenShift login (kubeconfig isolado)
       ansible.builtin.shell: |
-        oc login -u {{ ocp_user }} -p {{ ocp_password }} {{ openshift_api_url }} {{ '--insecure-skip-tls-verify' if (ocp_must_gather_insecure_skip_tls_verify | default(true) | bool) else '' }}
+        set -euo pipefail
+        rm -f "{{ ocp_mg_kubeconfig_mg }}"
+        oc login -u {{ ocp_user }} -p {{ ocp_password }} {{ openshift_api_url }} \
+          {{ '--insecure-skip-tls-verify' if (ocp_must_gather_insecure_skip_tls_verify | default(true) | bool) else '' }} \
+          --kubeconfig="{{ ocp_mg_kubeconfig_mg }}" >/dev/null
+        oc whoami --kubeconfig="{{ ocp_mg_kubeconfig_mg }}" >/dev/null
       args:
         executable: /bin/bash
       register: oc_login_out
@@ -30,6 +42,8 @@
       register: must_gather_out
       become: true
       become_user: root
+      environment:
+        KUBECONFIG: "{{ ocp_mg_kubeconfig_mg }}"
       when: (ocp_must_gather_command | default('') | trim) == ''
 
     - name: Run must-gather (custom)
@@ -42,6 +56,8 @@
       register: must_gather_out
       become: true
       become_user: root
+      environment:
+        KUBECONFIG: "{{ ocp_mg_kubeconfig_mg }}"
       when: (ocp_must_gather_command | default('') | trim) != ''
 
     - name: Verificar se dest-dir recebeu conteúdo
@@ -86,6 +102,14 @@
       become: true
       become_user: root
 
+    - name: Remover kubeconfig temporário (best-effort)
+      ansible.builtin.file:
+        path: "{{ ocp_mg_kubeconfig_mg }}"
+        state: absent
+      failed_when: false
+      become: true
+      become_user: root
+
   rescue:
     - name: Obter lista de namespaces
       kubernetes.core.k8s_info:
@@ -121,12 +145,20 @@
       ansible.builtin.debug:
         msg: "Must-gather namespaces removidos: {{ must_gather_namespaces | default([]) }}"
 
-    - name: Logout OpenShift (best-effort)
+    - name: Logout OpenShift (best-effort) - kubeconfig isolado
       ansible.builtin.shell: |
-        oc logout || true
+        oc logout --kubeconfig="{{ ocp_mg_kubeconfig_mg | default('') }}" || true
       args:
         executable: /bin/bash
       changed_when: false
+      failed_when: false
+      become: true
+      become_user: root
+
+    - name: Remover kubeconfig temporário (best-effort)
+      ansible.builtin.file:
+        path: "{{ ocp_mg_kubeconfig_mg | default('') }}"
+        state: absent
       failed_when: false
       become: true
       become_user: root
