@@ -79,3 +79,26 @@
   delegate_to: localhost
   when: (case_mode | default('')) == 'attach_only'
   run_once: true
+
+- name: Set case info (para report)
+  ansible.builtin.set_fact:
+    mg_case_info:
+      id: "{{ case_id }}"
+      mode: "{{ case_mode | default('attach_only') }}"
+      summary: "{{ case_summary | default('—') }}"
+      severity: "{{ case_severity | default('—') }}"
+      type: "{{ case_type | default('—') }}"
+      product: "{{ product | default('—') }}"
+      version: "{{ openshift_version | default('—') }}"
+      account: "{{ accountNumberRef | default('—') }}"
+      cluster_id: "{{ (cluster_id[0] if (cluster_id is defined and (cluster_id|length>0)) else '—') }}"
+      created_at: "{{ (redhat_case_creation.json.createdDate | default('—')) if (redhat_case_creation is defined and redhat_case_creation.json is defined) else '—' }}"
+      link: >-
+        {{
+          ("https://access.redhat.com/support/case/" ~ case_id)
+          if (case_id | default('') | trim) != ''
+          else '—'
+        }}
+  changed_when: false
+  delegate_to: localhost
+  run_once: true
