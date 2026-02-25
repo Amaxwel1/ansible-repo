@@ -5,20 +5,23 @@
   register: _mg_stat
   changed_when: false
   failed_when: false
+  when: (ocp_must_gather_generate_eff | default(true) | bool)
 
-- name: Calcular tamanho human-readable
+- name: Calcular tamanho human-readable (quando houver arquivo)
   ansible.builtin.set_fact:
     mg_size_bytes: "{{ _mg_stat.stat.size | default(0) | int }}"
-    mg_size_mb: "{{ (( _mg_stat.stat.size | default(0) | int ) / 1048576) | round(2) }}"
-    mg_size_gb: "{{ (( _mg_stat.stat.size | default(0) | int ) / 1073741824) | round(2) }}"
     mg_size_human: >-
       {{
-        ( (( _mg_stat.stat.size | default(0) | int ) / 1073741824) | round(2) | string ) ~ ' GB'
-        if ( (_mg_stat.stat.size | default(0) | int ) >= 1073741824 )
+        (
+          (((_mg_stat.stat.size | default(0) | int) / 1073741824) | round(2) | string) ~ ' GB'
+        ) if ((_mg_stat.stat.size | default(0) | int) >= 1073741824)
         else
-        ( (( _mg_stat.stat.size | default(0) | int ) / 1048576) | round(2) | string ) ~ ' MB'
+        (
+          (((_mg_stat.stat.size | default(0) | int) / 1048576) | round(2) | string) ~ ' MB'
+        )
       }}
   changed_when: false
+  when: (ocp_must_gather_generate_eff | default(true) | bool) and (_mg_stat is defined)
 
 - name: any_errors (sucesso = false)
   ansible.builtin.set_fact:
@@ -31,32 +34,83 @@
       <style>
         body { font-family: Arial, sans-serif; font-size: 13px; }
         table, th, td { border:1px solid #d1d5db; border-collapse:collapse; padding:8px; }
-        th { background:#f3f4f6; text-align:left; }
+        th { background:#f3f4f6; text-align:left; width: 230px; }
         code { background:#f3f4f6; padding:2px 4px; border-radius:4px; }
+        .muted { color:#6b7280; }
       </style>
 
       <h2>OpenShift Must-Gather</h2>
       <p><b>Motivo:</b> {{ (motivo | default('N/D')) | e }}</p>
 
+      <h3 style="margin-top:14px;">Execução</h3>
       <table>
         <tr><th>Job</th><td>#{{ awx_job_id | default(job_id | default('—')) }} - {{ awx_job_template_name | default('Must-Gather') }}</td></tr>
         <tr><th>Início</th><td>{{ mg_start_time.stdout | default('—') }}</td></tr>
         <tr><th>Fim</th><td>{{ mg_end_time.stdout | default('—') }}</td></tr>
-
-        <tr><th>Cluster</th><td>{{ cluster_name }}</td></tr>
-        <tr><th>Gerar Must-Gather</th><td>{{ 'SIM' if (ocp_must_gather_generate_eff | default(true)) else 'NÃO' }}</td></tr>
-
-        {% if ocp_must_gather_generate_eff | default(true) %}
-        <tr><th>Node</th><td><code>{{ best_master | default('—') }}</code></td></tr>
-        <tr><th>Tamanho</th><td>{{ mg_size_human }}</td></tr>
-        {% endif %}
-
-        <tr><th>Case</th><td>{{ case_id | default('—') }}</td></tr>
+        <tr><th>Cluster</th><td>{{ cluster_name | default('—') }}</td></tr>
+        <tr><th>API</th><td><code>{{ openshift_api_url | default('—') }}</code></td></tr>
+        <tr><th>Gerar Must-Gather</th><td><b>{{ 'SIM' if (ocp_must_gather_generate_eff | default(true) | bool) else 'NÃO' }}</b></td></tr>
       </table>
+
+      {% set _case_id = (mg_case_info.id if (mg_case_info is defined and mg_case_info.id is defined) else (case_id | default('—'))) %}
+      {% set _case_mode = (mg_case_info.mode if (mg_case_info is defined and mg_case_info.mode is defined) else (case_mode | default('attach_only'))) %}
+      {% set _case_link = (mg_case_info.link if (mg_case_info is defined and mg_case_info.link is defined) else ('https://access.redhat.com/support/cases/#/case/' ~ _case_id if (_case_id|string|trim) not in ['','—'] else '—')) %}
+      {% set _case_summary = (mg_case_info.summary if (mg_case_info is defined and mg_case_info.summary is defined) else (case_summary | default('—'))) %}
+      {% set _case_sev = (mg_case_info.severity if (mg_case_info is defined and mg_case_info.severity is defined) else (case_severity | default('—'))) %}
+      {% set _case_type = (mg_case_info.type if (mg_case_info is defined and mg_case_info.type is defined) else (case_type | default('—'))) %}
+      {% set _case_prod = (mg_case_info.product if (mg_case_info is defined and mg_case_info.product is defined) else (product | default('—'))) %}
+      {% set _case_ver = (mg_case_info.version if (mg_case_info is defined and mg_case_info.version is defined) else (openshift_version | default('—'))) %}
+      {% set _case_acc = (mg_case_info.account if (mg_case_info is defined and mg_case_info.account is defined) else (accountNumberRef | default('—'))) %}
+      {% set _case_clusterid = (mg_case_info.cluster_id if (mg_case_info is defined and mg_case_info.cluster_id is defined) else ((cluster_id[0]) if (cluster_id is defined and (cluster_id|length>0)) else '—')) %}
+      {% set _case_created = (mg_case_info.created_at if (mg_case_info is defined and mg_case_info.created_at is defined) else '—') %}
+
+      <h3 style="margin-top:14px;">Informações do Case (Red Hat)</h3>
+      <table>
+        <tr>
+          <th>Case ID</th>
+          <td>
+            <b>{{ _case_id }}</b>
+            {% if _case_link is defined and (_case_link | string | trim) not in ['','—'] %}
+              &nbsp;—&nbsp;<a href="{{ _case_link }}">Abrir no Portal</a>
+            {% endif %}
+          </td>
+        </tr>
+        <tr>
+          <th>Modo</th>
+          <td>{{ 'CRIADO PELA AUTOMAÇÃO' if (_case_mode | string) == 'created' else 'CASE EXISTENTE' }}</td>
+        </tr>
+        <tr><th>Resumo</th><td>{{ _case_summary }}</td></tr>
+        <tr><th>Severidade</th><td>{{ _case_sev }}</td></tr>
+        <tr><th>Tipo</th><td>{{ _case_type }}</td></tr>
+        <tr><th>Produto / Versão</th><td>{{ _case_prod }} / {{ _case_ver }}</td></tr>
+        <tr><th>Account</th><td>{{ _case_acc }}</td></tr>
+        <tr><th>OpenShift Cluster ID</th><td><code>{{ _case_clusterid }}</code></td></tr>
+        {% if _case_created is defined and (_case_created | string | trim) not in ['','—'] %}
+        <tr><th>Criado em</th><td>{{ _case_created }}</td></tr>
+        {% endif %}
+      </table>
+
+      {% if ocp_must_gather_generate_eff | default(true) | bool %}
+      <h3 style="margin-top:14px;">Informações do Must-Gather</h3>
+      <table>
+        <tr><th>Node</th><td><code>{{ best_master | default('—') }}</code></td></tr>
+        <tr><th>Tamanho</th><td>{{ mg_size_human | default('—') }}</td></tr>
+      </table>
+      {% else %}
+      <p class="muted" style="margin-top:12px;">
+        Execução configurada para <b>somente criar o case</b> (sem coleta/anexo de must-gather).
+      </p>
+      {% endif %}
   changed_when: false
 
 - name: Definir subject e stats (para job de envio de e-mail)
   ansible.builtin.set_stats:
     data:
-      send_mail_subject: "Ansible-Report - Job #{{ awx_job_id | default(job_id | default('—')) }} - {{ awx_job_template_name | default('Must-Gather') }} - {{ cluster_name | upper }} - SUCESSO"
+      send_mail_subject: >-
+        Ansible-Report - Job #{{ awx_job_id | default(job_id | default('—')) }}
+        - {{ awx_job_template_name | default('Must-Gather') }}
+        - {{ cluster_name | upper }}
+        - CASE {{ (mg_case_info.id if (mg_case_info is defined and mg_case_info.id is defined) else (case_id | default('—'))) }}
+        - {{ 'CASE_ONLY' if not (ocp_must_gather_generate_eff | default(true) | bool) else 'CASE+MG' }}
+        - SUCESSO
       send_mail_body: "{{ send_mail_body }}"
