@@ -18,13 +18,13 @@
       condition: event.payload is defined and event.payload.db_status == "failed"
       actions:
         - debug:
-            msg: "Falha detectada | host={{ event.payload.hostname }} db={{ event.payload.db_name }} log={{ event.payload.log_file }} err={{ event.payload.error }}"
+            msg: "Falha detectada | host={{ event.payload.db_host }} db={{ event.payload.db_name }} log={{ event.payload.log_file }} err={{ event.payload.error }}"
         - run_workflow_template:
             name: "WF - DB Log Alert"
             organization: "Default"
             job_args:
               extra_vars:
-                hostname: "{{ event.payload.hostname }}"
+                db_host: "{{ event.payload.db_host }}"
                 db_name: "{{ event.payload.db_name }}"
                 log_file: "{{ event.payload.log_file }}"
                 error: "{{ event.payload.error }}"
@@ -41,3 +41,4 @@
       action:
         debug:
           var: event.meta
+
