@@ -1,41 +1,209 @@
 ---
-- name: DB Log Parser -> set_stats for Email Workflow
+- name: DB Alert -> set_stats (alert + diagnostics + remediation)
   hosts: localhost
-  gather_facts: false
+  gather_facts: true
+  become: false
 
   vars:
     ansible_url: "https://aap-new-aap.apps-crc.testing"
+    enable_remediation: true
+    alert_level: remediate # alert | diagnostics | remediate
+    db_service_name: snmpd
 
   tasks:
     - name: Normalize incoming vars
       ansible.builtin.set_fact:
-        _host: "{{ hostname | default('N/A') }}"
+        _db_host: "{{ db_host | default('N/A') }}"
         _db: "{{ db_name | default('N/A') }}"
         _file: "{{ log_file | default('N/A') }}"
         _err: "{{ error | default('N/A') }}"
+        _err_lc: "{{ (error | default('')) | lower }}"
         _ts: "{{ timestamp | default('N/A') }}"
+        _level: "{{ alert_level }}"
+        _enable_rem: "{{ enable_remediation }}"
 
-    - name: Build simple email HTML
+    - name: Build base email body
       ansible.builtin.set_fact:
         send_mail_body: |
           <h2 style="color:#b00020">Falha de conexão com o banco detectada</h2>
           <p>Não teve conexão com o banco.</p>
           <ul>
-            <li><b>Host:</b> {{ _host }}</li>
+            <li><b>Host:</b> {{ _db_host }}</li>
             <li><b>Base:</b> {{ _db }}</li>
             <li><b>Arquivo:</b> {{ _file }}</li>
             <li><b>Timestamp:</b> {{ _ts }}</li>
             <li><b>Erro:</b> {{ _err }}</li>
+            <li><b>Nível:</b> {{ _level }}</li>
+            <li><b>Remediação habilitada:</b> {{ _enable_rem }}</li>
           </ul>
           <p><b>Executor:</b> {{ tower_user_name | default(awx_user_name | default(ansible_env.USER | default('desconhecido'))) }}</p>
           <p><b>Job ID:</b> <a href="{{ ansible_url }}/#/jobs/playbook/{{ awx_job_id }}">{{ awx_job_id }}</a></p>
 
-    - name: set_stats for email workflow (compatible with your email template)
+    - name: Init attachments list
+      ansible.builtin.set_fact:
+        send_mail_attachments: []
+
+    - name: Run diagnostics only when level >= diagnostics
+      ansible.builtin.set_fact:
+        _run_diag: "{{ _level in ['diagnostics', 'remediate'] }}"
+
+    - name: Diagnostics - collect evidence (inline) on DB host
+      block:
+        - name: Uptime (remote)
+          ansible.builtin.command: uptime
+          register: cmd_uptime
+          changed_when: false
+          delegate_to: "{{ _db_host }}"
+          failed_when: false
+
+        - name: Disk usage (remote)
+          ansible.builtin.command: df -h
+          register: cmd_df
+          changed_when: false
+          delegate_to: "{{ _db_host }}"
+          failed_when: false
+
+        - name: Memory (remote)
+          ansible.builtin.command: free -h
+          register: cmd_free
+          changed_when: false
+          delegate_to: "{{ _db_host }}"
+          failed_when: false
+
+        - name: DNS resolve db_host (local)
+          ansible.builtin.command: "getent hosts {{ _db_host }}"
+          register: cmd_dns
+          changed_when: false
+          failed_when: false
+          when: _db_host != 'N/A'
+
+        - name: Service status (remote, if service provided)
+          ansible.builtin.command: "systemctl is-active {{ db_service_name }}"
+          register: cmd_svc
+          changed_when: false
+          delegate_to: "{{ _db_host }}"
+          become: true
+          become_user: root
+          failed_when: false
+          when: db_service_name | default('') | length > 0
+
+        - name: Append diagnostics section to email body
+          ansible.builtin.set_fact:
+            send_mail_body: |
+              {{ send_mail_body }}
+              <hr/>
+              <h3>Diagnóstico ({{ _db_host }})</h3>
+              <pre style="background:#f6f8fa;border:1px solid #ddd;padding:12px;border-radius:8px;white-space:pre-wrap;">
+              [dns - local]
+              rc={{ cmd_dns.rc | default('N/A') }}
+              {{ cmd_dns.stdout | default('') }}
+
+              [uptime]
+              rc={{ cmd_uptime.rc | default('N/A') }}
+              {{ cmd_uptime.stdout | default('') }}
+
+              [df -h]
+              rc={{ cmd_df.rc | default('N/A') }}
+              {{ cmd_df.stdout | default('') }}
+
+              [free -h]
+              rc={{ cmd_free.rc | default('N/A') }}
+              {{ cmd_free.stdout | default('') }}
+
+              [service]
+              rc={{ cmd_svc.rc | default('N/A') }}
+              {{ cmd_svc.stdout | default('') }}
+              </pre>
+      when: _run_diag and _db_host != 'N/A'
+
+    - name: Decide if remediation should run
+      ansible.builtin.set_fact:
+        _run_rem: "{{ (_level == 'remediate') and _enable_rem and (_db_host != 'N/A') and (db_service_name | length > 0) }}"
+
+    - name: Block remediation for auth errors
+      ansible.builtin.set_fact:
+        _run_rem: false
+        remediation_status: "SKIPPED"
+        remediation_reason: "Erro de autenticação (password authentication failed) — remediação automática não aplicável."
+      when: _run_rem and ('password authentication failed' in _err_lc)
+
+    - name: Remediation - classify restart-candidate errors
+      ansible.builtin.set_fact:
+        _restart_candidate: >-
+          {{
+            ('connection refused' in _err_lc) or
+            ('could not connect' in _err_lc) or
+            ('timeout' in _err_lc) or
+            ('no route' in _err_lc) or
+            ('server closed the connection' in _err_lc)
+          }}
+      when: _run_rem
+
+    - name: Remediation - skip if error not restart-candidate
+      ansible.builtin.set_fact:
+        _run_rem: false
+        remediation_status: "SKIPPED"
+        remediation_reason: "Erro não classificado como candidato a restart automático."
+      when: _run_rem and not _restart_candidate
+
+    - name: Remediation - attempt remote restart
+      block:
+        - name: Check service active (remote)
+          ansible.builtin.command: "systemctl is-active {{ db_service_name }}"
+          register: svc_before
+          changed_when: false
+          failed_when: false
+          delegate_to: "{{ _db_host }}"
+          become: true
+          become_user: root
+
+        - name: Restart service (remote)
+          ansible.builtin.command: "systemctl restart {{ db_service_name }}"
+          register: svc_restart
+          changed_when: true
+          delegate_to: "{{ _db_host }}"
+          become: true
+          become_user: root
+
+        - name: Check service active after (remote)
+          ansible.builtin.command: "systemctl is-active {{ db_service_name }}"
+          register: svc_after
+          changed_when: false
+          failed_when: false
+          delegate_to: "{{ _db_host }}"
+          become: true
+          become_user: root
+
+        - name: Set remediation outcome
+          ansible.builtin.set_fact:
+            remediation_status: "{{ 'OK' if (svc_after.stdout | default('')) == 'active' else 'FAILED' }}"
+            remediation_reason: >-
+              {{
+                'Serviço reiniciado e está ativo.'
+                if (svc_after.stdout | default('')) == 'active'
+                else 'Tentou reiniciar, mas serviço ainda não está ativo.'
+              }}
+      when: _run_rem
+
+    - name: Append remediation section to email body (always when remediation enabled)
+      ansible.builtin.set_fact:
+        send_mail_body: |
+          {{ send_mail_body }}
+          <hr/>
+          <h3>Remediação</h3>
+          <ul>
+            <li><b>Status:</b> {{ remediation_status | default('N/A') }}</li>
+            <li><b>Motivo:</b> {{ remediation_reason | default('N/A') }}</li>
+            <li><b>Serviço:</b> {{ db_service_name | default('N/A') }}</li>
+          </ul>
+      when: (_level == 'remediate') and _enable_rem
+
+    - name: set_stats for email workflow (final)
       ansible.builtin.set_stats:
         data:
           send_mail_subject: "Ansible-Alert (DB) - Job #{{ awx_job_id }} - Sem conexão ({{ _db }})"
           send_mail_body: "{{ send_mail_body }}"
-          send_mail_attachments: []
+          send_mail_attachments: "{{ send_mail_attachments }}"
           send_mail_cifs: "{{ send_mail_cifs | default(false) }}"
           send_mail_cifs_path: "{{ send_mail_cifs_path | default('') }}"
           send_mail_cifs_address: "{{ send_mail_cifs_address | default({}) }}"
