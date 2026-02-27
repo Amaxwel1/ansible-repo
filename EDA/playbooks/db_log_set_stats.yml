@@ -8,47 +8,36 @@
     ansible_url: "https://aap-new-aap.apps-crc.testing"
     enable_remediation: true
     alert_level: remediate # alert | diagnostics | remediate
-    db_service_name: snmpd
 
   tasks:
     - name: Normalize incoming vars
       ansible.builtin.set_fact:
         _db_host: "{{ db_host | default('N/A') }}"
+        _db_service_name: "{{ db_service_name | default('') }}"
+        _hostname: "{{ hostname | default('N/A') }}"
         _db: "{{ db_name | default('N/A') }}"
         _file: "{{ log_file | default('N/A') }}"
         _err: "{{ error | default('N/A') }}"
         _err_lc: "{{ (error | default('')) | lower }}"
         _ts: "{{ timestamp | default('N/A') }}"
-        _level: "{{ alert_level }}"
-        _enable_rem: "{{ enable_remediation }}"
-
-    - name: Build base email body
-      ansible.builtin.set_fact:
-        send_mail_body: |
-          <h2 style="color:#b00020">Falha de conexão com o banco detectada</h2>
-          <p>Não teve conexão com o banco.</p>
-          <ul>
-            <li><b>Host:</b> {{ _db_host }}</li>
-            <li><b>Base:</b> {{ _db }}</li>
-            <li><b>Arquivo:</b> {{ _file }}</li>
-            <li><b>Timestamp:</b> {{ _ts }}</li>
-            <li><b>Erro:</b> {{ _err }}</li>
-            <li><b>Nível:</b> {{ _level }}</li>
-            <li><b>Remediação habilitada:</b> {{ _enable_rem }}</li>
-          </ul>
-          <p><b>Executor:</b> {{ tower_user_name | default(awx_user_name | default(ansible_env.USER | default('desconhecido'))) }}</p>
-          <p><b>Job ID:</b> <a href="{{ ansible_url }}/#/jobs/playbook/{{ awx_job_id }}">{{ awx_job_id }}</a></p>
-
-    - name: Init attachments list
-      ansible.builtin.set_fact:
+        _level: "{{ alert_level | default('alert') }}"
+        _enable_rem: "{{ enable_remediation | default(false) | bool }}"
         send_mail_attachments: []
+        diagnostics_html: ""
+        remediation_html: ""
 
-    - name: Run diagnostics only when level >= diagnostics
+    - name: Decide if diagnostics should run
       ansible.builtin.set_fact:
         _run_diag: "{{ _level in ['diagnostics', 'remediate'] }}"
 
     - name: Diagnostics - collect evidence (inline) on DB host
       block:
+        - name: DNS resolve db_host (local)
+          ansible.builtin.command: "getent hosts {{ _db_host }}"
+          register: cmd_dns
+          changed_when: false
+          failed_when: false
+
         - name: Uptime (remote)
           ansible.builtin.command: uptime
           register: cmd_uptime
@@ -70,55 +59,47 @@
           delegate_to: "{{ _db_host }}"
           failed_when: false
 
-        - name: DNS resolve db_host (local)
-          ansible.builtin.command: "getent hosts {{ _db_host }}"
-          register: cmd_dns
-          changed_when: false
-          failed_when: false
-          when: _db_host != 'N/A'
-
         - name: Service status (remote, if service provided)
-          ansible.builtin.command: "systemctl is-active {{ db_service_name }}"
+          ansible.builtin.command: "systemctl is-active {{ _db_service_name }}"
           register: cmd_svc
           changed_when: false
           delegate_to: "{{ _db_host }}"
           become: true
           become_user: root
           failed_when: false
-          when: db_service_name | default('') | length > 0
+          when: _db_service_name | length > 0
 
-        - name: Append diagnostics section to email body
+        - name: Build diagnostics HTML (clear)
           ansible.builtin.set_fact:
-            send_mail_body: |
-              {{ send_mail_body }}
-              <hr/>
+            diagnostics_html: |
               <h3>Diagnóstico ({{ _db_host }})</h3>
               <pre style="background:#f6f8fa;border:1px solid #ddd;padding:12px;border-radius:8px;white-space:pre-wrap;">
-              [dns - local]
-              rc={{ cmd_dns.rc | default('N/A') }}
+
+              Verificando DNS
+              Comando: getent hosts {{ _db_host }}
               {{ cmd_dns.stdout | default('') }}
 
-              [uptime]
-              rc={{ cmd_uptime.rc | default('N/A') }}
+              Verificando tempo de atividade do sistema
+              Comando: uptime
               {{ cmd_uptime.stdout | default('') }}
 
-              [df -h]
-              rc={{ cmd_df.rc | default('N/A') }}
+              Verificando espaço nos discos
+              Comando: df -h
               {{ cmd_df.stdout | default('') }}
 
-              [free -h]
-              rc={{ cmd_free.rc | default('N/A') }}
+              Verificando uso da memoria RAM
+              Comando: free -h
               {{ cmd_free.stdout | default('') }}
 
-              [service]
-              rc={{ cmd_svc.rc | default('N/A') }}
+              Verificando se o serviço está ativo
+              Comando: systemctl is-active {{ _db_service_name }}
               {{ cmd_svc.stdout | default('') }}
               </pre>
       when: _run_diag and _db_host != 'N/A'
 
     - name: Decide if remediation should run
       ansible.builtin.set_fact:
-        _run_rem: "{{ (_level == 'remediate') and _enable_rem and (_db_host != 'N/A') and (db_service_name | length > 0) }}"
+        _run_rem: "{{ (_level == 'remediate') and _enable_rem and (_db_host != 'N/A') and (_db_service_name | length > 0) }}"
 
     - name: Block remediation for auth errors
       ansible.builtin.set_fact:
@@ -149,7 +130,7 @@
     - name: Remediation - attempt remote restart
       block:
         - name: Check service active (remote)
-          ansible.builtin.command: "systemctl is-active {{ db_service_name }}"
+          ansible.builtin.command: "systemctl is-active {{ _db_service_name }}"
           register: svc_before
           changed_when: false
           failed_when: false
@@ -158,7 +139,7 @@
           become_user: root
 
         - name: Restart service (remote)
-          ansible.builtin.command: "systemctl restart {{ db_service_name }}"
+          ansible.builtin.command: "systemctl restart {{ _db_service_name }}"
           register: svc_restart
           changed_when: true
           delegate_to: "{{ _db_host }}"
@@ -166,7 +147,7 @@
           become_user: root
 
         - name: Check service active after (remote)
-          ansible.builtin.command: "systemctl is-active {{ db_service_name }}"
+          ansible.builtin.command: "systemctl is-active {{ _db_service_name }}"
           register: svc_after
           changed_when: false
           failed_when: false
@@ -185,18 +166,59 @@
               }}
       when: _run_rem
 
-    - name: Append remediation section to email body (always when remediation enabled)
+    - name: Build remediation HTML (top) when remediation enabled
       ansible.builtin.set_fact:
-        send_mail_body: |
-          {{ send_mail_body }}
-          <hr/>
+        remediation_html: |
           <h3>Remediação</h3>
           <ul>
+            <li><b>Serviço:</b> {{ _db_service_name | default('N/A') }}</li>
             <li><b>Status:</b> {{ remediation_status | default('N/A') }}</li>
-            <li><b>Motivo:</b> {{ remediation_reason | default('N/A') }}</li>
-            <li><b>Serviço:</b> {{ db_service_name | default('N/A') }}</li>
+            <li><b>Detalhe:</b> {{ remediation_reason | default('N/A') }}</li>
           </ul>
       when: (_level == 'remediate') and _enable_rem
+
+    - name: Decide headline (top message)
+      ansible.builtin.set_fact:
+        _headline: >-
+          {{
+            'Falha detectada (Remediada automaticamente)'
+            if (remediation_status | default('')) == 'OK'
+            else
+            'Falha detectada (Remediação falhou)'
+            if (remediation_status | default('')) == 'FAILED'
+            else
+            'Falha de conexão com o banco detectada'
+          }}
+
+    - name: Build final email body (remediation first, then details, then diagnostics)
+      ansible.builtin.set_fact:
+        send_mail_body: |
+          <h2 style="color:#b00020">{{ _headline }}</h2>
+
+          {% if remediation_html is defined and (remediation_html | trim) | length > 0 %}
+          {{ remediation_html }}
+          <hr/>
+          {% endif %}
+
+          <p>Não teve conexão com o banco.</p>
+          <ul>
+            <li><b>Host de origem:</b> {{ _hostname }}</li>
+            <li><b>DB Host:</b> {{ _db_host }}</li>
+            <li><b>Base:</b> {{ _db }}</li>
+            <li><b>Arquivo:</b> {{ _file }}</li>
+            <li><b>Timestamp:</b> {{ _ts }}</li>
+            <li><b>Erro:</b> {{ _err }}</li>
+            <li><b>Nível:</b> {{ _level }}</li>
+            <li><b>Remediação habilitada:</b> {{ _enable_rem }}</li>
+          </ul>
+
+          {% if diagnostics_html is defined and (diagnostics_html | trim) | length > 0 %}
+          <hr/>
+          {{ diagnostics_html }}
+          {% endif %}
+
+          <p><b>Executor:</b> {{ tower_user_name | default(awx_user_name | default(ansible_env.USER | default('desconhecido'))) }}</p>
+          <p><b>Job ID:</b> <a href="{{ ansible_url }}/#/jobs/playbook/{{ awx_job_id }}">{{ awx_job_id }}</a></p>
 
     - name: set_stats for email workflow (final)
       ansible.builtin.set_stats:
