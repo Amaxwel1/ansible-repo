@@ -12,7 +12,7 @@
       condition: event.payload is defined and event.payload.db_status == "ok"
       action:
         debug:
-          msg: "Conexão OK | host={{ event.payload.hostname }} db={{ event.payload.db_name }} log={{ event.payload.log_file }}"
+          msg: "Conexão OK | host={{ event.payload.db_host }} db={{ event.payload.db_name }} log={{ event.payload.log_file }}"
 
     - name: FAIL - DB connection failed -> trigger workflow
       condition: event.payload is defined and event.payload.db_status == "failed"
@@ -24,17 +24,13 @@
             organization: "Default"
             job_args:
               extra_vars:
+                hostname: "{{ event.payload.hostname }}"
                 db_host: "{{ event.payload.db_host }}"
                 db_name: "{{ event.payload.db_name }}"
                 log_file: "{{ event.payload.log_file }}"
                 error: "{{ event.payload.error }}"
+                db_service_name: "{{ event.payload.db_service_name }}"
                 timestamp: "{{ event.payload.timestamp }}"
-
-    - name: DEBUG - show payload only
-      condition: event.payload is defined
-      action:
-        debug:
-          var: event.payload
 
     - name: DEBUG - show meta only
       condition: event.meta is defined
@@ -42,3 +38,8 @@
         debug:
           var: event.meta
 
+    - name: DEBUG - show payload only
+      condition: event.payload is defined
+      action:
+        debug:
+          var: event.payload
