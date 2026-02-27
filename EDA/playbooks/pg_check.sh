@@ -10,6 +10,8 @@ export PGPASSWORD
 
 SAIDA="/root/logs/$(hostname)_core_$(date '+%Y%m%d').log"
 
+PG_SERVICE="${PG_SERVICE:-postgersql-14}"
+
 EDA_WEBHOOK_URL="${EDA_WEBHOOK_URL:-http://127.0.0.1:5000}"
 
 OK_EVERY_SECONDS="${OK_EVERY_SECONDS:-60}"
@@ -31,8 +33,10 @@ post_eda() {
     -H "Content-Type: application/json" \
     -d "{
       \"type\": \"db_connection\",
+      \"hostname\": \"$(hostname)\",
       \"db_status\": \"${status}\",
       \"db_name\": \"${DB_NAME}\",
+      \"db_service_name\": \"${PG_SERVICE}\",
       \"db_host\": \"${DB_HOST}\",
       \"log_file\": \"${SAIDA}\",
       \"error\": \"${error}\",
