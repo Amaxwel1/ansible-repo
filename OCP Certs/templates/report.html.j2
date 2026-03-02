@@ -138,11 +138,17 @@
 <h2>Rotas analisadas</h2>
 
 {% if missing_envs is defined and (missing_envs | length > 0) %}
+  <h2>Avisos</h2>
   {% for m in missing_envs %}
-    {% set expected_host = 'troca-modelo-webapp.apps.' ~ m.env ~ '.' ~ default_domain_filter %}
-    <p class="warn" style="padding:10px;border:1px solid #a2a2a2;">
-      <b>Não existe rota</b> <span class="mono">{{ expected_host }}</span> no cluster <span class="mono">{{ m.cluster }}</span> no ambiente <span class="mono">{{ m.env }}</span>.
-    </p>
+    <div class="warn" style="padding:10px;border:1px solid #a2a2a2; margin-bottom:10px;">
+      <b>Sem rotas encontradas</b> no cluster <span class="mono">{{ m.cluster }}</span>
+      {% if m.env is defined and (m.env | trim | length > 0) %}
+        no ambiente <span class="mono">{{ m.env }}</span>
+      {% endif %}
+      {% if m.reason is defined and (m.reason | trim | length > 0) %}
+        . Motivo: <span class="mono">{{ m.reason }}</span>
+      {% endif %}
+    </div>
   {% endfor %}
 {% endif %}
 
