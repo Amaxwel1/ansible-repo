@@ -4,9 +4,10 @@
   gather_facts: false
 
   vars:
+    mount_cifs: //192.168.0.115/certs
     ocp_clusters:
       TH:
-        api_url: "https://api.cluster-kwcm4.dynamic.redhatworkshops.io:6443"
+        api_url: "https://api.cluster-wkn9j.dynamic.redhatworkshops.io:6443"
 
     cluster_th_name: "TH"
 
@@ -29,7 +30,7 @@
       tmpdir: "/tmp/mock-dia-fim-{{ awx_job_id | default('local') }}"
 
     kubeconfig_th: "{{ paths.kubeconfig_th }}"
-  #   umdf_backup_host: host onde existe /umdfserver e onde o mount será feito
+    umdf_backup_host: 192.168.0.115
   pre_tasks:
     - name: Pular fim do dia se STEP não pedir FINALIZAR MOCK
       ansible.builtin.meta: end_play
@@ -43,6 +44,19 @@
           - "!min"
           - "date_time"
       when: ansible_date_time is not defined
+
+    - name: Definir nome e destino do arquivo de backup (tar.gz)
+      ansible.builtin.set_fact:
+        fim_backup_filename: "data{{ ansible_date_time.date | regex_replace('-', '') }}.tar.gz"
+        fim_backup_dest: "/media/data{{ ansible_date_time.date | regex_replace('-', '') }}.tar.gz"
+
+    - name: Inicializar fim_files_report
+      ansible.builtin.set_fact:
+        fim_files_report:
+          backup_host: "{{ umdf_backup_host | default('') }}"
+          share: "{{ mount_cifs | default('') | lower }}"
+          mount_point: "/media"
+          files: []
 
     - name: Garantir tmpdir
       ansible.builtin.set_fact:
@@ -201,30 +215,56 @@
                 }}
               raw_result: "{{ fim_db_cleanup | default({}) }}"
 
-      #     - name: Montar compartilhamento Valemobi em /media
-      #       ansible.builtin.mount:
-      #         path: /media
-      #         src: "//10.222.86.81/valemobi"
-      #         fstype: cifs
-      #         opts: "user=m528385,domain=corp.bradesco"
-      #         state: mounted
-      #       delegate_to: "{{ umdf_backup_host }}"
-      #       become: true
-      #
-      #     - name: Parar UMDF (./stop.sh em /umdfserver)
-      #       ansible.builtin.command: ./stop.sh
-      #       args:
-      #         chdir: /umdfserver
-      #       delegate_to: "{{ umdf_backup_host }}"
-      #       become: true
-      #
-      #     - name: Compactar pasta data e enviar para /media
-      #       ansible.builtin.command: >
-      #         tar -czf /media/data{{ ansible_date_time.date | regex_replace('-', '') }}.tar.gz data/
-      #       args:
-      #         chdir: /umdfserver
-      #       delegate_to: "{{ umdf_backup_host }}"
-      #       become: true
+        - name: Cria o arquivo para guardar a senha do CIFS
+          ansible.builtin.copy:
+            dest: /tmp/cifs-password
+            content: "{{ ansible_password }}"
+            mode: "0600"
+          delegate_to: "{{ umdf_backup_host }}"
+          become: true
+          become_user: root
+
+        - name: Monta o volume CIFS
+          ansible.builtin.shell: >-
+            mount "{{ mount_cifs|lower }}" /media
+            -o username={{ ansible_user }},password=`cat /tmp/cifs-password`,domain=agorasenior.corp,rw,vers=3.0
+          delegate_to: "{{ umdf_backup_host }}"
+          become: true
+          become_user: root
+
+        - name: Parar UMDF (./stop.sh em /umdfserver)
+          ansible.builtin.command: ./stop.sh
+          args:
+            chdir: /umdfserver
+          delegate_to: "{{ umdf_backup_host }}"
+          become: true
+          become_user: root
+
+        - name: Compactar pasta data e enviar para /media
+          ansible.builtin.command: >
+            tar -czf {{ fim_backup_dest }} data/
+          args:
+            chdir: /umdfserver
+          delegate_to: "{{ umdf_backup_host }}"
+          become: true
+          become_user: root
+
+        - name: Registrar arquivos enviados no report
+          ansible.builtin.set_fact:
+            fim_files_report: >-
+              {{
+                fim_files_report | combine({
+                  'backup_host': (umdf_backup_host | default('')),
+                  'share': (mount_cifs | default('') | lower),
+                  'mount_point': '/media',
+                  'files': (fim_files_report.files | default([])) + [
+                    {
+                      'name': (fim_backup_filename | default('')),
+                      'path': (fim_backup_dest | default(''))
+                    }
+                  ]
+                }, recursive=True)
+              }}
 
       rescue:
         - name: Montar relatório de fim com erro
@@ -240,6 +280,7 @@
             fim_report:
               fix_server: "{{ fim_fix_server_report | default({}) }}"
               db_flavour: "{{ fim_db_flavour_report | default({}) }}"
+              files: "{{ fim_files_report | default({}) }}"
               error: "{{ fim_error | default({}) }}"
 
         - name: Renderizar HTML do fim do mock
@@ -254,3 +295,19 @@
               send_mail_attachments: []
               send_mail_cifs: false
               send_mail_body: "{{ lookup('file', fim_report_file) }}"
+
+        # - name: Desmonta o volume CIFS
+        #   ansible.builtin.command: umount /media
+        #   ignore_errors: true
+        #   delegate_to: "{{ umdf_backup_host }}"
+        #   become: true
+        #   become_user: root
+
+        - name: Apaga o arquivo de senha do CIFS
+          ansible.builtin.file:
+            path: /tmp/cifs-password
+            state: absent
+          ignore_errors: true
+          delegate_to: "{{ umdf_backup_host }}"
+          become: true
+          become_user: root
