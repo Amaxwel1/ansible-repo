@@ -18,25 +18,25 @@
   ansible.builtin.include_tasks: 30_db_marketdata.yml
   when: STEP is not defined or 'BD_FLAVOUR' in STEP
 
-- name: UMDF – canais e DELTA
+- name: STEP - UMDF (canais e DELTA)
   ansible.builtin.include_tasks: 40_umdf_channels.yml
-  when: STEP is not defined or 'UMDF_PODS' in STEP
+  when: STEP is not defined or 'UMDF' in STEP
 
-- name: Verificar/rodar jobs de marketdata e coletar logs
+- name: STEP - PODS (jobs + logs)
   ansible.builtin.include_tasks: 45_marketdata_jobs_run_and_logs.yml
-  when: STEP is not defined or 'UMDF_PODS' in STEP
+  when: STEP is not defined or 'PODS' in STEP
 
-- name: Streams/DDS – DELTA em pods
+- name: STEP - PODS (streams delta)
   ansible.builtin.include_tasks: 50_streams_delta.yml
-  when: STEP is not defined or 'UMDF_PODS' in STEP
+  when: STEP is not defined or 'PODS' in STEP
 
-- name: DDS-Stream – testes de portas
+- name: STEP - PODS (dds telnet)
   ansible.builtin.include_tasks: 51_dds_stream_telnet.yml
-  when: STEP is not defined or 'UMDF_PODS' in STEP
+  when: STEP is not defined or 'PODS' in STEP
 
-- name: Deletar Pods do Cheetah
+- name: STEP - DELETAR PODS CHEETAH
   ansible.builtin.include_tasks: 55_delete_cheetah_pods.yml
-  when: STEP is not defined or 'UMDF_PODS' in STEP
+  when: STEP is not defined or 'DELETAR PODS CHEETAH' in STEP
 
 - name: Gerar relatório e set_stats para e-mail
   ansible.builtin.include_tasks: 60_generate_report.yml
