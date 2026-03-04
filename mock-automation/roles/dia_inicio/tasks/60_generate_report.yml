@@ -44,6 +44,15 @@
       }}
   when: fix_report is defined
 
+- name: Normalizar STEP do survey para lista
+  ansible.builtin.set_fact:
+    step_list: >-
+      {{
+        STEP
+        if (STEP is sequence and STEP is not string)
+        else ([STEP] if (STEP is defined and (STEP | string | trim) != '') else [])
+      }}
+
 - name: Montar report (objeto consolidado)
   ansible.builtin.set_fact:
     report:
@@ -55,6 +64,11 @@
       jobs: "{{ inicio_jobs_report | default({}) }}"
       cheetah: "{{ inicio_cheetah_report | default({}) }}"
       fix: "{{ fix_report_final | default({}) }}"
+      steps:
+        umdf: "{{ (step_list | length == 0) or ('UMDF' in step_list) }}"
+        pods: "{{ (step_list | length == 0) or ('PODS' in step_list) }}"
+        cheetah: "{{ (step_list | length == 0) or ('DELETAR PODS CHEETAH' in step_list) }}"
+        bd_flavour: "{{ (step_list | length == 0) or ('BD_FLAVOUR' in step_list) }}"
 
 - name: Montar objeto de relatório (alias)
   ansible.builtin.set_fact:
