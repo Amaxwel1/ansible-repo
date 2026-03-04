@@ -1,5 +1,5 @@
 ---
-- name: Aguardar 5 minutos para inicio do Start Day
+- name: Aguardar X segundos para inicio do Start Day
   ansible.builtin.pause:
     seconds: "{{ umdf_pause_start | int }}"
 
@@ -18,7 +18,7 @@
   ansible.builtin.shell: |
     set -e
     cd {{ umdf_start_script_dir }}
-    nohup {{ umdf_start_script }} >/tmp/umdf-startday.log 2>&1 &
+    nohup {{ umdf_start_script }} >{{ umdf_start_log | default('/umdfserver/data/umdf-startday.log') }} 2>&1 &
   delegate_to: "{{ umdf_host }}"
   when: umdf_start_before_check | bool
   changed_when: true
@@ -28,7 +28,12 @@
     seconds: "{{ umdf_start_wait_seconds | int }}"
   when: umdf_start_before_check | bool
 
-- name: Executar comando telnet para listar canais UMDF
+- name: Definir defaults de retry
+  ansible.builtin.set_fact:
+    umdf_retry_wait_seconds_eff: "{{ umdf_retry_wait_seconds | default(180) | int }}"
+  changed_when: false
+
+- name: LIST 1 - Listar canais UMDF
   ansible.builtin.shell: |
     set -e
     (
@@ -39,36 +44,39 @@
       echo exit
     ) | telnet || true
   delegate_to: "{{ umdf_host }}"
-  register: umdf_telnet_output
+  register: umdf_telnet_output_1
   changed_when: false
 
-- name: Inicializar lista de canais UMDF
+- name: Parse LIST 1 - Inicializar lista
   ansible.builtin.set_fact:
-    umdf_channels: []
+    umdf_channels_1: []
+  changed_when: false
 
-- name: Extrair canais do output (linhas com SYNC)
+- name: Parse LIST 1 - Extrair canais (linhas com SYNC)
   ansible.builtin.set_fact:
-    umdf_channels: >-
+    umdf_channels_1: >-
       {{
-        umdf_channels
+        umdf_channels_1
         + [ {
               "linha": item,
               "canal": (item.split(" ")[0]),
               "delta": (item.split(" ")[-1] | int)
             } ]
       }}
-  loop: "{{ umdf_telnet_output.stdout_lines | select('contains', 'SYNC') | list }}"
+  loop: "{{ umdf_telnet_output_1.stdout_lines | default([]) | select('contains', 'SYNC') | list }}"
+  changed_when: false
 
-- name: Marcar canais com delta alto
+- name: LIST 1 - Marcar canais com delta alto
   ansible.builtin.set_fact:
-    umdf_channels_high_delta: >-
+    umdf_channels_high_delta_1: >-
       {{
-        umdf_channels
+        umdf_channels_1
         | selectattr('delta', '>', umdf_delta_threshold | int)
         | list
       }}
+  changed_when: false
 
-- name: (Opcional) Reiniciar canais com delta alto
+- name: RESTART 1 - Reiniciar canais com delta alto
   ansible.builtin.shell: |
     set -e
     (
@@ -79,28 +87,208 @@
       echo exit
     ) | telnet || true
   delegate_to: "{{ umdf_host }}"
-  loop: "{{ umdf_channels_high_delta }}"
-  when: umdf_restart_on_high_delta | bool
-  register: umdf_restart
+  loop: "{{ umdf_channels_high_delta_1 }}"
+  when:
+    - umdf_restart_on_high_delta | bool
+    - umdf_channels_high_delta_1 | length > 0
+  register: umdf_restart_1
   changed_when: false
 
-- name: Resumo UMDF canais
+- name: Aguardar após RESTART 1
+  ansible.builtin.pause:
+    seconds: "{{ umdf_retry_wait_seconds_eff }}"
+  when:
+    - umdf_restart_on_high_delta | bool
+    - umdf_channels_high_delta_1 | length > 0
+
+- name: LIST 2 - Listar canais UMDF após RESTART 1
+  ansible.builtin.shell: |
+    set -e
+    (
+      echo open {{ umdf_telnet_host }} {{ umdf_telnet_port }}
+      sleep {{ umdf_telnet_sleep }}
+      echo list
+      sleep {{ umdf_telnet_sleep }}
+      echo exit
+    ) | telnet || true
+  delegate_to: "{{ umdf_host }}"
+  register: umdf_telnet_output_2
+  changed_when: false
+  when:
+    - umdf_restart_on_high_delta | bool
+    - umdf_channels_high_delta_1 | length > 0
+
+- name: Parse LIST 2 - Inicializar lista
+  ansible.builtin.set_fact:
+    umdf_channels_2: []
+  changed_when: false
+  when: umdf_telnet_output_2 is defined
+
+- name: Parse LIST 2 - Extrair canais (linhas com SYNC)
+  ansible.builtin.set_fact:
+    umdf_channels_2: >-
+      {{
+        umdf_channels_2
+        + [ {
+              "linha": item,
+              "canal": (item.split(" ")[0]),
+              "delta": (item.split(" ")[-1] | int)
+            } ]
+      }}
+  loop: "{{ umdf_telnet_output_2.stdout_lines | default([]) | select('contains', 'SYNC') | list }}"
+  changed_when: false
+  when: umdf_telnet_output_2 is defined
+
+- name: LIST 2 - Marcar canais com delta alto
+  ansible.builtin.set_fact:
+    umdf_channels_high_delta_2: >-
+      {{
+        umdf_channels_2
+        | selectattr('delta', '>', umdf_delta_threshold | int)
+        | list
+      }}
+  changed_when: false
+  when: umdf_telnet_output_2 is defined
+
+- name: RESTART 2 - Reiniciar canais ainda acima do limite
+  ansible.builtin.shell: |
+    set -e
+    (
+      echo open {{ umdf_telnet_host }} {{ umdf_telnet_port }}
+      sleep {{ umdf_telnet_sleep }}
+      echo restart {{ item.canal }}
+      sleep {{ umdf_telnet_sleep }}
+      echo exit
+    ) | telnet || true
+  delegate_to: "{{ umdf_host }}"
+  loop: "{{ umdf_channels_high_delta_2 | default([]) }}"
+  when:
+    - umdf_restart_on_high_delta | bool
+    - umdf_channels_high_delta_2 is defined
+    - umdf_channels_high_delta_2 | length > 0
+  register: umdf_restart_2
+  changed_when: false
+
+- name: Aguardar após RESTART 2
+  ansible.builtin.pause:
+    seconds: "{{ umdf_retry_wait_seconds_eff }}"
+  when:
+    - umdf_restart_on_high_delta | bool
+    - umdf_channels_high_delta_2 is defined
+    - umdf_channels_high_delta_2 | length > 0
+
+- name: LIST FINAL - Listar canais UMDF após RESTART 2
+  ansible.builtin.shell: |
+    set -e
+    (
+      echo open {{ umdf_telnet_host }} {{ umdf_telnet_port }}
+      sleep {{ umdf_telnet_sleep }}
+      echo list
+      sleep {{ umdf_telnet_sleep }}
+      echo exit
+    ) | telnet || true
+  delegate_to: "{{ umdf_host }}"
+  register: umdf_telnet_output_final
+  changed_when: false
+  when:
+    - umdf_restart_on_high_delta | bool
+    - umdf_channels_high_delta_2 is defined
+    - umdf_channels_high_delta_2 | length > 0
+
+- name: Parse LIST FINAL - Inicializar lista
+  ansible.builtin.set_fact:
+    umdf_channels_final: []
+  changed_when: false
+  when: umdf_telnet_output_final is defined
+
+- name: Parse LIST FINAL - Extrair canais (linhas com SYNC)
+  ansible.builtin.set_fact:
+    umdf_channels_final: >-
+      {{
+        umdf_channels_final
+        + [ {
+              "linha": item,
+              "canal": (item.split(" ")[0]),
+              "delta": (item.split(" ")[-1] | int)
+            } ]
+      }}
+  loop: "{{ umdf_telnet_output_final.stdout_lines | default([]) | select('contains', 'SYNC') | list }}"
+  changed_when: false
+  when: umdf_telnet_output_final is defined
+
+- name: LIST FINAL - Marcar canais com delta alto
+  ansible.builtin.set_fact:
+    umdf_channels_high_delta_final: >-
+      {{
+        umdf_channels_final
+        | selectattr('delta', '>', umdf_delta_threshold | int)
+        | list
+      }}
+  changed_when: false
+  when: umdf_telnet_output_final is defined
+
+- name: Definir snapshot final para report (FINAL > LIST2 > LIST1)
+  ansible.builtin.set_fact:
+    umdf_channels_effective: >-
+      {{
+        umdf_channels_final
+        if (umdf_channels_final is defined and (umdf_channels_final | length > 0))
+        else (
+          umdf_channels_2
+          if (umdf_channels_2 is defined and (umdf_channels_2 | length > 0))
+          else umdf_channels_1
+        )
+      }}
+    umdf_channels_high_delta_effective: >-
+      {{
+        umdf_channels_high_delta_final
+        if (umdf_channels_high_delta_final is defined)
+        else (
+          umdf_channels_high_delta_2
+          if (umdf_channels_high_delta_2 is defined)
+          else umdf_channels_high_delta_1
+        )
+      }}
+  changed_when: false
+
+- name: Marcar status final do UMDF
+  ansible.builtin.set_fact:
+    umdf_ok: "{{ (umdf_channels_high_delta_effective | default([]) | length) == 0 }}"
+  changed_when: false
+
+- name: Resumo UMDF canais (com 2 tentativas)
   ansible.builtin.set_fact:
     inicio_umdf_report:
       start_time: "{{ umdf_start_hhmm | default('N/A') }}"
-      channels: "{{ umdf_channels }}"
-      high_delta: "{{ umdf_channels_high_delta }}"
       delta_threshold: "{{ umdf_delta_threshold | int }}"
-      restart_on_high_delta: "{{ umdf_restart_on_high_delta }}"
-      restart_executions: >-
+      retry_wait_seconds: "{{ umdf_retry_wait_seconds_eff }}"
+      restart_on_high_delta: "{{ umdf_restart_on_high_delta | bool }}"
+      ok: "{{ umdf_ok | bool }}"
+      channels: "{{ umdf_channels_effective | default([]) }}"
+      high_delta: "{{ umdf_channels_high_delta_effective | default([]) }}"
+      attempts:
+        list1_high: "{{ umdf_channels_high_delta_1 | default([]) }}"
+        list2_high: "{{ umdf_channels_high_delta_2 | default([]) }}"
+        final_high: "{{ umdf_channels_high_delta_final | default([]) }}"
+      restart_executions_1: >-
         {{
-          (
-            umdf_restart.results
-            | default([])
-            | selectattr('stdout', 'defined')
-            | map(attribute='stdout')
-            | list
-          )
-          if (umdf_restart is defined and umdf_restart.results is defined)
+          (umdf_restart_1.results | default([]) | map(attribute='stdout') | list)
+          if (umdf_restart_1 is defined)
           else []
         }}
+      restart_executions_2: >-
+        {{
+          (umdf_restart_2.results | default([]) | map(attribute='stdout') | list)
+          if (umdf_restart_2 is defined)
+          else []
+        }}
+  changed_when: false
+
+- name: Falhar se ainda houver canais com delta alto após 2 tentativas
+  ansible.builtin.fail:
+    msg: >-
+      UMDF: ainda existem canais com DELTA acima de {{ umdf_delta_threshold }} após 2 tentativas de restart.
+      Canais: {{ (umdf_channels_high_delta_effective | default([])) | to_json }}
+  when:
+    - umdf_restart_on_high_delta | bool
+    - (umdf_channels_high_delta_effective | default([]) | length) > 0
