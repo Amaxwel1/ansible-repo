@@ -22,18 +22,53 @@
       }}
   when: fix_report is defined
 
-- name: Normalizar STEPs do survey
+- name: Normalizar STEPs do survey para lista
   ansible.builtin.set_fact:
-    report_steps: "{{ STEP | default([]) }}"
+    report_steps: >-
+      {{
+        STEP
+        if (STEP is sequence and STEP is not string)
+        else ([STEP] if (STEP is defined and (STEP | string | trim) != '') else [])
+      }}
+
+- name: Montar flags de steps para o template (nomes reais do survey)
+  ansible.builtin.set_fact:
+    report_steps_flags:
+      deploys: >-
+        {{
+          (report_steps | length == 0)
+          or ('VERIFICAR IMAGENS' in report_steps)
+        }}
+      umdf: >-
+        {{
+          (report_steps | length == 0)
+          or ('VERIFICAR UMDF' in report_steps)
+        }}
+      fix: >-
+        {{
+          (report_steps | length == 0)
+          or ('PATCH FLAVOUR' in report_steps)
+          or ('TROCAR FLAVOR' in report_steps)
+          or ('TROCAR FLAVOUR' in report_steps)
+          or ('VOLTAR FLAVOR' in report_steps)
+          or ('VOLTAR FLAVOUR' in report_steps)
+        }}
+      db: >-
+        {{
+          (report_steps | length == 0)
+          or ('QUERYS FLAVOUR' in report_steps)
+          or ('VALIDAR QUERYS' in report_steps)
+        }}
 
 - name: Montar objeto de relatório consolidado
   ansible.builtin.set_fact:
     report:
       steps: "{{ report_steps | default([]) }}"
+      steps_flags: "{{ report_steps_flags | default({}) }}"
       deploys: "{{ deploy_sync_report | default({}) }}"
       umdf: "{{ umdf_report | default({}) }}"
       umdf_env: "{{ umdf_env_report | default({}) }}"
-      fix: "{{ fix_report_final | default({}) }}"
+      fix: "{{ fix_report_final | default(fix_report | default({})) }}"
       db:
         config: "{{ db_config_report | default({}) }}"
         inserts: "{{ db_inserts_report | default({}) }}"
