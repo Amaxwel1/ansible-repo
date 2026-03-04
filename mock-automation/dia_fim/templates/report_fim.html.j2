@@ -5,70 +5,126 @@
   <title>Relatório - Mock Fim do Dia</title>
   <style>
     body { font-family: Arial, sans-serif; font-size: 14px; }
-    h1, h2, h3 { color: #1f2937; }
-    table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
-    th, td { border: 1px solid #d1d5db; padding: 6px 8px; text-align: left; }
+    h1, h2, h3 { color: #1f2937; margin-bottom: 8px; }
+    p { margin: 6px 0; }
+    table { border-collapse: collapse; width: 100%; margin: 10px 0 18px; }
+    th, td { border: 1px solid #d1d5db; padding: 8px 10px; text-align: left; vertical-align: top; }
     th { background: #e5e7eb; }
     .ok { color: #16a34a; font-weight: bold; }
     .fail { color: #dc2626; font-weight: bold; }
     .mono { font-family: "Courier New", monospace; }
-    pre { white-space: pre-wrap; font-family: "Courier New", monospace; font-size: 12px; }
+    .muted { color: #6b7280; font-size: 12px; }
+    .box { border: 1px solid #d1d5db; border-radius: 10px; padding: 12px 14px; margin: 14px 0; }
   </style>
 </head>
+
 <body>
   <h1>Relatório - Mock Fim do Dia</h1>
-  <p>Gerado em: {{ ansible_date_time.date }} {{ ansible_date_time.time }}</p>
+  <p class="muted">Gerado em {{ ansible_date_time.date }} {{ ansible_date_time.time }}</p>
 
-  {% set fix = fim_report.fix_server | default({}) %}
-  {% set db  = fim_report.db_flavour | default({}) %}
-  {% set err = fim_report.error | default({}) %}
+  {% set r = fim_report | default({}) %}
+  {% set fix = r.fix_server | default({}) %}
+  {% set db  = r.db_flavour | default({}) %}
+  {% set files = r.files | default({}) %}
+  {% set err = r.error | default({}) %}
 
-  {% if err.message is defined and err.message %}
-    <h2 style="color:#dc2626;">⚠ Erro geral na automação</h2>
-    <p>{{ err.message }}</p>
-    <hr/>
-  {% endif %}
+  <div class="box">
+    <h2>1. FIX Server - FLAVOUR</h2>
 
-  <!-- 1. FIX Server - FLAVOUR -->
-  <h2>1. FIX Server - FLAVOUR</h2>
+    {% if fix and (fix is mapping) and (fix | length > 0) %}
+      <p><strong>Namespace:</strong> {{ fix.namespace | default('N/A') }}</p>
+      <p><strong>DeploymentConfig:</strong> {{ fix.dc | default('N/A') }}</p>
 
-  {% if fix %}
-    <p>
-      <strong>Namespace:</strong> {{ fix.namespace | default('N/A') }}<br/>
-      <strong>DeploymentConfig:</strong> {{ fix.dc | default('fix-server-paqueta') }}
-    </p>
+      <table>
+        <tr>
+          <th>Campo</th>
+          <th>Valor</th>
+        </tr>
+        <tr>
+          <td>FLAVOUR antes</td>
+          <td class="mono">{{ fix.flavour_before | default('N/A') }}</td>
+        </tr>
+        <tr>
+          <td>FLAVOUR depois</td>
+          <td class="mono">{{ fix.flavour_after | default('N/A') }}</td>
+        </tr>
+      </table>
 
-    <table>
-      <tr><th>Campo</th><th>Valor</th></tr>
-      <tr>
-        <th>FLAVOUR antes</th>
-        <td><code>{{ fix.flavour_before | default('N/A') }}</code></td>
-      </tr>
-      <tr>
-        <th>FLAVOUR depois</th>
-        <td><code>{{ fix.flavour_after | default('N/A') }}</code></td>
-      </tr>
-    </table>
-  {% else %}
-    <p>Dados do ajuste de FLAVOUR não disponíveis.</p>
-  {% endif %}
+    {% else %}
+      <p class="muted">Sem dados do FIX Server.</p>
+    {% endif %}
+  </div>
 
-  <!-- 2. Cleanup de flavour no banco -->
-  <h2>2. Cleanup de flavour no banco</h2>
+  <div class="box">
+    <h2>2. Cleanup de flavour no banco</h2>
 
-  {% if db %}
-    <p>
-      <strong>ID do flavour:</strong> {{ db.flavour_id | default('N/A') }}<br/>
-      <strong>Status:</strong>
-      {% if db.ok | default(false) %}
-        <span class="ok">OK</span>
+    {% set flavour_id = db.flavour_id | default('N/A') %}
+    {% set found = db.found | default(false) %}
+    {% set ok = db.ok | default(false) %}
+
+    <p><strong>ID do flavour:</strong> {{ flavour_id }}</p>
+    <p><strong>Encontrado:</strong>
+      {% if found %}
+        <span class="ok">SIM</span>
       {% else %}
-        <span class="fail">ERRO (ver detalhes no job / logs do Ansible)</span>
+        <span class="fail">NÃO</span>
       {% endif %}
     </p>
-  {% else %}
-    <p>Dados de cleanup no banco não disponíveis.</p>
-  {% endif %}
+    <p><strong>Status:</strong>
+      {% if ok %}
+        <span class="ok">OK</span>
+      {% else %}
+        <span class="fail">ERRO</span>
+      {% endif %}
+    </p>
+  </div>
+
+  <div class="box">
+    <h2>3. Arquivos enviados (CIFS)</h2>
+
+    <table>
+      <tr>
+        <th>Backup host</th>
+        <td>{{ files.backup_host | default('N/A') }}</td>
+      </tr>
+      <tr>
+        <th>Share</th>
+        <td class="mono">{{ files.share | default('N/A') }}</td>
+      </tr>
+      <tr>
+        <th>Ponto de montagem</th>
+        <td class="mono">{{ files.mount_point | default('/media') }}</td>
+      </tr>
+    </table>
+
+    {% set flist = files.files | default([]) %}
+    {% if flist and (flist | length) > 0 %}
+      <table>
+        <tr>
+          <th>Arquivo</th>
+          <th>Path</th>
+        </tr>
+        {% for f in flist %}
+          <tr>
+            <td>{{ f.name | default('') }}</td>
+            <td class="mono">{{ f.path | default('') }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% else %}
+      <p class="muted">Nenhum arquivo registrado.</p>
+    {% endif %}
+  </div>
+
+  <div class="box">
+    <h2>4. Erros</h2>
+
+    {% if err and (err.message | default('')) %}
+      <p class="fail">{{ err.message }}</p>
+    {% else %}
+      <p class="ok">Sem erros reportados.</p>
+    {% endif %}
+  </div>
 
 </body>
 </html>
