@@ -19,21 +19,27 @@
   <h1>Relatório - Automação Início do Dia</h1>
   <p>Gerado em: {{ ansible_date_time.date }} {{ ansible_date_time.time }}</p>
 
+  {% set steps = report['steps'] | default({}) %}
+  {% set show_umdf    = steps['umdf'] | default(false) %}
+  {% set show_pods    = steps['pods'] | default(false) %}
+  {% set show_cheetah = steps['cheetah'] | default(false) %}
+  {% set show_bd      = steps['bd_flavour'] | default(false) %}
+
   {# aliases pra não repetir report.xxx toda hora #}
-  {% set exch    = report.exchange_calendar | default({}) %}
-  {% set mkt     = report.marketdata        | default({}) %}
-  {% set umdf    = report.umdf              | default({}) %}
-  {% set streams = report.streams           | default({}) %}
-  {% set dds     = report.dds_stream        | default({}) %}
-  {% set jobs    = report.jobs              | default({}) %}
-  {% set cheetah = report.cheetah           | default({}) %}
-  {% set fix     = report.fix               | default({}) %}
+  {% set exch    = report['exchange_calendar'] | default({}) %}
+  {% set mkt     = report['marketdata']        | default({}) %}
+  {% set umdf    = report['umdf']              | default({}) %}
+  {% set streams = report['streams']           | default({}) %}
+  {% set dds     = report['dds_stream']        | default({}) %}
+  {% set jobs    = report['jobs']              | default({}) %}
+  {% set cheetah = report['cheetah']           | default({}) %}
+  {% set fix     = report['fix']               | default({}) %}
 
   {# contador de seções principais #}
   {% set sec = namespace(idx=0) %}
 
-  {# 1) Calendário de Pregão - só se houver linhas #}
-  {% if exch.rows is defined and exch.rows %}
+  {# 1) Calendário de Pregão - só se houver linhas e step BD #}
+  {% if show_bd and exch.rows is defined and exch.rows %}
     {% set sec.idx = sec.idx + 1 %}
     <h2>{{ sec.idx }}. Calendário de Pregão (tb_exchange_calendar)</h2>
 
@@ -46,10 +52,10 @@
       {% set r = hoje[0] %}
       <table>
         <tr><th>Campo</th><th>Valor</th></tr>
-        {% for k, v in r.items() %}
+        {% for it in (r | default({}) | dict2items) %}
           <tr>
-            <th>{{ k }}</th>
-            <td>{{ v }}</td>
+            <th>{{ it.key }}</th>
+            <td>{{ it.value }}</td>
           </tr>
         {% endfor %}
       </table>
@@ -60,10 +66,10 @@
       {% for r in outros %}
         <table>
           <tr><th>Campo</th><th>Valor</th></tr>
-          {% for k, v in r.items() %}
+          {% for it in (r | default({}) | dict2items) %}
             <tr>
-              <th>{{ k }}</th>
-              <td>{{ v }}</td>
+              <th>{{ it.key }}</th>
+              <td>{{ it.value }}</td>
             </tr>
           {% endfor %}
         </table>
@@ -71,15 +77,15 @@
     {% endif %}
   {% endif %}
 
-  {# 2) Status do FIX / Heartbeat - só se fix tiver conteúdo #}
-  {% if fix %}
+  {# 2) Status do FIX / Heartbeat - só se BD e fix tiver conteúdo #}
+  {% if show_bd and (fix is mapping) and (fix | length > 0) %}
     {% set sec.idx = sec.idx + 1 %}
     <h2>{{ sec.idx }}. Status do FIX / Heartbeat</h2>
 
     <p>FLAVOUR ativo atual:
       <strong>{{ fix.flavour_active | default('N/A') }}</strong>
     </p>
-  
+
     <p>Heartbeat:
       {% if fix.heartbeat_ok | default(false) %}
         <span class="ok">OK</span>
@@ -103,9 +109,9 @@
     </p>
   {% endif %}
 
-  {# 3) Marketdata – Papel carregado pelo stream-job #}
-  {% if mkt.stream_loaded_rowcount is defined
-        or (mkt.stream_loaded_rows is defined and mkt.stream_loaded_rows) %}
+  {# 3) Marketdata – Papel carregado pelo stream-job (BD only) #}
+  {% if show_bd and (mkt.stream_loaded_rowcount is defined
+      or (mkt.stream_loaded_rows is defined and mkt.stream_loaded_rows)) %}
     {% set sec.idx = sec.idx + 1 %}
     <h2>{{ sec.idx }}. Marketdata – Papel carregado pelo stream-job</h2>
 
@@ -113,29 +119,38 @@
     <p><strong>Quantidade de linhas retornadas:</strong> {{ stream_count }}</p>
 
     {% if mkt.stream_loaded_rows is defined and mkt.stream_loaded_rows %}
-      {% set spcols = mkt.stream_loaded_rows[0].keys() | list %}
-      <table>
-        <tr>
-          {% for c in spcols %}<th>{{ c }}</th>{% endfor %}
-        </tr>
-        {% for row in mkt.stream_loaded_rows %}
+      {% if mkt.stream_loaded_rows[0] is mapping %}
+        {% set spcols = mkt.stream_loaded_rows[0].keys() | list %}
+      {% else %}
+        {% set spcols = [] %}
+      {% endif %}
+
+      {% if spcols %}
+        <table>
           <tr>
-            {% for c in spcols %}
-              <td>{{ row[c] }}</td>
-            {% endfor %}
+            {% for c in spcols %}<th>{{ c }}</th>{% endfor %}
           </tr>
-        {% endfor %}
-      </table>
+          {% for row in mkt.stream_loaded_rows %}
+            <tr>
+              {% for c in spcols %}
+                <td>{{ row[c] }}</td>
+              {% endfor %}
+            </tr>
+          {% endfor %}
+        </table>
+      {% else %}
+        <p>Dados retornados em formato inesperado (não-mapping).</p>
+      {% endif %}
     {% endif %}
   {% endif %}
 
-  {# 4) Jobs – Logs recentes (só se tiver algum log) #}
+  {# 4) Jobs – Logs recentes (PODS only) #}
   {% set has_jobs =
        (jobs.cadastro_papel is defined)
        or (jobs.stock_cache is defined)
        or (jobs.start_day is defined)
   %}
-  {% if has_jobs %}
+  {% if show_pods and has_jobs %}
     {% set sec.idx = sec.idx + 1 %}
     <h2>{{ sec.idx }}. Jobs – Logs recentes</h2>
 
@@ -182,8 +197,8 @@
     {{ render_job('start_day', 'start-day') }}
   {% endif %}
 
-  {# 5) UMDF – Canais #}
-  {% if umdf.channels is defined and umdf.channels %}
+  {# 5) UMDF – Canais (UMDF only) #}
+  {% if show_umdf and umdf.channels is defined and umdf.channels %}
     {% set sec.idx = sec.idx + 1 %}
     <h2>{{ sec.idx }}. UMDF – Canais</h2>
     <p><strong>Início UMDF:</strong> {{ umdf.start_time | default('N/A') }}</p>
@@ -220,8 +235,8 @@
     {% endif %}
   {% endif %}
 
-  {# 6) Streams – Marketdata #}
-  {% if streams.channels is defined and streams.channels %}
+  {# 6) Streams – Marketdata (PODS only) #}
+  {% if show_pods and streams.channels is defined and streams.channels %}
     {% set sec.idx = sec.idx + 1 %}
     <h2>{{ sec.idx }}. Streams – Marketdata</h2>
     <p><strong>Início Streams:</strong> {{ streams.start_time | default('N/A') }}</p>
@@ -259,14 +274,14 @@
     </table>
   {% endif %}
 
-  {# 7) DDS-Stream – Testes de Telnet e Canais #}
+  {# 7) DDS-Stream – Testes de Telnet e Canais (PODS only) #}
   {% set dds_has_data =
        (dds.namespace is defined and dds.namespace)
        or (dds.pod is defined and dds.pod)
        or (dds.tests is defined and dds.tests)
        or (dds.channels is defined and dds.channels)
   %}
-  {% if dds_has_data %}
+  {% if show_pods and dds_has_data %}
     {% set sec.idx = sec.idx + 1 %}
     <h2>{{ sec.idx }}. DDS-Stream – Testes de Telnet e Canais</h2>
 
@@ -331,12 +346,12 @@
     {% endif %}
   {% endif %}
 
-  {# 8) Cheetah – Pods reiniciados #}
+  {# 8) Cheetah – Pods reiniciados (CHEETAH only) #}
   {% set has_cheetah_data =
        (cheetah.pods is defined and cheetah.pods)
        or (cheetah.delete_output is defined and cheetah.delete_output)
   %}
-  {% if has_cheetah_data %}
+  {% if show_cheetah and has_cheetah_data %}
     {% set sec.idx = sec.idx + 1 %}
     <h2>{{ sec.idx }}. Cheetah – Pods reiniciados</h2>
 
@@ -375,6 +390,11 @@
         {% endfor %}
       </table>
     {% endif %}
+  {% endif %}
+
+  {% if sec.idx == 0 %}
+    <h2>Nenhuma seção foi gerada</h2>
+    <p>O STEP selecionado não produziu dados para relatório (ou as tasks correspondentes não foram executadas).</p>
   {% endif %}
 
 </body>
