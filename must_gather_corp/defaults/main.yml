@@ -11,7 +11,7 @@ ocp_must_gather_cluster: ""
 
 ocp_must_gather_cifs_path: "//192.168.0.115/certs/Ansible/mail_attachments/"
 ocp_must_gather_cifs_mount_dir: "/mnt/must-gather"
-ocp_must_gather_cifs_domain: "" #"corp.bradesco.com.br"
+ocp_must_gather_cifs_domain: ""
 
 ocp_must_gather_cifs_username: "{{ ansible_user }}"
 ocp_must_gather_cifs_password: "{{ ansible_password }}"
