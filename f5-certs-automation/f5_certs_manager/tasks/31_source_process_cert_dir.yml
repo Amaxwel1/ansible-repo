@@ -1,0 +1,136 @@
+---
+- name: Definir nome e diretório do certificado
+  ansible.builtin.set_fact:
+    cert_name: "{{ cert_dir_item.name | default(cert_dir_item.path | basename) }}"
+    cert_dir: "{{ cert_dir_item.path }}"
+  changed_when: false
+
+- name: Localiza .cer/.crt/.pem
+  ansible.builtin.find:
+    paths: "{{ cert_dir }}"
+    patterns:
+      - "*.cer"
+      - "*.crt"
+      - "*.pem"
+    recurse: false
+  register: cer_found
+
+- name: Localiza .key
+  ansible.builtin.find:
+    paths: "{{ cert_dir }}"
+    patterns: "*.key"
+    recurse: false
+  register: key_found
+
+- name: Localiza cadeia (arquivos CADEIA*.TXT ou *chain*)
+  ansible.builtin.find:
+    paths: "{{ cert_dir }}"
+    recurse: false
+    use_regex: true
+    patterns:
+      - '(?i)^cadeia.*\.(txt|crt|pem)$'
+      - '(?i).*chain.*\.(crt|pem|txt)$'
+  register: chain_found
+
+- name: Falhar se não houver exatamente 1 certificado
+  ansible.builtin.assert:
+    that:
+      - cer_found.files | length == 1
+    fail_msg: "Esperado exatamente 1 arquivo de certificado (*.cer|*.crt|*.pem) em {{ cert_dir }}"
+
+- name: Caminho do cert original
+  ansible.builtin.set_fact:
+    _cer_path: "{{ cer_found.files[0].path }}"
+  changed_when: false
+
+- name: Tenta ler como PEM
+  ansible.builtin.shell: "openssl x509 -in '{{ _cer_path }}' -noout"
+  register: cer_pem_probe
+  failed_when: false
+  changed_when: false
+
+- name: Converte DER -> PEM se necessário
+  ansible.builtin.shell: |
+    openssl x509 -inform der -in "{{ _cer_path }}" -out "{{ _cer_path }}.pem"
+  when: cer_pem_probe.rc != 0
+  register: der_conv
+  failed_when: der_conv.rc != 0
+  changed_when: true
+
+- name: Define caminho efetivo do PEM
+  ansible.builtin.set_fact:
+    cer_effective_path: "{{ (cer_pem_probe.rc == 0) | ternary(_cer_path, _cer_path ~ '.pem') }}"
+  changed_when: false
+
+- name: Extrai SANs
+  ansible.builtin.shell: |
+    openssl x509 -in "{{ cer_effective_path }}" -noout -text |
+    awk '/X509v3 Subject Alternative Name/ {getline; print}' |
+    sed 's/DNS://g; s/, /,/g'
+  register: cer_sans_raw
+  failed_when: false
+  changed_when: false
+
+- name: Extrai notAfter
+  ansible.builtin.shell: |
+    openssl x509 -in "{{ cer_effective_path }}" -noout -enddate | cut -d= -f2
+  register: cer_end_raw
+  changed_when: false
+
+- name: Converter notAfter -> epoch (se possível)
+  ansible.builtin.shell: |
+    date -u -d "{{ cer_end_raw.stdout | trim }}" +%s
+  register: cer_end_epoch_raw
+  failed_when: false
+  changed_when: false
+
+- name: Validar se cert tem pelo menos N dias de validade (pré)
+  ansible.builtin.shell: |
+    openssl x509 -in "{{ cer_effective_path }}" -noout -checkend {{ (f5_min_valid_days_after_install | int) * 86400 }}
+  register: cer_checkend
+  failed_when: false
+  changed_when: false
+
+- name: Validar se key casa com cert (modulus)
+  ansible.builtin.shell: |
+    set -o pipefail
+    CERT_MD5=$(openssl x509 -noout -modulus -in "{{ cer_effective_path }}" | openssl md5 | awk '{print $2}')
+    KEY_MD5=$(openssl rsa -noout -modulus -in "{{ key_found.files[0].path }}" 2>/dev/null | openssl md5 | awk '{print $2}')
+    echo "${CERT_MD5}:${KEY_MD5}"
+  register: cert_key_md5
+  failed_when: false
+  changed_when: false
+  when: (key_found.files | length) == 1
+
+- name: Normalizar SAN list
+  ansible.builtin.set_fact:
+    cer_sans_list: "{{ cer_sans_raw.stdout.split(',') | map('trim') | reject('equalto','') | list }}"
+    cer_sans_list_norm: "{{ cer_sans_raw.stdout.split(',') | map('trim') | reject('equalto','') | map('lower') | unique | sort | list }}"
+    cer_primary_san: "{{ (cer_sans_raw.stdout.split(',') | map('trim') | reject('equalto','') | list | first) | default('') }}"
+  changed_when: false
+
+- name: Registrar cert no inventário de fonte
+  ansible.builtin.set_fact:
+    source_cert_inventory: >-
+      {{
+        source_cert_inventory + [ {
+          'cert_name': cert_name,
+          'cert_dir': cert_dir,
+          'cer_path': cer_effective_path,
+          'key_path': (key_found.files[0].path if (key_found.files | length) == 1 else ''),
+          'ca_chain_path': (chain_found.files[0].path if (chain_found.files | length) > 0 else ''),
+          'sans': cer_sans_list,
+          'sans_norm': cer_sans_list_norm,
+          'primary_san': cer_primary_san,
+          'not_after': (cer_end_raw.stdout | default('') | trim),
+          'not_after_epoch': (cer_end_epoch_raw.stdout | default('0') | int),
+          'precheck_min_valid_ok': (cer_checkend.rc == 0),
+          'cert_key_md5': (cert_key_md5.stdout | default('')),
+          'cert_key_match': (
+            (cert_key_md5.stdout.split(':')[0] == cert_key_md5.stdout.split(':')[1])
+            if (cert_key_md5.stdout | default('') | trim | length > 0 and (cert_key_md5.stdout is search(':')))
+            else true
+          )
+        } ]
+      }}
+  changed_when: false

@@ -1,0 +1,34 @@
+---
+- name: Definir full path do profile
+  ansible.builtin.set_fact:
+    _profile_full_path: "/{{ _profile.partition | default('Common') }}/{{ _profile.name }}"
+
+- name: Iterar cert_key_chain do profile
+  ansible.builtin.set_fact:
+    f5_profiles_by_cert: "{{ f5_profiles_by_cert | combine(_cert_map_update, recursive=True) }}"
+    f5_profiles_by_chain: "{{ f5_profiles_by_chain | combine(_chain_map_update, recursive=True) }}"
+  vars:
+    _ckc: "{{ _profile.certKeyChain | default([]) }}"
+    _certs_in_profile: "{{ _ckc | map(attribute='cert') | list }}"
+    _chains_in_profile: "{{ _ckc | map(attribute='chain') | list }}"
+    _norm: >-
+      {{
+        (v if (v is string and v.startswith('/')) else ('/' ~ (_profile.partition | default('Common')) ~ '/' ~ (v | default(''))))
+      }}
+    _cert_map_update: >-
+      {%- set out = {} -%}
+      {%- for v in _certs_in_profile if (v | default('') | trim | length > 0) -%}
+      {%- set k = (v if v.startswith('/') else '/' ~ (_profile.partition | default('Common')) ~ '/' ~ v) -%}
+      {%- set cur = (f5_profiles_by_cert.get(k, []) + [_profile_full_path]) -%}
+      {%- set _ = out.update({k: (cur | unique)}) -%}
+      {%- endfor -%}
+      {{ out }}
+    _chain_map_update: >-
+      {%- set out = {} -%}
+      {%- for v in _chains_in_profile if (v | default('') | trim | length > 0) -%}
+      {%- set k = (v if v.startswith('/') else '/' ~ (_profile.partition | default('Common')) ~ '/' ~ v) -%}
+      {%- set cur = (f5_profiles_by_chain.get(k, []) + [_profile_full_path]) -%}
+      {%- set _ = out.update({k: (cur | unique)}) -%}
+      {%- endfor -%}
+      {{ out }}
+  when: (_profile.certKeyChain | default([])) | length > 0

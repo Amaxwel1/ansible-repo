@@ -1,0 +1,71 @@
+---
+- name: Definir server/port efetivos (profiles)
+  ansible.builtin.set_fact:
+    _f5_srv: "{{ f5_server_eff }}"
+    _f5_port: "{{ (f5_server_port_eff | default(443)) | int }}"
+  changed_when: false
+
+- name: Consultar iControl REST - Client SSL Profiles
+  ansible.builtin.uri:
+    url: >-
+      https://{{ _f5_srv }}:{{ _f5_port }}/mgmt/tm/ltm/profile/client-ssl?$select=name,partition,certKeyChain
+    method: GET
+    user: "{{ f5_user }}"
+    password: "{{ f5_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ f5_validate_certs | bool }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: localhost
+  register: _f5_clientssl_raw
+  changed_when: false
+
+- name: Normalizar lista de Client SSL profiles
+  ansible.builtin.set_fact:
+    f5_clientssl_profiles: "{{ (_f5_clientssl_raw.json['items'] | default([])) }}"
+
+- name: Consultar iControl REST - Server SSL Profiles
+  ansible.builtin.uri:
+    url: >-
+      https://{{ _f5_srv }}:{{ _f5_port }}/mgmt/tm/ltm/profile/server-ssl?$select=name,partition,certKeyChain
+    method: GET
+    user: "{{ f5_user }}"
+    password: "{{ f5_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ f5_validate_certs | bool }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: localhost
+  register: _f5_serverssl_raw
+  changed_when: false
+  when: f5_include_server_ssl_profiles | bool
+
+- name: Normalizar lista de Server SSL profiles
+  ansible.builtin.set_fact:
+    f5_serverssl_profiles: "{{ (_f5_serverssl_raw.json['items'] | default([])) }}"
+  when: f5_include_server_ssl_profiles | bool
+
+- name: Garantir lista vazia para Server SSL quando desabilitado
+  ansible.builtin.set_fact:
+    f5_serverssl_profiles: []
+  when: not (f5_include_server_ssl_profiles | bool)
+
+- name: Inicializar mapas de uso (cert -> profiles)
+  ansible.builtin.set_fact:
+    f5_profiles_by_cert: {}
+    f5_profiles_by_chain: {}
+
+- name: Mapear uso de certificados em Client SSL profiles
+  ansible.builtin.include_tasks: 11_map_profile_usage.yml
+  loop: "{{ f5_clientssl_profiles | default([]) }}"
+  loop_control:
+    loop_var: _profile
+    label: "{{ _profile.partition | default('Common') }}/{{ _profile.name | default('') }}"
+
+- name: Mapear uso de certificados em Server SSL profiles
+  ansible.builtin.include_tasks: 11_map_profile_usage.yml
+  loop: "{{ f5_serverssl_profiles | default([]) }}"
+  loop_control:
+    loop_var: _profile
+    label: "{{ _profile.partition | default('Common') }}/{{ _profile.name | default('') }}"
+  when: f5_include_server_ssl_profiles | bool
