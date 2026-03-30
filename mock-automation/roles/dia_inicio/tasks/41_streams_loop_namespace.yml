@@ -16,9 +16,10 @@
         | map(attribute='metadata.name')
         | list
       }}
+  changed_when: false
 
 - name: Verificar DELTA em cada pod de streams
   ansible.builtin.include_tasks: 42_streams_verify_delta.yml
   loop: "{{ streams_pod_list }}"
   loop_control:
-    loop_var: streams_pod
+    loop_var: streams_pod_item
