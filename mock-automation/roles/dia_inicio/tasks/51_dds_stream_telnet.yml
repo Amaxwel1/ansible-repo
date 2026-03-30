@@ -1,4 +1,10 @@
 ---
+- name: Definir timeout/poll de reciclagem do DDS-Stream
+  ansible.builtin.set_fact:
+    dds_pod_start_timeout_seconds: "{{ dds_pod_start_timeout_seconds | default(50) | int }}"
+    dds_pod_poll_interval_seconds: "{{ dds_pod_poll_interval_seconds | default(5) | int }}"
+  changed_when: false
+
 - name: Descobrir pod do DDS-Stream (TH)
   kubernetes.core.k8s_info:
     kubeconfig: "{{ kubeconfig_th }}"
@@ -9,7 +15,7 @@
       - "deploymentconfig={{ dds_dc_name }}"
   register: dds_pods
 
-- name: Selecionar pod running do DDS-Stream
+- name: Selecionar pod running atual do DDS-Stream
   ansible.builtin.set_fact:
     dds_stream_pod: >-
       {{
@@ -20,13 +26,81 @@
         )[0].metadata.name
         | default(omit)
       }}
+  changed_when: false
+
+- name: Guardar pod antigo do DDS-Stream
+  ansible.builtin.set_fact:
+    dds_old_pod: "{{ dds_stream_pod }}"
+  changed_when: false
+
+- name: Deletar pod atual do DDS-Stream antes dos testes
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ kubeconfig_th }}"
+    oc -n "{{ dds_namespace }}" delete pod "{{ dds_old_pod }}" --wait=false
+  register: dds_delete_pod
+  changed_when: true
+  args:
+    executable: /bin/bash
+
+- name: Aguardar pod antigo do DDS-Stream sumir
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ kubeconfig_th }}"
+    oc -n "{{ dds_namespace }}" get pod "{{ dds_old_pod }}" >/dev/null 2>&1
+  register: dds_old_pod_check
+  retries: "{{ ((dds_pod_start_timeout_seconds | int) // (dds_pod_poll_interval_seconds | int)) | int }}"
+  delay: "{{ dds_pod_poll_interval_seconds | int }}"
+  until: dds_old_pod_check.rc != 0
+  changed_when: false
+  failed_when: false
+  args:
+    executable: /bin/bash
+
+- name: Descobrir novo pod do DDS-Stream
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ kubeconfig_th }}"
+    oc -n "{{ dds_namespace }}" get pods \
+      -l deploymentconfig="{{ dds_dc_name }}" \
+      --sort-by=.metadata.creationTimestamp \
+      -o jsonpath='{.items[-1:].metadata.name}'
+  register: dds_new_pod_name
+  retries: "{{ ((dds_pod_start_timeout_seconds | int) // (dds_pod_poll_interval_seconds | int)) | int }}"
+  delay: "{{ dds_pod_poll_interval_seconds | int }}"
+  until:
+    - dds_new_pod_name.rc == 0
+    - (dds_new_pod_name.stdout | default('') | trim) != ''
+    - (dds_new_pod_name.stdout | trim) != (dds_old_pod | trim)
+  changed_when: false
+  args:
+    executable: /bin/bash
+
+- name: Atualizar dds_stream_pod para o novo pod
+  ansible.builtin.set_fact:
+    dds_stream_pod: "{{ dds_new_pod_name.stdout | trim }}"
+  changed_when: false
+
+- name: Aguardar novo pod do DDS-Stream ficar Running
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ kubeconfig_th }}"
+    oc -n "{{ dds_namespace }}" get pod "{{ dds_stream_pod }}" -o jsonpath='{.status.phase}'
+  register: dds_pod_phase
+  retries: "{{ ((dds_pod_start_timeout_seconds | int) // (dds_pod_poll_interval_seconds | int)) | int }}"
+  delay: "{{ dds_pod_poll_interval_seconds | int }}"
+  until:
+    - dds_pod_phase.rc == 0
+    - (dds_pod_phase.stdout | trim) == 'Running'
+  changed_when: false
+  args:
+    executable: /bin/bash
 
 - name: Executar testes de telnet no pod DDS
-  kubernetes.core.k8s_exec:
-    kubeconfig: "{{ kubeconfig_th }}"
-    namespace: "{{ dds_namespace }}"
-    pod: "{{ dds_stream_pod }}"
-    command: >
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ kubeconfig_th }}"
+    oc -n "{{ dds_namespace }}" exec "{{ dds_stream_pod }}" -- \
       sh -c '(echo | telnet {{ item.host }} {{ item.port }} || true)'
   loop: "{{ dds_telnet_tests }}"
   loop_control:
@@ -34,6 +108,8 @@
   register: dds_telnet_results
   failed_when: false
   changed_when: false
+  args:
+    executable: /bin/bash
 
 - name: Montar lista de testes DDS (sempre registra, mesmo com falha)
   ansible.builtin.set_fact:
@@ -41,10 +117,8 @@
       'name': item.name,
       'host': item.host,
       'port': item.port,
-      'rc': (dds_telnet_results.results[idx].rc
-      | default(dds_telnet_results.results[idx].return_code | default(1))),
-      'ok': ((dds_telnet_results.results[idx].rc
-      | default(dds_telnet_results.results[idx].return_code | default(1))) == 0)
+      'rc': (dds_telnet_results.results[idx].rc | default(1)),
+      'ok': ((dds_telnet_results.results[idx].rc | default(1)) == 0)
       } ] }}"
   loop: "{{ dds_telnet_tests | default([]) }}"
   loop_control:
@@ -52,18 +126,18 @@
   changed_when: false
 
 - name: Executar 'list' via telnet dentro do pod DDS (porta 4010)
-  kubernetes.core.k8s_exec:
-    kubeconfig: "{{ kubeconfig_th }}"
-    namespace: "{{ dds_namespace }}"
-    pod: "{{ dds_stream_pod }}"
-    command: >
-      sh -c '(echo list && sleep {{ dds_telnet_sleep | default(2) }}) |
-             telnet 127.0.0.1 4010'
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ kubeconfig_th }}"
+    oc -n "{{ dds_namespace }}" exec "{{ dds_stream_pod }}" -- \
+      sh -c '(echo list && sleep {{ dds_telnet_sleep | default(2) }}) | telnet 127.0.0.1 4010'
   register: dds_list
   failed_when: dds_list.rc not in [0, 1]
   changed_when: false
+  args:
+    executable: /bin/bash
 
-- name: Debug bruto do LIST do DDS (opcional)
+- name: Debug bruto do LIST do DDS
   ansible.builtin.debug:
     var: dds_list.stdout_lines
   when: debug_dds_list | default(false)
