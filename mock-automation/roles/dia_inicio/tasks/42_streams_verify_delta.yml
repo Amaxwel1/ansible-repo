@@ -5,42 +5,112 @@
     streams_channels: []
   changed_when: false
 
-- name: Executar comando de start dentro do pod {{ streams_pod }}
-  kubernetes.core.k8s_exec:
-    kubeconfig: "{{ kubeconfig_th }}"
-    pod: "{{ streams_pod }}"
-    namespace: "{{ streams_namespace }}"
-    command: >
-      sh -lc '
-      START_TS=$(date +%s);
-      START_HUMAN=$(date "+%Y-%m-%d %H:%M:%S");
-      echo "__START_TS__=${START_TS}";
-      echo "__START_HUMAN__=${START_HUMAN}";
-      echo "__STATUS__=STARTING";
+- name: Definir pod corrente de streams
+  ansible.builtin.set_fact:
+    streams_current_pod: "{{ streams_pod_item }}"
+  changed_when: false
 
-      {{ streams_start_command | default("start") }} >/dev/null 2>&1;
-      RC=$?;
+- name: Definir timeout/poll de reciclagem do pod de streams
+  ansible.builtin.set_fact:
+    streams_pod_start_timeout_seconds: "{{ streams_pod_start_timeout_seconds | default(50) | int }}"
+    streams_pod_poll_interval_seconds: "{{ streams_pod_poll_interval_seconds | default(5) | int }}"
+  changed_when: false
 
-      END_TS=$(date +%s);
-      END_HUMAN=$(date "+%Y-%m-%d %H:%M:%S");
-      echo "__END_TS__=${END_TS}";
-      echo "__END_HUMAN__=${END_HUMAN}";
-      echo "__DURATION_SECONDS__=$(( END_TS - START_TS ))";
+- name: Registrar pod atual antes da reciclagem
+  ansible.builtin.set_fact:
+    streams_old_pod: "{{ streams_current_pod }}"
+  changed_when: false
 
-      if [ "$RC" -eq 3 ]; then
-        echo "__STATUS__=EXIT3_OK";
-        exit 3;
-      elif [ "$RC" -eq 0 ]; then
-        echo "__STATUS__=OK";
-        exit 0;
-      else
-        echo "__STATUS__=START_FAILED_RC_${RC}";
-        exit "$RC";
-      fi
-      '
+- name: Deletar pod atual do Streams antes do start
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ kubeconfig_th }}"
+    oc -n "{{ streams_namespace }}" delete pod "{{ streams_old_pod }}" --wait=false
+  register: streams_delete_pod
+  changed_when: true
+  args:
+    executable: /bin/bash
+
+- name: Aguardar pod antigo sumir
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ kubeconfig_th }}"
+    oc -n "{{ streams_namespace }}" get pod "{{ streams_old_pod }}" >/dev/null 2>&1
+  register: streams_old_pod_check
+  retries: "{{ ((streams_pod_start_timeout_seconds | int) // (streams_pod_poll_interval_seconds | int)) | int }}"
+  delay: "{{ streams_pod_poll_interval_seconds | int }}"
+  until: streams_old_pod_check.rc != 0
+  changed_when: false
+  failed_when: false
+  args:
+    executable: /bin/bash
+
+- name: Encontrar novo pod running de streams
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ kubeconfig_th }}"
+    oc -n "{{ streams_namespace }}" get pods --no-headers | awk '
+      $1 ~ /stream/ && $3 == "Running" { print $1 }
+    ' | grep -v "^{{ streams_old_pod }}$" | tail -n 1
+  register: streams_new_pod_name
+  retries: "{{ ((streams_pod_start_timeout_seconds | int) // (streams_pod_poll_interval_seconds | int)) | int }}"
+  delay: "{{ streams_pod_poll_interval_seconds | int }}"
+  until:
+    - streams_new_pod_name.rc == 0
+    - (streams_new_pod_name.stdout | default('') | trim) != ''
+  changed_when: false
+  args:
+    executable: /bin/bash
+
+- name: Atualizar streams_current_pod para o novo pod
+  ansible.builtin.set_fact:
+    streams_current_pod: "{{ streams_new_pod_name.stdout | trim }}"
+  changed_when: false
+
+- name: Executar comando de start dentro do pod {{ streams_current_pod }}
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ kubeconfig_th }}"
+    NS="{{ streams_namespace }}"
+    POD="{{ streams_current_pod }}"
+    START_CMD="{{ streams_start_command | default('start') }}"
+
+    START_TS="$(date +%s)"
+    START_HUMAN="$(date '+%Y-%m-%d %H:%M:%S')"
+    echo "__START_TS__=${START_TS}"
+    echo "__START_HUMAN__=${START_HUMAN}"
+    echo "__STATUS__=STARTING"
+
+    set +e
+    START_OUTPUT="$(oc -n "$NS" exec "$POD" -- sh -lc "pwd; $START_CMD" 2>&1)"
+    RC=$?
+    set -e
+
+    END_TS="$(date +%s)"
+    END_HUMAN="$(date '+%Y-%m-%d %H:%M:%S')"
+    echo "__END_TS__=${END_TS}"
+    echo "__END_HUMAN__=${END_HUMAN}"
+    echo "__DURATION_SECONDS__=$(( END_TS - START_TS ))"
+
+    echo "__START_OUTPUT_BEGIN__"
+    printf '%s\n' "$START_OUTPUT"
+    echo "__START_OUTPUT_END__"
+
+    if [ "$RC" -eq 3 ]; then
+      echo "__STATUS__=EXIT3_OK"
+      exit 3
+    elif [ "$RC" -eq 0 ]; then
+      echo "__STATUS__=OK"
+      exit 0
+    else
+      echo "__STATUS__=START_FAILED_RC_${RC}"
+      exit "$RC"
+    fi
   register: streams_start
   failed_when: streams_start.rc not in [0, 3]
   changed_when: false
+  args:
+    executable: /bin/bash
 
 - name: Garantir ansible_date_time disponível (Streams)
   ansible.builtin.setup:
@@ -53,17 +123,19 @@
     streams_telnet_endpoint: "{{ streams_telnet_host }}:{{ streams_telnet_port }}"
   changed_when: false
 
-- name: Executar 'list' via telnet dentro do pod {{ streams_pod }}
-  kubernetes.core.k8s_exec:
-    kubeconfig: "{{ kubeconfig_th }}"
-    pod: "{{ streams_pod }}"
-    namespace: "{{ streams_namespace }}"
-    command: >
-      sh -c '(echo list && sleep {{ streams_telnet_sleep }}) |
-             telnet {{ streams_telnet_host }} {{ streams_telnet_port }}'
+- name: Executar 'list' via telnet dentro do pod {{ streams_current_pod }}
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ kubeconfig_th }}"
+    NS="{{ streams_namespace }}"
+    POD="{{ streams_current_pod }}"
+
+    oc -n "$NS" exec "$POD" -- sh -c '(echo list && sleep {{ streams_telnet_sleep }}) | telnet {{ streams_telnet_host }} {{ streams_telnet_port }}'
   register: streams_list
   failed_when: streams_list.rc not in [0, 1]
   changed_when: false
+  args:
+    executable: /bin/bash
 
 - name: Inicializar listas temporárias
   ansible.builtin.set_fact:
@@ -115,7 +187,7 @@
         + [
             {
               "namespace": streams_namespace,
-              "pod": streams_pod,
+              "pod": streams_current_pod,
               "canal": ch['canal'],
               "delta": ch['delta']
             }
@@ -135,7 +207,7 @@
         + [
             {
               "namespace": streams_namespace,
-              "pod": streams_pod,
+              "pod": streams_current_pod,
               "canal": ch['canal'],
               "delta": ch['delta']
             }
@@ -147,14 +219,14 @@
   when: _channels_high_filtered | length > 0
   changed_when: false
 
-- name: (Opcional) Reiniciar canais com DELTA alto
-  kubernetes.core.k8s_exec:
-    kubeconfig: "{{ kubeconfig_th }}"
-    pod: "{{ streams_pod }}"
-    namespace: "{{ streams_namespace }}"
-    command: >
-      sh -c '(echo restart {{ ch.canal }} && sleep {{ streams_telnet_sleep }}) |
-             telnet {{ streams_telnet_host }} {{ streams_telnet_port }}'
+- name: Reiniciar canais com DELTA alto
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ kubeconfig_th }}"
+    NS="{{ streams_namespace }}"
+    POD="{{ streams_current_pod }}"
+
+    oc -n "$NS" exec "$POD" -- sh -c '(echo restart {{ ch.canal }} && sleep {{ streams_telnet_sleep }}) | telnet {{ streams_telnet_host }} {{ streams_telnet_port }}'
   loop: "{{ _channels_high_filtered }}"
   loop_control:
     loop_var: ch
@@ -162,8 +234,10 @@
     - _channels_high_filtered | length > 0
     - streams_restart_on_high_delta | bool
   register: streams_restart
-  failed_when: streams_restart.rc not in [0, 1]
-  changed_when: streams_restart.rc == 0
+  failed_when: false
+  changed_when: false
+  args:
+    executable: /bin/bash
 
 - name: Consolidar report do Streams
   ansible.builtin.set_fact:
@@ -171,7 +245,7 @@
       start_time: "{{ streams_start_hhmm | default('N/A') }}"
       telnet_endpoint: "{{ streams_telnet_endpoint | default('N/A') }}"
       delta_threshold: "{{ streams_delta_threshold | int }}"
-      pod: "{{ streams_pod }}"
+      pod: "{{ streams_current_pod }}"
       namespace: "{{ streams_namespace }}"
       channels: "{{ streams_channels | default([]) }}"
       all_channels: "{{ streams_all_channels | default([]) }}"
