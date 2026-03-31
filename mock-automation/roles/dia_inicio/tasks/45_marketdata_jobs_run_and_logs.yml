@@ -42,6 +42,7 @@
     POD="$(oc -n "$NS" get pods -l deploymentconfig="$DC" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
     if [ -z "${POD:-}" ]; then
       echo "__STATUS__=NO_POD"
+      echo "__ERROR__=Nenhum pod encontrado para deploymentconfig=${DC}"
       END_TS="$(date +%s)"
       END_HUMAN="$(date '+%Y-%m-%d %H:%M:%S')"
       echo "__END_TS__=${END_TS}"
@@ -54,15 +55,34 @@
     echo "__STATUS__=STARTING"
     oc -n "$NS" exec "$POD" -- "$START_CMD" >/dev/null 2>&1 || true
 
-    echo "__STATUS__=WAITING_EXIT3"
+    echo "__STATUS__=WAITING_EXIT_MARKER"
     END_DEADLINE=$(( $(date +%s) + TIMEOUT ))
-    FOUND=0
+    FOUND_SUCCESS=0
+    FOUND_ERROR=0
+    EXIT_MARKER=""
+    ERROR_MSG=""
 
     while [ "$(date +%s)" -lt "$END_DEADLINE" ]; do
-      if oc -n "$NS" logs "$POD" --since="$LOGS_SINCE" 2>/dev/null | grep -qi 'exit#3'; then
-        FOUND=1
+      LOG_CHUNK="$(oc -n "$NS" logs "$POD" --since="$LOGS_SINCE" 2>/dev/null || true)"
+
+      if printf '%s\n' "$LOG_CHUNK" | grep -qi 'exit#3'; then
+        FOUND_SUCCESS=1
+        EXIT_MARKER="exit#3"
         break
       fi
+
+      OTHER_EXIT="$(printf '%s\n' "$LOG_CHUNK" \
+        | grep -Eio 'exit#[0-9]+' \
+        | grep -Evi '^exit#3$' \
+        | tail -n 1 || true)"
+
+      if [ -n "${OTHER_EXIT:-}" ]; then
+        FOUND_ERROR=1
+        EXIT_MARKER="$OTHER_EXIT"
+        ERROR_MSG="Job ${DC} retornou marcador de erro ${OTHER_EXIT}. Necessário verificar o processamento."
+        break
+      fi
+
       sleep "$INTERVAL"
     done
 
@@ -72,15 +92,27 @@
     echo "__END_HUMAN__=${END_HUMAN}"
     echo "__DURATION_SECONDS__=$(( END_TS - START_TS ))"
 
+    if [ -n "${EXIT_MARKER:-}" ]; then
+      echo "__EXIT_MARKER__=${EXIT_MARKER}"
+    fi
+
+    if [ -n "${ERROR_MSG:-}" ]; then
+      echo "__ERROR__=${ERROR_MSG}"
+    fi
+
     echo "__LOG_BEGIN__"
     oc -n "$NS" logs "$POD" --since="$LOGS_SINCE" 2>/dev/null | tail -n 200 || true
     echo "__LOG_END__"
 
-    if [ "$FOUND" -eq 1 ]; then
+    if [ "$FOUND_SUCCESS" -eq 1 ]; then
       echo "__STATUS__=EXIT3_OK"
       exit 0
+    elif [ "$FOUND_ERROR" -eq 1 ]; then
+      echo "__STATUS__=EXIT_MARKER_ERROR"
+      exit 2
     else
-      echo "__STATUS__=TIMEOUT_NO_EXIT3"
+      echo "__STATUS__=TIMEOUT_NO_EXIT_MARKER"
+      echo "__ERROR__=Job ${DC} não apresentou exit#3 nem outro exit#? dentro do timeout de ${TIMEOUT}s. Necessário verificar."
       exit 2
     fi
   loop: "{{ marketdata_jobs }}"
@@ -88,7 +120,6 @@
     label: "{{ item.key }} ({{ item.dc_label }})"
   register: marketdata_runs
   changed_when: false
-  failed_when: false
   args:
     executable: /bin/bash
 
@@ -143,8 +174,33 @@
                   | default('0')
                 ) | int
               ),
+              'exit_marker': (
+                (item.stdout_lines | default([]))
+                | select('match', '^__EXIT_MARKER__=')
+                | map('regex_replace', '^__EXIT_MARKER__=', '')
+                | list
+                | first
+                | default('')
+              ),
               'exit_ok': (
-                (item.stdout | default('')) is search('exit#3', ignorecase=True)
+                (
+                  (item.stdout_lines | default([]))
+                  | select('match', '^__EXIT_MARKER__=')
+                  | map('regex_replace', '^__EXIT_MARKER__=', '')
+                  | list
+                  | first
+                  | default('')
+                ) == 'exit#3'
+              ),
+              'has_exit_error': (
+                (
+                  (item.stdout_lines | default([]))
+                  | select('match', '^__EXIT_MARKER__=')
+                  | map('regex_replace', '^__EXIT_MARKER__=', '')
+                  | list
+                  | first
+                  | default('')
+                ) not in ['', 'exit#3']
               ),
               'log_tail': (
                 (
