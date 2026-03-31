@@ -44,12 +44,69 @@
 
         - name: Contexto da falha
           ansible.builtin.set_fact:
-            _fail_task: "{{ ansible_failed_task.name  | default('—') }}"
+            _fail_task: "{{ ansible_failed_task.name | default('—') }}"
             _fail_action: "{{ ansible_failed_task.action | default('—') }}"
+            _failed_loop_results: "{{ ansible_failed_result.results | default([]) }}"
+            _failed_first: >-
+              {{
+                (
+                  ansible_failed_result.results
+                  | default([])
+                  | selectattr('failed', 'defined')
+                  | selectattr('failed')
+                  | list
+                  | first
+                )
+                | default({})
+              }}
             _fail_msg: >-
               {{
-                ansible_failed_result.msg
-                  | default(ansible_failed_result | to_nice_json | default('Erro não mapeado'))
+                _failed_first.stdout
+                  | default(_failed_first.stderr)
+                  | default(_failed_first.msg)
+                  | default(ansible_failed_result.stderr)
+                  | default(ansible_failed_result.stdout)
+                  | default(ansible_failed_result.msg)
+                  | default(ansible_failed_result | to_nice_json)
+              }}
+
+        - name: Extrair detalhes do item que falhou
+          ansible.builtin.set_fact:
+            _fail_loop_label: >-
+              {{
+                _failed_first.item.key
+                | default(_failed_first.item.dc_label)
+                | default('—')
+              }}
+            _fail_loop_dc: >-
+              {{
+                _failed_first.item.dc_label
+                | default('—')
+              }}
+            _fail_loop_rc: "{{ _failed_first.rc | default('—') }}"
+            _fail_loop_status: >-
+              {{
+                (
+                  _failed_first.stdout_lines
+                  | default([])
+                  | select('match', '^__STATUS__=')
+                  | map('regex_replace', '^__STATUS__=', '')
+                  | list
+                  | last
+                )
+                | default('—')
+              }}
+            _fail_loop_error: >-
+              {{
+                (
+                  _failed_first.stdout_lines
+                  | default([])
+                  | select('match', '^__ERROR__=')
+                  | map('regex_replace', '^__ERROR__=', '')
+                  | list
+                  | last
+                )
+                | default(_fail_msg)
               }}
 
         - name: E-mail – falha (set_stats)
@@ -74,7 +131,10 @@
                 <table>
                   <tr><th>Task</th><td>{{ _fail_task }}</td></tr>
                   <tr><th>Ação</th><td>{{ _fail_action }}</td></tr>
-                  <tr><th>Mensagem</th><td><pre>{{ _fail_msg }}</pre></td></tr>
+                  <tr><th>Job</th><td>{{ _fail_loop_label | default('—') }}</td></tr>
+                  <tr><th>DeploymentConfig</th><td>{{ _fail_loop_dc | default('—') }}</td></tr>
+                  <tr><th>Status</th><td>{{ _fail_loop_status | default('—') }}</td></tr>
+                  <tr><th>Mensagem</th><td><pre>{{ _fail_loop_error | default(_fail_msg) }}</pre></td></tr>
                 </table>
 
                 {% if _tail.stdout is defined and (_tail.stdout | length > 0) %}
