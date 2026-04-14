@@ -1,0 +1,113 @@
+---
+- name: Coletar versão após patch nas instâncias standalone
+  ansible.windows.win_powershell:
+    script: |
+      Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
+      $serverInstance = "{{ item.connection_target }}"
+      $row = Invoke-Sqlcmd `
+        -ServerInstance $serverInstance `
+        -QueryTimeout {{ sql_query_timeout_seconds }} `
+        -Query "SELECT @@VERSION AS SqlVersion;" `
+        -ErrorAction Stop | Select-Object -First 1
+
+      ([string]$row.SqlVersion).Trim()
+  delegate_to: "{{ item.host }}"
+  loop: "{{ single_instance_targets }}"
+  register: _sql_version_after_single
+  changed_when: false
+  run_once: true
+  when: execution_topology == 'single'
+
+- name: Inicializar estrutura de pós-check single
+  ansible.builtin.set_fact:
+    single_postcheck_rows: []
+  when: execution_topology == 'single'
+  run_once: true
+
+- name: Consolidar pós-check single por instância
+  ansible.builtin.set_fact:
+    single_postcheck_rows: >-
+      {{
+        single_postcheck_rows + [ {
+          'host': item.item.host,
+          'instance_name': item.item.instance_name,
+          'connection_target': item.item.connection_target,
+          'version_after': (item.output | default([]) | join('') | trim),
+          'version_after_rc': (0 if not (item.failed | default(false)) and ((item.output | default([]) | join('') | trim | length) > 0) else 1)
+        } ]
+      }}
+  loop: "{{ _sql_version_after_single.results | default([]) }}"
+  when: execution_topology == 'single'
+  run_once: true
+
+- name: Coletar versão após patch nos nós do AG
+  ansible.windows.win_powershell:
+    script: |
+      Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
+      $serverInstance = "{{ item.ServerName }}"
+      $row = Invoke-Sqlcmd `
+        -ServerInstance $serverInstance `
+        -QueryTimeout {{ sql_query_timeout_seconds }} `
+        -Query "SELECT @@VERSION AS SqlVersion;" `
+        -ErrorAction Stop | Select-Object -First 1
+
+      ([string]$row.SqlVersion).Trim()
+  delegate_to: "{{ item.InventoryHost }}"
+  loop: "{{ ag_discovery.topology_rows }}"
+  loop_control:
+    label: "{{ item.InventoryHost }}"
+  register: _sql_version_after_ag
+  changed_when: false
+  run_once: true
+  when: execution_topology == 'ag_cluster'
+
+- name: Inicializar estrutura de pós-check AG
+  ansible.builtin.set_fact:
+    sql_postcheck_by_host: {}
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Consolidar pós-check AG por host
+  ansible.builtin.set_fact:
+    sql_postcheck_by_host: >-
+      {{
+        sql_postcheck_by_host | combine({
+          item.item.InventoryHost: {
+            'server_name': item.item.ServerName,
+            'version_after': (item.output | default([]) | join('') | trim),
+            'version_after_rc': (0 if not (item.failed | default(false)) and ((item.output | default([]) | join('') | trim | length) > 0) else 1)
+          }
+        }, recursive=True)
+      }}
+  loop: "{{ _sql_version_after_ag.results | default([]) }}"
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Publicar pós-check single no report
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'postcheck': patch_report.postcheck | combine({
+            'single_postcheck_rows': single_postcheck_rows
+          }, recursive=True)
+        }, recursive=True)
+      }}
+  when: execution_topology == 'single'
+  run_once: true
+
+- name: Publicar pós-check AG no report
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'postcheck': patch_report.postcheck | combine({
+            'sql_postcheck_by_host': sql_postcheck_by_host,
+            'ag_final_primary_host': ag_discovery.primary_host,
+            'ag_final_secondary_hosts': ag_discovery.secondary_hosts,
+            'ag_final_topology_rows': ag_discovery.topology_rows
+          }, recursive=True)
+        }, recursive=True)
+      }}
+  when: execution_topology == 'ag_cluster'
+  run_once: true

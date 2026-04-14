@@ -1,0 +1,58 @@
+---
+- name: Validar instâncias descobertas para single
+  ansible.builtin.assert:
+    that:
+      - single_instance_targets is defined
+      - single_instance_targets | length > 0
+    fail_msg: "Nenhuma instância elegível foi descoberta para o cenário standalone."
+  run_once: true
+
+- name: Coletar versão antes do patch nas instâncias standalone
+  ansible.windows.win_powershell:
+    script: |
+      Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
+      $serverInstance = "{{ item.connection_target }}"
+      $row = Invoke-Sqlcmd `
+        -ServerInstance $serverInstance `
+        -QueryTimeout {{ sql_query_timeout_seconds }} `
+        -Query "SELECT @@VERSION AS SqlVersion;" `
+        -ErrorAction Stop | Select-Object -First 1
+
+      ([string]$row.SqlVersion).Trim()
+  delegate_to: "{{ item.host }}"
+  loop: "{{ single_instance_targets }}"
+  register: _sql_version_before_single
+  changed_when: false
+  run_once: true
+
+- name: Inicializar estrutura de precheck single
+  ansible.builtin.set_fact:
+    single_precheck_rows: []
+  run_once: true
+
+- name: Consolidar precheck single por instância
+  ansible.builtin.set_fact:
+    single_precheck_rows: >-
+      {{
+        single_precheck_rows + [ {
+          'host': item.item.host,
+          'instance_name': item.item.instance_name,
+          'connection_target': item.item.connection_target,
+          'version_before': (item.output | default([]) | join('') | trim),
+          'version_before_rc': (0 if not (item.failed | default(false)) and ((item.output | default([]) | join('') | trim | length) > 0) else 1)
+        } ]
+      }}
+  loop: "{{ _sql_version_before_single.results | default([]) }}"
+  run_once: true
+
+- name: Consolidar precheck single no report
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'precheck': patch_report.precheck | combine({
+            'single_precheck_rows': single_precheck_rows
+          }, recursive=True)
+        }, recursive=True)
+      }}
+  run_once: true

@@ -1,0 +1,329 @@
+---
+- name: Definir instância efetiva do AG
+  ansible.builtin.set_fact:
+    sql_ag_instance_name_effective: "{{ ag_discovery.instance_name | default(sql_effective_instance_name | default(sql_instance_name)) }}"
+  run_once: true
+
+- name: Definir connection target efetivo da PRIMARY do AG
+  ansible.builtin.set_fact:
+    sql_ag_primary_connection_target: >-
+      {{
+        ag_discovery.primary_connection_target
+        | default(
+            ag_discovery.primary_host
+            if (sql_ag_instance_name_effective | upper) == 'MSSQLSERVER'
+            else ag_discovery.primary_host ~ '\\' ~ sql_ag_instance_name_effective
+          )
+      }}
+  run_once: true
+
+- name: Validar discovery do AG
+  ansible.builtin.assert:
+    that:
+      - ag_discovery.ag_name | default('') | length > 0
+      - ag_discovery.primary_host | default('') | length > 0
+      - ag_discovery.secondary_hosts | default([]) | length > 0
+    fail_msg: "Discovery do AG incompleta. Verifique a task 30_discover_sql_topology.yml."
+  run_once: true
+
+- name: Coletar health de réplicas na PRIMARY
+  ansible.windows.win_powershell:
+    script: |
+      Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
+      $serverInstance = "{{ sql_ag_primary_connection_target }}"
+      $queryB64 = "{{ sql_query_health_replicas | b64encode }}"
+      $query = [System.Text.Encoding]::UTF8.GetString(
+        [System.Convert]::FromBase64String($queryB64)
+      )
+
+      $rows = @(
+        Invoke-Sqlcmd `
+          -ServerInstance $serverInstance `
+          -QueryTimeout {{ sql_query_timeout_seconds }} `
+          -Query $query `
+          -ErrorAction Stop
+      )
+
+      @(
+        $rows | ForEach-Object {
+          $serverName = [string]$_.ServerName
+          $machineName = if ($serverName -like "*\*") { $serverName.Split('\')[0] } else { $serverName }
+
+          [pscustomobject]@{
+            AGName      = ([string]$_.AGName).Trim()
+            ServerName  = $serverName.Trim()
+            MachineName = $machineName.Trim()
+            RoleName    = ([string]$_.RoleName).Trim().ToUpper()
+            SyncStatus  = ([string]$_.SyncStatus).Trim().ToUpper()
+          }
+        }
+      ) | ConvertTo-Json -Compress -Depth 5
+  delegate_to: "{{ ag_discovery.primary_host }}"
+  register: _replica_health_raw
+  changed_when: false
+  until: _replica_health_raw is succeeded
+  retries: 4
+  delay: 20
+  run_once: true
+
+- name: Coletar health detalhado de databases na PRIMARY
+  ansible.windows.win_powershell:
+    script: |
+      Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
+      $serverInstance = "{{ sql_ag_primary_connection_target }}"
+      $queryB64 = "{{ sql_query_health_databases | b64encode }}"
+      $query = [System.Text.Encoding]::UTF8.GetString(
+        [System.Convert]::FromBase64String($queryB64)
+      )
+
+      $rows = @(
+        Invoke-Sqlcmd `
+          -ServerInstance $serverInstance `
+          -QueryTimeout {{ sql_query_timeout_seconds }} `
+          -Query $query `
+          -ErrorAction Stop
+      )
+
+      @(
+        $rows | ForEach-Object {
+          [pscustomobject]@{
+            AGName                    = ([string]$_.AGName).Trim()
+            ServerName                = ([string]$_.ServerName).Trim()
+            RoleName                  = ([string]$_.RoleName).Trim().ToUpper()
+            DatabaseName              = ([string]$_.DatabaseName).Trim()
+            SynchronizationStateDesc  = ([string]$_.synchronization_state_desc).Trim().ToUpper()
+            SynchronizationHealthDesc = ([string]$_.synchronization_health_desc).Trim().ToUpper()
+            DatabaseStateDesc         = ([string]$_.database_state_desc).Trim().ToUpper()
+            IsSuspended               = [int]$_.is_suspended
+          }
+        }
+      ) | ConvertTo-Json -Compress -Depth 5
+  delegate_to: "{{ ag_discovery.primary_host }}"
+  register: _database_health_raw
+  changed_when: false
+  until: _database_health_raw is succeeded
+  retries: 4
+  delay: 20
+  run_once: true
+
+- name: Parse bruto do health de réplicas
+  ansible.builtin.set_fact:
+    _ag_replica_health_rows_raw: "{{ (_replica_health_raw.output | default([]) | join('') | trim | default('[]', true)) | from_json }}"
+  run_once: true
+
+- name: Normalizar health de réplicas para lista
+  ansible.builtin.set_fact:
+    ag_replica_health_rows: >-
+      {{
+        [_ag_replica_health_rows_raw]
+        if (_ag_replica_health_rows_raw is mapping)
+        else (_ag_replica_health_rows_raw | default([]))
+      }}
+  run_once: true
+
+- name: Parse bruto do health de databases
+  ansible.builtin.set_fact:
+    _ag_database_health_rows_raw: "{{ (_database_health_raw.output | default([]) | join('') | trim | default('[]', true)) | from_json }}"
+  run_once: true
+
+- name: Normalizar health de databases para lista
+  ansible.builtin.set_fact:
+    ag_database_health_rows: >-
+      {{
+        [_ag_database_health_rows_raw]
+        if (_ag_database_health_rows_raw is mapping)
+        else (_ag_database_health_rows_raw | default([]))
+      }}
+  run_once: true
+
+- name: Marcar primary original uma única vez
+  ansible.builtin.set_fact:
+    ag_original_primary_host: "{{ ag_original_primary_host | default(ag_discovery.primary_host) }}"
+  run_once: true
+
+- name: Inicializar listas do plano AG
+  ansible.builtin.set_fact:
+    ag_pre_failover_patch_hosts: []
+    ag_post_failover_patch_hosts: []
+    ag_candidate_auto_added: false
+  run_once: true
+
+- name: Definir listas derivadas do escopo
+  ansible.builtin.set_fact:
+    ag_selected_secondary_hosts: "{{ ag_discovery.secondary_hosts | intersect(execution_hosts) }}"
+    ag_original_primary_in_scope: "{{ ag_original_primary_host in execution_hosts }}"
+  run_once: true
+
+- name: Selecionar secondaries elegíveis para failover
+  ansible.builtin.set_fact:
+    ag_candidate_rows_all: >-
+      {{
+        ag_discovery.topology_rows
+        | selectattr('RoleName', 'equalto', 'SECONDARY')
+        | selectattr('SyncHealth', 'equalto', 'HEALTHY')
+        | selectattr('AvailabilityMode', 'equalto', 'SYNCHRONOUS_COMMIT')
+        | selectattr('ConnectedState', 'equalto', 'CONNECTED')
+        | list
+      }}
+  run_once: true
+
+- name: Selecionar secondaries elegíveis para failover dentro do escopo
+  ansible.builtin.set_fact:
+    ag_candidate_rows_in_scope: >-
+      {{
+        ag_candidate_rows_all
+        | selectattr('InventoryHost', 'in', execution_hosts)
+        | list
+      }}
+  run_once: true
+
+- name: Preferir candidatas com regex -MZ-
+  ansible.builtin.set_fact:
+    ag_candidate_rows_preferred_in_scope: >-
+      {{
+        ag_candidate_rows_in_scope
+        | selectattr('InventoryHost', 'search', ag_failover_preferred_regex)
+        | list
+      }}
+    ag_candidate_rows_preferred_any: >-
+      {{
+        ag_candidate_rows_all
+        | selectattr('InventoryHost', 'search', ag_failover_preferred_regex)
+        | list
+      }}
+  run_once: true
+
+- name: Definir candidata final ao failover - row
+  ansible.builtin.set_fact:
+    ag_failover_candidate_row: >-
+      {{
+        (
+          ag_candidate_rows_preferred_in_scope | first
+        )
+        if (ag_candidate_rows_preferred_in_scope | length > 0)
+        else (
+          ag_candidate_rows_in_scope | first
+        )
+        if (ag_candidate_rows_in_scope | length > 0)
+        else (
+          ag_candidate_rows_preferred_any | first
+        )
+        if (ag_candidate_rows_preferred_any | length > 0)
+        else (
+          ag_candidate_rows_all | first | default({})
+        )
+      }}
+  run_once: true
+
+- name: Definir candidata final ao failover - host
+  ansible.builtin.set_fact:
+    ag_failover_candidate: "{{ ag_failover_candidate_row.InventoryHost | default('') }}"
+  run_once: true
+
+- name: Definir connection target da candidata - host
+  ansible.builtin.set_fact:
+    ag_failover_candidate_connection_target: >-
+      {{
+        ag_failover_candidate_row.ServerName
+        | default(
+            ag_failover_candidate
+            if (sql_ag_instance_name_effective | upper) == 'MSSQLSERVER'
+            else ag_failover_candidate ~ '\\' ~ sql_ag_instance_name_effective
+          )
+      }}
+  run_once: true
+
+- name: Calcular hosts pré-failover
+  ansible.builtin.set_fact:
+    ag_pre_failover_patch_hosts: "{{ ag_selected_secondary_hosts | list }}"
+    ag_candidate_auto_added: false
+  run_once: true
+
+- name: Definir hosts pós-failover
+  ansible.builtin.set_fact:
+    ag_post_failover_patch_hosts: "{{ [ag_original_primary_host] if ag_original_primary_in_scope else [] }}"
+  run_once: true
+
+- name: Definir hosts de pós-check no AG
+  ansible.builtin.set_fact:
+    postcheck_hosts: >-
+      {{
+        (
+          ag_pre_failover_patch_hosts
+          + ag_post_failover_patch_hosts
+        ) | unique
+      }}
+  run_once: true
+
+- name: Validar cluster saudável antes do patch
+  ansible.builtin.assert:
+    that:
+      - (ag_replica_health_rows | rejectattr('SyncStatus', 'equalto', 'HEALTHY') | list | length) == 0
+      - (ag_database_health_rows | rejectattr('SynchronizationHealthDesc', 'equalto', 'HEALTHY') | list | length) == 0
+      - (
+        ag_database_health_rows
+        | selectattr('RoleName', 'equalto', 'PRIMARY')
+        | rejectattr('DatabaseStateDesc', 'equalto', 'ONLINE')
+        | list
+        | length
+        ) == 0
+      - (ag_database_health_rows | selectattr('IsSuspended', 'equalto', 1) | list | length) == 0
+    fail_msg: >-
+      O AG não está saudável antes do patch.
+      Réplicas com problema:
+      {{ ag_replica_health_rows | rejectattr('SyncStatus', 'equalto', 'HEALTHY') | list | to_nice_json }}
+      Databases com problema de sincronização:
+      {{ ag_database_health_rows | rejectattr('SynchronizationHealthDesc', 'equalto', 'HEALTHY') | list | to_nice_json }}
+      Databases PRIMARY com estado diferente de ONLINE:
+      {{
+        ag_database_health_rows
+        | selectattr('RoleName', 'equalto', 'PRIMARY')
+        | rejectattr('DatabaseStateDesc', 'equalto', 'ONLINE')
+        | list
+        | to_nice_json
+      }}
+      Databases suspensos:
+      {{ ag_database_health_rows | selectattr('IsSuspended', 'equalto', 1) | list | to_nice_json }}
+  when: sql_require_healthy_before_patch | bool
+  run_once: true
+
+- name: Validar possibilidade de patch parcial na PRIMARY
+  ansible.builtin.assert:
+    that:
+      - not ag_original_primary_in_scope or ag_failover_enabled | bool
+      - not ag_original_primary_in_scope or (ag_failover_candidate | length > 0)
+    fail_msg: >-
+      A PRIMARY original está no escopo, mas não há SECONDARY candidata pronta para failover.
+      Verifique a saúde do AG e a regra de seleção da candidata (-MZ-).
+  run_once: true
+
+- name: Validar patch parcial permitido
+  ansible.builtin.assert:
+    that:
+      - ag_allow_partial_patch_bool | bool or ((ag_discovery.all_hosts | difference(execution_hosts)) | length == 0 and (execution_hosts | difference(ag_discovery.all_hosts)) | length == 0)
+    fail_msg: "Patch parcial em AG está desabilitado. Informe todos os nós do AG ou ajuste ag_allow_partial_patch=true."
+  run_once: true
+
+- name: Publicar precheck AG no report
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'precheck': patch_report.precheck | combine({
+            'ag_name': ag_discovery.ag_name,
+            'ag_primary_host': ag_discovery.primary_host,
+            'ag_secondary_hosts': ag_discovery.secondary_hosts,
+            'ag_failover_candidate': ag_failover_candidate,
+            'ag_failover_candidate_connection_target': ag_failover_candidate_connection_target,
+            'ag_pre_failover_patch_hosts': ag_pre_failover_patch_hosts,
+            'ag_post_failover_patch_hosts': ag_post_failover_patch_hosts,
+            'ag_candidate_auto_added': ag_candidate_auto_added,
+            'ag_replica_health_rows': ag_replica_health_rows,
+            'ag_database_health_rows': ag_database_health_rows,
+            'ag_initial_primary_host': ag_discovery.primary_host,
+            'ag_initial_secondary_hosts': ag_discovery.secondary_hosts,
+            'ag_initial_topology_rows': ag_discovery.topology_rows
+          }, recursive=True)
+        }, recursive=True)
+      }}
+  run_once: true

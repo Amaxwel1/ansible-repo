@@ -1,0 +1,106 @@
+---
+- name: Definir instância efetiva do patch
+  ansible.builtin.set_fact:
+    patch_instance_name_effective: "{{ patch_target_instance | default(sql_effective_instance_name | default(sql_instance_name)) }}"
+    patch_mode_effective: "{{ patch_target_patch_mode | default('instancename') }}"
+  run_once: true
+
+- name: Definir argumentos efetivos do patch
+  ansible.builtin.set_fact:
+    patch_installer_args_effective: >-
+      {{
+        patch_installer_args_allinstances
+        if patch_mode_effective == 'allinstances'
+        else patch_installer_args
+      }}
+  run_once: true
+
+- name: Garantir diretórios de staging no host {{ patch_target_host }}
+  ansible.windows.win_file:
+    path: "{{ stage_dir }}"
+    state: directory
+  loop:
+    - "{{ windows_patch_stage_dir }}"
+    - "{{ windows_patch_work_dir }}"
+  loop_control:
+    loop_var: stage_dir
+  delegate_to: "{{ patch_target_host }}"
+
+- name: Copiar patch do controller para o host {{ patch_target_host }}
+  ansible.windows.win_copy:
+    src: "{{ patch_package_local_path }}"
+    dest: '{{ windows_patch_stage_dir }}\{{ patch_package_name }}'
+  delegate_to: "{{ patch_target_host }}"
+
+- name: Executar patch no host {{ patch_target_host }}
+  ansible.windows.win_powershell:
+    script: |
+      $patch = '{{ windows_patch_stage_dir }}\{{ patch_package_name }}'
+      $args = '{{ patch_installer_args_effective }}'
+
+      $proc = Start-Process `
+        -FilePath $patch `
+        -ArgumentList $args `
+        -Wait `
+        -PassThru `
+        -ErrorAction Stop
+
+      [pscustomobject]@{
+        ExitCode = $proc.ExitCode
+        Patch    = $patch
+        Args     = $args
+      } | ConvertTo-Json -Compress
+  delegate_to: "{{ patch_target_host }}"
+  register: _patch_exec
+  changed_when: true
+  failed_when: >-
+    (
+      (
+        (_patch_exec.output | default([]) | join('') | trim | default('{}', true))
+        | from_json
+      ).ExitCode | int
+    ) not in (patch_expected_return_codes | map('int') | list)
+
+- name: Parse do resultado do patch
+  ansible.builtin.set_fact:
+    _patch_exec_json: >-
+      {{
+        (_patch_exec.output | default([]) | join('') | trim | default('{}', true))
+        | from_json
+      }}
+  run_once: true
+
+- name: Registrar ação de patch
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'actions': patch_report.actions + [ {
+            'host': patch_target_host,
+            'instance_name': (
+              'ALLINSTANCES'
+              if patch_mode_effective == 'allinstances'
+              else patch_instance_name_effective
+            ),
+            'step': 'patch',
+            'rc': (_patch_exec_json.ExitCode | default(1) | int),
+            'message': (
+              'Patch aplicado em todas as instâncias detectadas do host com exit code '
+              ~ ((_patch_exec_json.ExitCode | default(1) | int) | string)
+              ~ '. Instâncias: '
+              ~ ((patch_target_instance_names | default([])) | join(', '))
+            )
+            if patch_mode_effective == 'allinstances'
+            else
+            (
+              'Patch aplicado na instância '
+              ~ patch_instance_name_effective
+              ~ ' com exit code '
+              ~ ((_patch_exec_json.ExitCode | default(1) | int) | string)
+            ),
+            'patch_file': (_patch_exec_json.Patch | default('')),
+            'patch_args': (_patch_exec_json.Args | default(''))
+          } ]
+        }, recursive=True)
+      }}
+  run_once: true
