@@ -1,17 +1,3 @@
-- name: Debug contexto do host antes do mount
-  become: true
-  ansible.builtin.shell: |
-    set -x
-    id
-    whoami
-    pwd
-    getenforce || true
-    ls -ld /opt /opt/ansiblefiles /opt/ansiblefiles/files /opt/ansiblefiles/files/sql-patches || true
-    mount | grep sql-patches || true
-    test -f /.dockerenv && echo CONTAINER || true
-  register: _debug_mount_ctx
-  changed_when: false
-
 - name: Garantir diretório de montagem do CIFS no controller
   ansible.builtin.file:
     path: "{{ patch_cifs_mount_path }}"
@@ -47,3 +33,32 @@
     ('already mounted' not in (((_mount_out.stderr | default('')) ~ ' ' ~ (_mount_out.stdout | default(''))) | lower))
   changed_when: _mount_out.rc == 0
   no_log: true
+
+- name: Localizar pacote de patch no CIFS
+  ansible.builtin.find:
+    paths: "{{ patch_cifs_root }}"
+    recurse: true
+    patterns:
+      - "{{ patch_package_name }}"
+  register: patch_package_found
+
+- name: Falhar se o patch não existir
+  ansible.builtin.fail:
+    msg: "Patch {{ patch_package_name }} não encontrado em {{ patch_cifs_root }}"
+  when: patch_package_found.files | length == 0
+
+- name: Definir caminho local do patch no controller
+  ansible.builtin.set_fact:
+    patch_package_local_path: "{{ patch_package_found.files[0].path }}"
+
+- name: Registrar patch encontrado no report
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'discovery': patch_report.discovery | combine({
+            'patch_package_local_path': patch_package_local_path,
+            'patch_package_size': (patch_package_found.files[0].size | default(0))
+          }, recursive=True)
+        }, recursive=True)
+      }}
