@@ -1,3 +1,17 @@
+- name: Debug contexto do host antes do mount
+  become: true
+  ansible.builtin.shell: |
+    set -x
+    id
+    whoami
+    pwd
+    getenforce || true
+    ls -ld /opt /opt/ansiblefiles /opt/ansiblefiles/files /opt/ansiblefiles/files/sql-patches || true
+    mount | grep sql-patches || true
+    test -f /.dockerenv && echo CONTAINER || true
+  register: _debug_mount_ctx
+  changed_when: false
+
 - name: Garantir diretório de montagem do CIFS no controller
   ansible.builtin.file:
     path: "{{ patch_cifs_mount_path }}"
