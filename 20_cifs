@@ -1,0 +1,35 @@
+- name: Garantir diretório de montagem do CIFS no controller
+  ansible.builtin.file:
+    path: "{{ patch_cifs_mount_path }}"
+    state: directory
+    mode: "0755"
+  become: true
+
+- name: Criar arquivo de credencial CIFS no controller
+  ansible.builtin.copy:
+    dest: "{{ _patch_cred_file }}"
+    content: |
+      username={{ patch_cifs_username }}
+      password={{ patch_cifs_password }}
+      domain={{ patch_cifs_domain }}
+    mode: "0600"
+  become: true
+  no_log: true
+
+- name: Montar CIFS no controller
+  ansible.builtin.command:
+    argv:
+      - mount
+      - -t
+      - cifs
+      - "{{ patch_cifs_share }}"
+      - "{{ patch_cifs_mount_path }}"
+      - -o
+      - "credentials={{ _patch_cred_file }},rw,vers=3.0"
+  become: true
+  register: _mount_out
+  failed_when: >-
+    _mount_out.rc != 0 and
+    ('already mounted' not in (((_mount_out.stderr | default('')) ~ ' ' ~ (_mount_out.stdout | default(''))) | lower))
+  changed_when: _mount_out.rc == 0
+  no_log: true
