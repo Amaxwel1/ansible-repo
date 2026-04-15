@@ -1,3 +1,14 @@
+- name: Testar acesso SMB sem mount
+  become: true
+  ansible.builtin.shell: |
+    set -x
+    smbclient "{{ patch_cifs_share }}" \
+      -U "{{ patch_cifs_domain }}\\{{ patch_cifs_username }}%{{ patch_cifs_password }}" \
+      -c 'ls'
+  register: _smbclient_test
+  changed_when: false
+  no_log: true
+
 - name: Garantir diretório de montagem do CIFS no controller
   ansible.builtin.file:
     path: "{{ patch_cifs_mount_path }}"
