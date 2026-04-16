@@ -1,0 +1,30 @@
+---
+- name: Definir hosts alvo de reboot após validação
+  ansible.builtin.set_fact:
+    reboot_targets: >-
+      {{
+        (
+          single_patch_plan_rows | map(attribute='host') | list | unique
+        )
+        if execution_topology == 'single'
+        else
+        (
+          postcheck_hosts | default([]) | unique
+        )
+      }}
+  run_once: true
+
+- name: Validar que há hosts para reboot
+  ansible.builtin.assert:
+    that:
+      - reboot_targets | length > 0
+    fail_msg: "Nenhum host elegível foi encontrado para reboot após validação."
+  run_once: true
+
+- name: Executar reboot validado por host
+  ansible.builtin.include_tasks: 55_reboot_one_host.yml
+  loop: "{{ reboot_targets }}"
+  loop_control:
+    loop_var: reboot_target_host
+    label: "{{ reboot_target_host }}"
+  run_once: true

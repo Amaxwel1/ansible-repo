@@ -1,0 +1,60 @@
+---
+- name: Normalizar variáveis do survey
+  ansible.builtin.set_fact:
+    sql_topology_normalized: >-
+      {{
+        'ag_cluster'
+        if (sql_topology | string | trim | lower) == 'cluster'
+        else 'single'
+      }}
+    ag_expand_to_all_nodes_bool: >-
+      {{
+        (ag_expand_to_all_nodes | string | trim | lower) in ['sim', 'true', 'yes', 'y', '1']
+      }}
+    ag_allow_partial_patch_bool: >-
+      {{
+        (ag_allow_partial_patch | string | trim | lower) in ['sim', 'true', 'yes', 'y', '1']
+      }}
+    sql_precheck_only_bool: >-
+      {{
+        (sql_precheck_only | string | trim | lower) in ['sim', 'true', 'yes', 'y', '1']
+      }}
+
+- name: Validar variáveis obrigatórias
+  ansible.builtin.assert:
+    that:
+      - sql_topology_normalized in ['single', 'ag_cluster']
+      - survey_hosts | default('') | trim | length > 0
+      - (sql_discover_instances_automatically | bool) or (sql_instance_name | default('') | trim | length > 0)
+    fail_msg: |
+      Variáveis obrigatórias ausentes ou inválidas.
+      Verifique:
+      - sql_topology (single|cluster)
+      - survey_hosts
+      - se sql_discover_instances_automatically=false:
+        - sql_instance_name
+      - credencial Windows do job (ansible_user/ansible_password)
+      - se sql_precheck_only=false:
+        - patch_cifs_share
+        - patch_package_name
+
+- name: Inicializar estruturas de report
+  ansible.builtin.set_fact:
+    patch_report:
+      execution:
+        executor: "{{ tower_user_name | default(awx_user_name | default(ansible_user | default('—'))) }}"
+        topology: "{{ 'cluster' if sql_topology_normalized == 'ag_cluster' else 'single' }}"
+        requested_hosts_raw: "{{ survey_hosts }}"
+        instance_name_requested: "{{ sql_instance_name | default('') }}"
+        instance_name: "{{ sql_instance_name | default('') }}"
+        instance_connection_pattern: "<host>\\{{ sql_instance_name }}"
+        sql_access_mode: "Integrated / Windows (Invoke-Sqlcmd)"
+        patch_package_name: "{{ patch_package_name }}"
+        environment: "{{ sql_environment }}"
+        motivo: "{{ motivo }}"
+        precheck_only: "{{ sql_precheck_only_bool }}"
+        ag_expand_to_all_nodes: "{{ ag_expand_to_all_nodes_bool }}"
+      discovery: {}
+      precheck: {}
+      actions: []
+      postcheck: {}

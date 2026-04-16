@@ -1,0 +1,31 @@
+---
+- name: Registrar todos os nós descobertos do AG
+  ansible.builtin.add_host:
+    name: "{{ item }}"
+    groups: sql_patch_targets
+    ansible_host: "{{ hostvars[item].ansible_host | default(item) }}"
+    ansible_user: "{{ ansible_user }}"
+    ansible_password: "{{ ansible_password }}"
+    ansible_connection: winrm
+    ansible_port: "{{ winrm_port }}"
+    ansible_winrm_transport: "{{ winrm_transport }}"
+    ansible_winrm_scheme: "{{ winrm_scheme }}"
+    ansible_winrm_server_cert_validation: "{{ winrm_server_cert_validation }}"
+  loop: "{{ ag_discovery.all_hosts | default([]) | unique }}"
+
+- name: Expandir execution_hosts para todos os nós do AG quando solicitado
+  ansible.builtin.set_fact:
+    execution_hosts: "{{ ag_discovery.all_hosts | unique | list }}"
+    postcheck_hosts: "{{ ag_discovery.all_hosts | unique | list }}"
+  when: ag_expand_to_all_nodes_bool | bool
+
+- name: Atualizar report com execution_hosts expandidos
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'execution': patch_report.execution | combine({
+            'execution_hosts': execution_hosts
+          }, recursive=True)
+        }, recursive=True)
+      }}

@@ -1,0 +1,14 @@
+---
+- name: Registrar hosts do survey para delegação WinRM
+  ansible.builtin.add_host:
+    name: "{{ item }}"
+    groups: sql_patch_targets
+    ansible_host: "{{ hostvars[item].ansible_host | default(item) }}"
+    ansible_user: "{{ ansible_user }}"
+    ansible_password: "{{ ansible_password }}"
+    ansible_connection: winrm
+    ansible_port: "{{ winrm_port }}"
+    ansible_winrm_transport: "{{ winrm_transport }}"
+    ansible_winrm_scheme: "{{ winrm_scheme }}"
+    ansible_winrm_server_cert_validation: "{{ winrm_server_cert_validation }}"
+  loop: "{{ execution_hosts }}"

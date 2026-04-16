@@ -1,0 +1,655 @@
+---
+- name: Inicializar estruturas de discovery
+  ansible.builtin.set_fact:
+    sql_discovery_by_host: {}
+    ag_discovery: {}
+    sql_instances_by_host: {}
+    single_instance_targets: []
+    single_patch_plan_rows: []
+    ag_probe_targets: []
+    ag_probe_results: []
+  run_once: true
+
+- name: Descobrir instâncias SQL locais por host
+  ansible.windows.win_powershell:
+    script: |
+      $instances = @()
+      $serviceMap = @{}
+
+      Get-Service | Where-Object {
+        $_.Name -eq 'MSSQLSERVER' -or $_.Name -like 'MSSQL$*'
+      } | ForEach-Object {
+        $serviceMap[$_.Name] = $_.Status.ToString().ToUpper()
+      }
+
+      $regPath = 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL'
+      if (Test-Path $regPath) {
+        $props = Get-ItemProperty -Path $regPath
+        foreach ($p in $props.PSObject.Properties) {
+          if ($p.Name -notmatch '^PS') {
+            $instanceName = [string]$p.Name
+            $serviceName = if ($instanceName -eq 'MSSQLSERVER') { 'MSSQLSERVER' } else { "MSSQL`$$instanceName" }
+            $state = if ($serviceMap.ContainsKey($serviceName)) { $serviceMap[$serviceName] } else { 'UNKNOWN' }
+            $connectionTarget = if ($instanceName -eq 'MSSQLSERVER') { "{{ item }}" } else { "{{ item }}\$instanceName" }
+
+            $instances += [pscustomobject]@{
+              InstanceName     = $instanceName
+              ServiceName      = $serviceName
+              State            = $state
+              ConnectionTarget = $connectionTarget
+            }
+          }
+        }
+      }
+
+      if ($instances.Count -eq 0) {
+        foreach ($svc in $serviceMap.Keys) {
+          $instanceName = if ($svc -eq 'MSSQLSERVER') { 'MSSQLSERVER' } else { $svc.Substring(6) }
+          $connectionTarget = if ($instanceName -eq 'MSSQLSERVER') { "{{ item }}" } else { "{{ item }}\$instanceName" }
+
+          $instances += [pscustomobject]@{
+            InstanceName     = $instanceName
+            ServiceName      = $svc
+            State            = $serviceMap[$svc]
+            ConnectionTarget = $connectionTarget
+          }
+        }
+      }
+
+      @($instances | Sort-Object InstanceName -Unique) | ConvertTo-Json -Compress -Depth 5
+  delegate_to: "{{ item }}"
+  loop: "{{ execution_hosts }}"
+  register: _sql_instances_discovery
+  changed_when: false
+  run_once: true
+
+- name: Consolidar instâncias descobertas por host
+  ansible.builtin.set_fact:
+    sql_instances_by_host: >-
+      {{
+        sql_instances_by_host
+        | combine({
+            item.item: (
+              (
+                (_instances_raw is mapping)
+                | ternary([_instances_raw], (_instances_raw | default([])))
+              )
+            )
+          }, recursive=True)
+      }}
+  vars:
+    _instances_raw: "{{ (item.output | default([]) | join('') | trim | default('[]', true)) | from_json }}"
+  loop: "{{ _sql_instances_discovery.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  run_once: true
+
+- name: Publicar instâncias descobertas no report
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'discovery': patch_report.discovery | combine({
+            'sql_instances_by_host': sql_instances_by_host
+          }, recursive=True)
+        }, recursive=True)
+      }}
+  run_once: true
+
+# =========================
+# SINGLE
+# =========================
+
+- name: Inicializar targets de instância para single
+  ansible.builtin.set_fact:
+    single_instance_targets: []
+  when: execution_topology == 'single'
+  run_once: true
+
+- name: Montar targets de instância para single
+  ansible.builtin.set_fact:
+    single_instance_targets: >-
+      {{
+        single_instance_targets + [ {
+          'host': item.0.key,
+          'instance_name': item.1.InstanceName,
+          'service_name': item.1.ServiceName,
+          'state': item.1.State,
+          'connection_target': item.1.ConnectionTarget
+        } ]
+      }}
+  loop: "{{ sql_instances_by_host | dict2items | subelements('value') }}"
+  when:
+    - execution_topology == 'single'
+    - (item.1.State | default('') | upper) == 'RUNNING'
+    - (sql_instance_name | default('') | trim | length == 0) or ((item.1.InstanceName | upper) == (sql_instance_name | trim | upper))
+  run_once: true
+
+- name: Validar que há instâncias SQL elegíveis em single
+  ansible.builtin.assert:
+    that:
+      - single_instance_targets | length > 0
+    fail_msg: >-
+      Nenhuma instância SQL em estado RUNNING foi descoberta para os hosts informados.
+      Verifique os serviços SQL Server locais ou informe sql_instance_name manualmente.
+  when: execution_topology == 'single'
+  run_once: true
+
+- name: Inicializar plano de patch standalone por host
+  ansible.builtin.set_fact:
+    single_patch_plan_rows: []
+  when: execution_topology == 'single'
+  run_once: true
+
+- name: Montar plano de patch standalone por host
+  ansible.builtin.set_fact:
+    single_patch_plan_rows: >-
+      {{
+        single_patch_plan_rows + [ {
+          'host': item,
+          'patch_mode': (
+            'allinstances'
+            if (
+              (sql_instance_name | default('') | trim | length == 0)
+              and ((_instances_for_host | length) > 1)
+            )
+            else 'instancename'
+          ),
+          'patch_instance_name': (
+            (_instances_for_host | first).instance_name
+            if (_instances_for_host | length > 0)
+            else ''
+          ),
+          'instance_names': (_instances_for_host | map(attribute='instance_name') | list),
+          'instances': _instances_for_host
+        } ]
+      }}
+  vars:
+    _instances_for_host: "{{ single_instance_targets | selectattr('host', 'equalto', item) | list }}"
+  loop: "{{ execution_hosts }}"
+  when:
+    - execution_topology == 'single'
+    - _instances_for_host | length > 0
+  run_once: true
+
+- name: Validar plano de patch standalone por host
+  ansible.builtin.assert:
+    that:
+      - single_patch_plan_rows | length > 0
+    fail_msg: "Nenhum host standalone elegível foi montado para patch."
+  when: execution_topology == 'single'
+  run_once: true
+
+- name: Publicar discovery de single no report
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'execution': patch_report.execution | combine({
+            'instance_name': (
+              single_instance_targets | map(attribute='instance_name') | list | unique | join(', ')
+            )
+          }, recursive=True),
+          'discovery': patch_report.discovery | combine({
+            'single_instance_targets': single_instance_targets,
+            'single_patch_plan_rows': single_patch_plan_rows
+          }, recursive=True)
+        }, recursive=True)
+      }}
+  when: execution_topology == 'single'
+  run_once: true
+
+# =========================
+# AG / CLUSTER
+# =========================
+
+- name: Inicializar probe targets do AG
+  ansible.builtin.set_fact:
+    ag_probe_targets: []
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Montar probe targets do AG
+  ansible.builtin.set_fact:
+    ag_probe_targets: >-
+      {{
+        ag_probe_targets + [ {
+          'host': item.0.key,
+          'instance_name': item.1.InstanceName,
+          'connection_target': item.1.ConnectionTarget
+        } ]
+      }}
+  loop: "{{ sql_instances_by_host | dict2items | subelements('value') }}"
+  when:
+    - execution_topology == 'ag_cluster'
+    - (item.1.State | default('') | upper) == 'RUNNING'
+    - (sql_instance_name | default('') | trim | length == 0) or ((item.1.InstanceName | upper) == (sql_instance_name | trim | upper))
+  run_once: true
+
+- name: Validar que há instâncias elegíveis para probe do AG
+  ansible.builtin.assert:
+    that:
+      - ag_probe_targets | length > 0
+    fail_msg: >-
+      Nenhuma instância SQL em estado RUNNING foi descoberta para os hosts informados.
+      Verifique os serviços SQL Server locais ou informe sql_instance_name manualmente.
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Probe local de AG por host/instância
+  ansible.windows.win_powershell:
+    script: |
+      try {
+        Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
+
+        $serverInstance = "{{ item.connection_target }}"
+        $queryB64 = "{{ sql_query_local_discovery | b64encode }}"
+        $query = [System.Text.Encoding]::UTF8.GetString(
+          [System.Convert]::FromBase64String($queryB64)
+        )
+
+        $rows = @(
+          Invoke-Sqlcmd `
+            -ServerInstance $serverInstance `
+            -TrustServerCertificate `
+            -QueryTimeout {{ sql_query_timeout_seconds }} `
+            -Query $query `
+            -ErrorAction Stop
+        )
+
+        if ($rows.Count -eq 0) {
+          throw "Nenhuma linha retornada pela discovery local."
+        }
+
+        $row = $rows | Select-Object -First 1
+
+        [pscustomobject]@{
+          ProbeHost         = "{{ item.host }}"
+          ProbeInstanceName = "{{ item.instance_name }}"
+          ConnectionTarget  = "{{ item.connection_target }}"
+          ServerName        = ([string]$row.ServerName).Trim()
+          MachineName       = ([string]$row.MachineName).Trim()
+          InstanceName      = ([string]$row.InstanceName).Trim()
+          IsHadrEnabled     = [int]$row.IsHadrEnabled
+          AGName            = ([string]$row.AGName).Trim()
+          RoleName          = ([string]$row.RoleName).Trim().ToUpper()
+          AvailabilityMode  = ([string]$row.AvailabilityMode).Trim().ToUpper()
+          ConnectedState    = ([string]$row.ConnectedState).Trim().ToUpper()
+          OperationalState  = ([string]$row.OperationalState).Trim().ToUpper()
+          SyncHealth        = ([string]$row.SyncHealth).Trim().ToUpper()
+          DiscoveryRc       = 0
+          DiscoveryError    = ""
+        } | ConvertTo-Json -Compress -Depth 5
+      }
+      catch {
+        [pscustomobject]@{
+          ProbeHost         = "{{ item.host }}"
+          ProbeInstanceName = "{{ item.instance_name }}"
+          ConnectionTarget  = "{{ item.connection_target }}"
+          ServerName        = ""
+          MachineName       = "{{ item.host }}"
+          InstanceName      = "{{ item.instance_name }}"
+          IsHadrEnabled     = 0
+          AGName            = ""
+          RoleName          = "DISCOVERY_FAILED"
+          AvailabilityMode  = ""
+          ConnectedState    = ""
+          OperationalState  = ""
+          SyncHealth        = ""
+          DiscoveryRc       = 1
+          DiscoveryError    = $_.Exception.Message
+        } | ConvertTo-Json -Compress -Depth 5
+      }
+  delegate_to: "{{ item.host }}"
+  loop: "{{ ag_probe_targets }}"
+  register: _ag_probe_results_raw
+  changed_when: false
+  run_once: true
+  when: execution_topology == 'ag_cluster'
+
+- name: Consolidar probe results do AG
+  ansible.builtin.set_fact:
+    ag_probe_results: >-
+      {{
+        ag_probe_results + [
+          ((item.output | default([]) | join('') | trim | default('{}', true)) | from_json)
+        ]
+      }}
+  loop: "{{ _ag_probe_results_raw.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.host ~ ' / ' ~ item.item.instance_name }}"
+  run_once: true
+  when: execution_topology == 'ag_cluster'
+
+- name: Filtrar probes com membership de AG
+  ansible.builtin.set_fact:
+    _ag_member_probe_results: >-
+      {{
+        ag_probe_results
+        | rejectattr('AGName', 'equalto', '')
+        | list
+      }}
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Validar que ao menos uma instância do AG foi descoberta
+  ansible.builtin.assert:
+    that:
+      - _ag_member_probe_results | length > 0
+    fail_msg: >-
+      Nenhuma instância pertencente a AG foi descoberta automaticamente.
+      Verifique os hosts informados ou informe sql_instance_name manualmente.
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Determinar nomes de instância de AG encontrados
+  ansible.builtin.set_fact:
+    _ag_discovered_instance_names: "{{ _ag_member_probe_results | map(attribute='InstanceName') | list | unique }}"
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Validar que apenas uma instância de AG foi identificada
+  ansible.builtin.assert:
+    that:
+      - _ag_discovered_instance_names | length == 1
+    fail_msg: >-
+      Foram identificadas múltiplas instâncias candidatas a AG:
+      {{ _ag_discovered_instance_names | join(', ') }}.
+      Informe sql_instance_name manualmente para desambiguar.
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Definir instância efetiva do AG
+  ansible.builtin.set_fact:
+    sql_effective_instance_name: "{{ _ag_discovered_instance_names[0] }}"
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Consolidar discovery local por host para a instância efetiva do AG
+  ansible.builtin.set_fact:
+    sql_discovery_by_host: >-
+      {{
+        sql_discovery_by_host
+        | combine({
+            item.MachineName: item
+          }, recursive=True)
+      }}
+  loop: "{{ _ag_member_probe_results | selectattr('InstanceName', 'equalto', sql_effective_instance_name) | list }}"
+  loop_control:
+    label: "{{ item.MachineName }}"
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Atualizar report com instância efetiva do AG
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'execution': patch_report.execution | combine({
+            'instance_name': sql_effective_instance_name
+          }, recursive=True),
+          'discovery': patch_report.discovery | combine({
+            'sql_discovery_by_host': sql_discovery_by_host,
+            'ag_probe_results': ag_probe_results
+          }, recursive=True)
+        }, recursive=True)
+      }}
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Selecionar probes válidos do AG
+  ansible.builtin.set_fact:
+    _ag_seed_probe_candidates: >-
+      {{
+        _ag_member_probe_results
+        | rejectattr('DiscoveryRc', 'ne', 0)
+        | list
+      }}
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Separar probes PRIMARY do AG
+  ansible.builtin.set_fact:
+    _ag_seed_probe_primary: >-
+      {{
+        _ag_seed_probe_candidates
+        | selectattr('RoleName', 'equalto', 'PRIMARY')
+        | list
+      }}
+    _ag_seed_probe_connected_healthy: >-
+      {{
+        _ag_seed_probe_candidates
+        | selectattr('ConnectedState', 'equalto', 'CONNECTED')
+        | selectattr('SyncHealth', 'equalto', 'HEALTHY')
+        | list
+      }}
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Definir lista preferida de seed do AG
+  ansible.builtin.set_fact:
+    _ag_seed_probe_preferred: >-
+      {{
+        _ag_seed_probe_primary
+        if (_ag_seed_probe_primary | length > 0)
+        else _ag_seed_probe_connected_healthy
+      }}
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Definir seed probe row do AG
+  ansible.builtin.set_fact:
+    ag_seed_probe_row: "{{ (_ag_seed_probe_preferred | first) | default({}) }}"
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Definir host e connection target do seed do AG
+  ansible.builtin.set_fact:
+    ag_seed_host: "{{ ag_seed_probe_row.MachineName | default('') }}"
+    ag_seed_connection_target: "{{ ag_seed_probe_row.ConnectionTarget | default('') }}"
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Validar que pelo menos um seed do AG foi encontrado
+  ansible.builtin.assert:
+    that:
+      - ag_seed_host | length > 0
+      - ag_seed_connection_target | length > 0
+    fail_msg: >-
+      Nenhum seed válido do AG foi encontrado a partir dos probes automáticos.
+      Verifique conectividade da instância SQL descoberta no cluster.
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Descobrir AG e PRIMARY atual
+  ansible.windows.win_powershell:
+    script: |
+      Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
+
+      $serverInstance = "{{ ag_seed_connection_target }}"
+      $queryB64 = "{{ sql_query_ag_group_state | b64encode }}"
+      $query = [System.Text.Encoding]::UTF8.GetString(
+        [System.Convert]::FromBase64String($queryB64)
+      )
+
+      $rows = @(
+        Invoke-Sqlcmd `
+          -ServerInstance $serverInstance `
+          -TrustServerCertificate `
+          -QueryTimeout {{ sql_query_timeout_seconds }} `
+          -Query $query `
+          -ErrorAction Stop
+      )
+
+      @(
+        $rows | ForEach-Object {
+          [pscustomobject]@{
+            AGName          = ([string]$_.AGName).Trim()
+            PrimaryReplica  = ([string]$_.PrimaryReplica).Trim()
+            GroupSyncHealth = ([string]$_.GroupSyncHealth).Trim().ToUpper()
+          }
+        }
+      ) | ConvertTo-Json -Compress -Depth 5
+  delegate_to: "{{ ag_seed_host }}"
+  register: _ag_group_state
+  changed_when: false
+  run_once: true
+  when: execution_topology == 'ag_cluster'
+
+- name: Parse bruto do group state do AG
+  ansible.builtin.set_fact:
+    _ag_group_rows_raw: "{{ (_ag_group_state.output | default([]) | join('') | trim | default('[]', true)) | from_json }}"
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Normalizar group state do AG para lista
+  ansible.builtin.set_fact:
+    ag_group_rows: >-
+      {{
+        [_ag_group_rows_raw]
+        if (_ag_group_rows_raw is mapping)
+        else (_ag_group_rows_raw | default([]))
+      }}
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Validar que o seed enxerga ao menos um AG neste escopo
+  ansible.builtin.assert:
+    that:
+      - ag_group_rows | length >= 1
+    fail_msg: "Não foi possível descobrir o AG e a PRIMARY atual a partir do host seed."
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Definir AG e PRIMARY resolvidos
+  ansible.builtin.set_fact:
+    ag_name_resolved: "{{ ag_group_rows[0].AGName }}"
+    ag_primary_server_name: "{{ ag_group_rows[0].PrimaryReplica }}"
+    ag_primary_connection_target: "{{ ag_group_rows[0].PrimaryReplica }}"
+    ag_primary_machine_name: "{{ ag_group_rows[0].PrimaryReplica | regex_replace('\\\\.*$', '') }}"
+    ag_primary_host: "{{ ag_group_rows[0].PrimaryReplica | regex_replace('\\\\.*$', '') }}"
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Descobrir topologia completa do AG na PRIMARY
+  ansible.windows.win_powershell:
+    script: |
+      Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
+
+      $serverInstance = "{{ ag_primary_connection_target }}"
+      $queryB64 = "{{ sql_query_ag_topology | b64encode }}"
+      $query = [System.Text.Encoding]::UTF8.GetString(
+        [System.Convert]::FromBase64String($queryB64)
+      )
+
+      $rows = @(
+        Invoke-Sqlcmd `
+          -ServerInstance $serverInstance `
+          -TrustServerCertificate `
+          -QueryTimeout {{ sql_query_timeout_seconds }} `
+          -Query $query `
+          -ErrorAction Stop
+      )
+
+      @(
+        $rows | ForEach-Object {
+          [pscustomobject]@{
+            AGName           = ([string]$_.AGName).Trim()
+            ServerName       = ([string]$_.ServerName).Trim()
+            MachineName      = ([string]$_.MachineName).Trim()
+            RoleName         = ([string]$_.RoleName).Trim().ToUpper()
+            AvailabilityMode = ([string]$_.AvailabilityMode).Trim().ToUpper()
+            FailoverMode     = ([string]$_.FailoverMode).Trim().ToUpper()
+            ConnectedState   = ([string]$_.ConnectedState).Trim().ToUpper()
+            SyncHealth       = ([string]$_.SyncHealth).Trim().ToUpper()
+          }
+        }
+      ) | ConvertTo-Json -Compress -Depth 5
+  delegate_to: "{{ ag_primary_host }}"
+  register: _ag_topology_raw
+  changed_when: false
+  run_once: true
+  when: execution_topology == 'ag_cluster'
+
+- name: Parse bruto da topologia completa do AG
+  ansible.builtin.set_fact:
+    _ag_topology_rows_raw: "{{ (_ag_topology_raw.output | default([]) | join('') | trim | default('[]', true)) | from_json }}"
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Normalizar topologia completa do AG para lista
+  ansible.builtin.set_fact:
+    _ag_topology_rows: >-
+      {{
+        [_ag_topology_rows_raw]
+        if (_ag_topology_rows_raw is mapping)
+        else (_ag_topology_rows_raw | default([]))
+      }}
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Inicializar lista de topologia AG
+  ansible.builtin.set_fact:
+    ag_topology_rows: []
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Consolidar topologia AG com InventoryHost igual ao MachineName
+  ansible.builtin.set_fact:
+    ag_topology_rows: >-
+      {{
+        ag_topology_rows + [
+          item | combine({
+            'InventoryHost': item.MachineName
+          })
+        ]
+      }}
+  loop: "{{ _ag_topology_rows }}"
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Definir estrutura consolidada do AG
+  ansible.builtin.set_fact:
+    ag_discovery:
+      ag_name: "{{ ag_name_resolved }}"
+      instance_name: "{{ sql_effective_instance_name }}"
+      primary_server_name: "{{ ag_primary_server_name }}"
+      primary_connection_target: "{{ ag_primary_connection_target }}"
+      primary_machine_name: "{{ ag_primary_machine_name }}"
+      primary_host: "{{ ag_primary_host }}"
+      all_hosts: "{{ ag_topology_rows | map(attribute='InventoryHost') | list | unique }}"
+      secondary_hosts: >-
+        {{
+          ag_topology_rows
+          | selectattr('RoleName', 'equalto', 'SECONDARY')
+          | map(attribute='InventoryHost')
+          | list
+          | unique
+        }}
+      topology_rows: "{{ ag_topology_rows }}"
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Validar que os hosts selecionados pertencem ao AG
+  ansible.builtin.assert:
+    that:
+      - (execution_hosts | difference(ag_discovery.all_hosts)) | length == 0
+    fail_msg: >-
+      Há host(s) selecionados que não pertencem ao AG descoberto:
+      {{ execution_hosts | difference(ag_discovery.all_hosts) | join(', ') }}
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Consolidar discovery no report
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'discovery': patch_report.discovery | combine({
+            'sql_discovery_by_host': sql_discovery_by_host,
+            'ag_discovery': ag_discovery
+          }, recursive=True)
+        }, recursive=True)
+      }}
+  when: execution_topology == 'ag_cluster'
+  run_once: true

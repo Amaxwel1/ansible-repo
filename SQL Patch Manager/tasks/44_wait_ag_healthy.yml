@@ -1,0 +1,163 @@
+---
+- name: Definir instância efetiva do AG para espera de saúde
+  ansible.builtin.set_fact:
+    sql_ag_instance_name_effective: "{{ ag_discovery.instance_name | default(sql_effective_instance_name | default(sql_instance_name)) }}"
+  run_once: true
+
+- name: Definir connection target efetivo da PRIMARY para espera de saúde
+  ansible.builtin.set_fact:
+    sql_ag_primary_connection_target: >-
+      {{
+        ag_discovery.primary_connection_target
+        | default(
+            ag_discovery.primary_host
+            if (sql_ag_instance_name_effective | upper) == 'MSSQLSERVER'
+            else ag_discovery.primary_host ~ '\\' ~ sql_ag_instance_name_effective
+          )
+      }}
+  run_once: true
+
+- name: Aguardar AG ficar saudável
+  ansible.windows.win_powershell:
+    script: |
+      Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
+
+      $serverInstance = "{{ sql_ag_primary_connection_target }}"
+
+      $replicaQueryB64 = "{{ sql_query_health_replicas | b64encode }}"
+      $replicaQuery = [System.Text.Encoding]::UTF8.GetString(
+        [System.Convert]::FromBase64String($replicaQueryB64)
+      )
+
+      $databaseQueryB64 = "{{ sql_query_health_databases | b64encode }}"
+      $databaseQuery = [System.Text.Encoding]::UTF8.GetString(
+        [System.Convert]::FromBase64String($databaseQueryB64)
+      )
+
+      $timeoutSeconds = {{ ag_health_wait_timeout_seconds }}
+      $pollSeconds = {{ ag_health_poll_interval_seconds }}
+
+      $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+      $lastReplicaRows = @()
+      $lastDatabaseRows = @()
+      $lastError = ""
+
+      while ((Get-Date) -lt $deadline) {
+        try {
+          $replicaRows = @(
+            Invoke-Sqlcmd `
+              -ServerInstance $serverInstance `
+              -TrustServerCertificate `
+              -QueryTimeout {{ sql_query_timeout_seconds }} `
+              -Query $replicaQuery `
+              -ErrorAction Stop
+          )
+
+          $databaseRows = @(
+            Invoke-Sqlcmd `
+              -ServerInstance $serverInstance `
+              -TrustServerCertificate `
+              -QueryTimeout {{ sql_query_timeout_seconds }} `
+              -Query $databaseQuery `
+              -ErrorAction Stop
+          )
+
+          $lastReplicaRows = @(
+            $replicaRows | ForEach-Object {
+              $serverName = ([string]$_.ServerName).Trim()
+              $machineName = if ($serverName -like "*\*") { $serverName.Split('\')[0] } else { $serverName }
+
+              [pscustomobject]@{
+                AGName      = ([string]$_.AGName).Trim()
+                ServerName  = $serverName
+                MachineName = $machineName.Trim()
+                RoleName    = ([string]$_.RoleName).Trim().ToUpper()
+                SyncStatus  = ([string]$_.SyncStatus).Trim().ToUpper()
+              }
+            }
+          )
+
+          $lastDatabaseRows = @(
+            $databaseRows | ForEach-Object {
+              [pscustomobject]@{
+                AGName                    = ([string]$_.AGName).Trim()
+                ServerName                = ([string]$_.ServerName).Trim()
+                RoleName                  = ([string]$_.RoleName).Trim().ToUpper()
+                DatabaseName              = ([string]$_.DatabaseName).Trim()
+                SynchronizationStateDesc  = ([string]$_.synchronization_state_desc).Trim().ToUpper()
+                SynchronizationHealthDesc = ([string]$_.synchronization_health_desc).Trim().ToUpper()
+                DatabaseStateDesc         = ([string]$_.database_state_desc).Trim().ToUpper()
+                IsSuspended               = [int]$_.is_suspended
+              }
+            }
+          )
+
+          $replicasBad = @($lastReplicaRows | Where-Object { $_.SyncStatus -ne 'HEALTHY' })
+          $dbSyncBad = @($lastDatabaseRows | Where-Object { $_.SynchronizationHealthDesc -ne 'HEALTHY' })
+          $primaryDbStateBad = @(
+            $lastDatabaseRows |
+            Where-Object { $_.RoleName -eq 'PRIMARY' -and $_.DatabaseStateDesc -ne 'ONLINE' }
+          )
+          $dbSuspended = @($lastDatabaseRows | Where-Object { $_.IsSuspended -eq 1 })
+
+          if (
+            $replicasBad.Count -eq 0 -and
+            $dbSyncBad.Count -eq 0 -and
+            $primaryDbStateBad.Count -eq 0 -and
+            $dbSuspended.Count -eq 0
+          ) {
+            [pscustomobject]@{
+              WaitResult        = "HEALTHY"
+              PrimaryHost       = "{{ ag_discovery.primary_host }}"
+              InstanceName      = "{{ sql_ag_instance_name_effective }}"
+              ServerInstance    = $serverInstance
+              WaitTimeoutSec    = $timeoutSeconds
+              PollIntervalSec   = $pollSeconds
+              ReplicaCount      = $lastReplicaRows.Count
+              DatabaseRowCount  = $lastDatabaseRows.Count
+            } | ConvertTo-Json -Compress -Depth 6
+            exit 0
+          }
+
+          Start-Sleep -Seconds $pollSeconds
+        }
+        catch {
+          $lastError = $_.Exception.Message
+          Start-Sleep -Seconds $pollSeconds
+        }
+      }
+
+      throw (
+        [pscustomobject]@{
+          WaitResult             = "TIMEOUT"
+          PrimaryHost            = "{{ ag_discovery.primary_host }}"
+          InstanceName           = "{{ sql_ag_instance_name_effective }}"
+          ServerInstance         = $serverInstance
+          WaitTimeoutSec         = $timeoutSeconds
+          PollIntervalSec        = $pollSeconds
+          LastError              = $lastError
+          ReplicaRows            = $lastReplicaRows
+          DatabaseRows           = $lastDatabaseRows
+        } | ConvertTo-Json -Compress -Depth 8
+      )
+  delegate_to: "{{ ag_discovery.primary_host }}"
+  register: _ag_wait_healthy
+  changed_when: false
+  run_once: true
+
+- name: Publicar espera de saúde do AG no report
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'actions': patch_report.actions + [ {
+            'host': ag_discovery.primary_host,
+            'instance_name': sql_ag_instance_name_effective,
+            'step': 'wait_ag_healthy',
+            'rc': _ag_wait_healthy.rc | default(0),
+            'stdout': (_ag_wait_healthy.output | default([]) | join('') | trim | default('AG HEALTHY', true))
+          } ]
+        }, recursive=True)
+      }}
+  when: _ag_wait_healthy is succeeded
+  run_once: true

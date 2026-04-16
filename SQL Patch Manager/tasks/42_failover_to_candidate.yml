@@ -1,0 +1,87 @@
+---
+- name: Definir instância efetiva do AG para failover
+  ansible.builtin.set_fact:
+    sql_ag_instance_name_effective: "{{ ag_discovery.instance_name | default(sql_effective_instance_name | default(sql_instance_name)) }}"
+  run_once: true
+
+- name: Definir connection target efetivo da candidata ao failover
+  ansible.builtin.set_fact:
+    sql_ag_failover_candidate_connection_target: >-
+      {{
+        ag_failover_candidate_connection_target
+        | default(
+            (
+              ag_discovery.topology_rows
+              | selectattr('InventoryHost', 'equalto', failover_candidate)
+              | map(attribute='ServerName')
+              | list
+              | first
+            )
+            | default(
+                failover_candidate
+                if (sql_ag_instance_name_effective | upper) == 'MSSQLSERVER'
+                else failover_candidate ~ '\\' ~ sql_ag_instance_name_effective
+              )
+          )
+      }}
+  run_once: true
+
+- name: Executar failover planejado na secundária candidata
+  ansible.windows.win_powershell:
+    script: |
+      Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
+      $serverInstance = "{{ sql_ag_failover_candidate_connection_target }}"
+
+      Invoke-Sqlcmd `
+        -ServerInstance $serverInstance `
+        -TrustServerCertificate `
+        -QueryTimeout {{ sql_query_timeout_seconds }} `
+        -Query "ALTER AVAILABILITY GROUP [{{ ag_name }}] FAILOVER;" `
+        -ErrorAction Stop | Out-Null
+
+      "FAILOVER_OK"
+  delegate_to: "{{ failover_candidate }}"
+  register: _ag_failover
+  changed_when: true
+  run_once: true
+
+- name: Aguardar candidata assumir PRIMARY
+  ansible.windows.win_powershell:
+    script: |
+      Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
+      $serverInstance = "{{ sql_ag_failover_candidate_connection_target }}"
+      $query = "SET NOCOUNT ON; SELECT TOP (1) ars.role_desc AS RoleName FROM sys.dm_hadr_availability_replica_states ars WHERE ars.is_local = 1;"
+
+      $rows = @(
+        Invoke-Sqlcmd `
+          -ServerInstance $serverInstance `
+          -TrustServerCertificate `
+          -QueryTimeout {{ sql_query_timeout_seconds }} `
+          -Query $query `
+          -ErrorAction Stop
+      )
+
+      ([string](($rows | Select-Object -First 1).RoleName)).Trim()
+  delegate_to: "{{ failover_candidate }}"
+  register: _candidate_role_after_failover
+  changed_when: false
+  until: (_candidate_role_after_failover.output | default([]) | join('') | trim | upper) == 'PRIMARY'
+  retries: 18
+  delay: 10
+  run_once: true
+
+- name: Registrar ação de failover
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'actions': patch_report.actions + [ {
+            'host': failover_candidate,
+            'instance_name': sql_ag_instance_name_effective,
+            'step': 'planned_failover',
+            'rc': 0,
+            'message': 'Failover executado com sucesso para o host candidato.'
+          } ]
+        }, recursive=True)
+      }}
+  run_once: true

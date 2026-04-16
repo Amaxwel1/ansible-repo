@@ -1,0 +1,133 @@
+---
+- name: Verificar se o host alvo de reboot é a PRIMARY atual do AG
+  ansible.builtin.set_fact:
+    reboot_target_is_current_primary: >-
+      {{
+        execution_topology == 'ag_cluster'
+        and (reboot_target_host == ag_discovery.primary_host)
+      }}
+  run_once: true
+
+- name: Selecionar candidatas saudáveis para failover antes do reboot da PRIMARY
+  ansible.builtin.set_fact:
+    reboot_failover_candidate_rows_all: >-
+      {{
+        ag_discovery.topology_rows
+        | selectattr('RoleName', 'equalto', 'SECONDARY')
+        | selectattr('SyncHealth', 'equalto', 'HEALTHY')
+        | selectattr('AvailabilityMode', 'equalto', 'SYNCHRONOUS_COMMIT')
+        | selectattr('ConnectedState', 'equalto', 'CONNECTED')
+        | rejectattr('InventoryHost', 'equalto', reboot_target_host)
+        | list
+      }}
+  when: reboot_target_is_current_primary | bool
+  run_once: true
+
+- name: Preferir candidata com regex -MZ- antes do reboot da PRIMARY
+  ansible.builtin.set_fact:
+    reboot_failover_candidate_rows_preferred: >-
+      {{
+        reboot_failover_candidate_rows_all
+        | selectattr('InventoryHost', 'search', ag_failover_preferred_regex)
+        | list
+      }}
+  when: reboot_target_is_current_primary | bool
+  run_once: true
+
+- name: Definir candidata de failover antes do reboot da PRIMARY
+  ansible.builtin.set_fact:
+    reboot_failover_candidate: >-
+      {{
+        (
+          reboot_failover_candidate_rows_preferred | first
+        ).InventoryHost
+        if (reboot_failover_candidate_rows_preferred | length > 0)
+        else
+        (
+          reboot_failover_candidate_rows_all | first | default({})
+        ).InventoryHost | default('')
+      }}
+  when: reboot_target_is_current_primary | bool
+  run_once: true
+
+- name: Validar candidata para failover antes do reboot da PRIMARY
+  ansible.builtin.assert:
+    that:
+      - reboot_failover_candidate | default('') | length > 0
+    fail_msg: >-
+      O host {{ reboot_target_host }} é a PRIMARY atual e não foi encontrada
+      uma SECONDARY saudável para failover antes do reboot.
+  when: reboot_target_is_current_primary | bool
+  run_once: true
+
+- name: Executar failover antes do reboot da PRIMARY atual
+  ansible.builtin.include_tasks: 42_failover_to_candidate.yml
+  vars:
+    ag_name: "{{ ag_discovery.ag_name }}"
+    failover_candidate: "{{ reboot_failover_candidate }}"
+  when: reboot_target_is_current_primary | bool
+  run_once: true
+
+- name: Refazer discovery após failover pré-reboot
+  ansible.builtin.include_tasks: 30_discover_sql_topology.yml
+  when: reboot_target_is_current_primary | bool
+  run_once: true
+
+- name: Aguardar AG saudável após failover pré-reboot
+  ansible.builtin.include_tasks: 44_wait_ag_healthy.yml
+  when: reboot_target_is_current_primary | bool
+  run_once: true
+
+- name: Validar que o host alvo do reboot virou SECONDARY
+  ansible.builtin.assert:
+    that:
+      - reboot_target_host in ag_discovery.secondary_hosts
+    fail_msg: >-
+      O host {{ reboot_target_host }} ainda não virou SECONDARY após o failover
+      pré-reboot. Reboot abortado para evitar indisponibilidade.
+  when: reboot_target_is_current_primary | bool
+  run_once: true
+
+- name: Reiniciar host após validação final
+  ansible.windows.win_reboot:
+    reboot_timeout: "{{ patch_reboot_timeout_seconds | default(3600) }}"
+    connect_timeout: "{{ patch_reboot_connect_timeout_seconds | default(30) }}"
+    post_reboot_delay: "{{ patch_reboot_post_delay_seconds | default(60) }}"
+    msg: "Reboot automático após validação final do patch SQL Server."
+  delegate_to: "{{ reboot_target_host }}"
+  register: _validated_reboot
+  run_once: true
+
+- name: Aguardar instâncias standalone responderem após reboot
+  ansible.builtin.include_tasks: 45_wait_single_instances_ready.yml
+  vars:
+    single_wait_targets: "{{ single_instance_targets | selectattr('host', 'equalto', reboot_target_host) | list }}"
+    single_wait_action_step: "wait_single_instance_ready_after_reboot"
+    single_wait_action_message: "Instância respondeu normalmente após reboot."
+  when: execution_topology == 'single'
+  run_once: true
+
+- name: Refazer discovery após reboot em AG
+  ansible.builtin.include_tasks: 30_discover_sql_topology.yml
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Aguardar AG saudável após reboot
+  ansible.builtin.include_tasks: 44_wait_ag_healthy.yml
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Registrar reboot no report
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'actions': patch_report.actions + [ {
+            'host': reboot_target_host,
+            'step': 'reboot_after_validation',
+            'rc': 0,
+            'message': 'Host reiniciado após validação final e retorno confirmado com sucesso.'
+          } ]
+        }, recursive=True)
+      }}
+  run_once: true
