@@ -6,7 +6,6 @@
         execution_topology == 'ag_cluster'
         and (reboot_target_host == ag_discovery.primary_host)
       }}
-  run_once: true
 
 - name: Selecionar candidatas saudáveis para failover antes do reboot da PRIMARY
   ansible.builtin.set_fact:
@@ -21,7 +20,6 @@
         | list
       }}
   when: reboot_target_is_current_primary | bool
-  run_once: true
 
 - name: Preferir candidata com regex -MZ- antes do reboot da PRIMARY
   ansible.builtin.set_fact:
@@ -32,7 +30,6 @@
         | list
       }}
   when: reboot_target_is_current_primary | bool
-  run_once: true
 
 - name: Definir candidata de failover antes do reboot da PRIMARY
   ansible.builtin.set_fact:
@@ -48,7 +45,6 @@
         ).InventoryHost | default('')
       }}
   when: reboot_target_is_current_primary | bool
-  run_once: true
 
 - name: Validar candidata para failover antes do reboot da PRIMARY
   ansible.builtin.assert:
@@ -58,7 +54,6 @@
       O host {{ reboot_target_host }} é a PRIMARY atual e não foi encontrada
       uma SECONDARY saudável para failover antes do reboot.
   when: reboot_target_is_current_primary | bool
-  run_once: true
 
 - name: Executar failover antes do reboot da PRIMARY atual
   ansible.builtin.include_tasks: 42_failover_to_candidate.yml
@@ -66,17 +61,14 @@
     ag_name: "{{ ag_discovery.ag_name }}"
     failover_candidate: "{{ reboot_failover_candidate }}"
   when: reboot_target_is_current_primary | bool
-  run_once: true
 
 - name: Refazer discovery após failover pré-reboot
   ansible.builtin.include_tasks: 30_discover_sql_topology.yml
   when: reboot_target_is_current_primary | bool
-  run_once: true
 
 - name: Aguardar AG saudável após failover pré-reboot
   ansible.builtin.include_tasks: 44_wait_ag_healthy.yml
   when: reboot_target_is_current_primary | bool
-  run_once: true
 
 - name: Validar que o host alvo do reboot virou SECONDARY
   ansible.builtin.assert:
@@ -86,7 +78,6 @@
       O host {{ reboot_target_host }} ainda não virou SECONDARY após o failover
       pré-reboot. Reboot abortado para evitar indisponibilidade.
   when: reboot_target_is_current_primary | bool
-  run_once: true
 
 - name: Reiniciar host após validação final
   ansible.windows.win_reboot:
@@ -96,7 +87,6 @@
     msg: "Reboot automático após validação final do patch SQL Server."
   delegate_to: "{{ reboot_target_host }}"
   register: _validated_reboot
-  run_once: true
 
 - name: Aguardar instâncias standalone responderem após reboot
   ansible.builtin.include_tasks: 45_wait_single_instances_ready.yml
@@ -105,17 +95,104 @@
     single_wait_action_step: "wait_single_instance_ready_after_reboot"
     single_wait_action_message: "Instância respondeu normalmente após reboot."
   when: execution_topology == 'single'
-  run_once: true
+
+- name: Definir connection target da instância SQL do host rebootado no AG
+  ansible.builtin.set_fact:
+    ag_reboot_connection_target: >-
+      {{
+        (
+          ag_discovery.topology_rows
+          | selectattr('InventoryHost', 'equalto', reboot_target_host)
+          | map(attribute='ServerName')
+          | list
+          | first
+        )
+        | default(
+            reboot_target_host
+            if (ag_discovery.instance_name | upper) == 'MSSQLSERVER'
+            else reboot_target_host ~ '\\' ~ ag_discovery.instance_name
+          )
+      }}
+  when: execution_topology == 'ag_cluster'
+
+- name: Aguardar instância SQL do host rebootado responder no AG
+  ansible.windows.win_powershell:
+    script: |
+      Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
+
+      $serverInstance = "{{ ag_reboot_connection_target }}"
+      $timeoutSeconds = {{ ag_reboot_instance_wait_timeout_seconds | default(single_instance_wait_timeout_seconds | default(1800)) }}
+      $pollSeconds = {{ ag_reboot_instance_poll_interval_seconds | default(single_instance_poll_interval_seconds | default(30)) }}
+      $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+      $lastError = ""
+
+      while ((Get-Date) -lt $deadline) {
+        try {
+          $row = Invoke-Sqlcmd `
+            -ServerInstance $serverInstance `
+            -TrustServerCertificate `
+            -QueryTimeout {{ sql_query_timeout_seconds }} `
+            -Query "SELECT @@SERVERNAME AS ServerName;" `
+            -ErrorAction Stop | Select-Object -First 1
+
+          if (([string]$row.ServerName).Trim().Length -gt 0) {
+            [pscustomobject]@{
+              WaitResult      = "READY"
+              Host            = "{{ reboot_target_host }}"
+              InstanceName    = "{{ ag_discovery.instance_name }}"
+              ServerInstance  = $serverInstance
+              WaitTimeoutSec  = $timeoutSeconds
+              PollIntervalSec = $pollSeconds
+            } | ConvertTo-Json -Compress -Depth 5
+            exit 0
+          }
+        }
+        catch {
+          $lastError = $_.Exception.Message
+        }
+
+        Start-Sleep -Seconds $pollSeconds
+      }
+
+      throw (
+        [pscustomobject]@{
+          WaitResult      = "TIMEOUT"
+          Host            = "{{ reboot_target_host }}"
+          InstanceName    = "{{ ag_discovery.instance_name }}"
+          ServerInstance  = $serverInstance
+          WaitTimeoutSec  = $timeoutSeconds
+          PollIntervalSec = $pollSeconds
+          LastError       = $lastError
+        } | ConvertTo-Json -Compress -Depth 8
+      )
+  delegate_to: "{{ reboot_target_host }}"
+  register: _ag_reboot_wait_ready
+  changed_when: false
+  when: execution_topology == 'ag_cluster'
+
+- name: Registrar espera da instância SQL após reboot no AG
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'actions': patch_report.actions + [ {
+            'host': reboot_target_host,
+            'instance_name': ag_discovery.instance_name,
+            'step': 'wait_ag_instance_ready_after_reboot',
+            'rc': 0,
+            'message': 'Instância SQL do host rebootado respondeu normalmente antes da redescoberta do AG.'
+          } ]
+        }, recursive=True)
+      }}
+  when: execution_topology == 'ag_cluster'
 
 - name: Refazer discovery após reboot em AG
   ansible.builtin.include_tasks: 30_discover_sql_topology.yml
   when: execution_topology == 'ag_cluster'
-  run_once: true
 
 - name: Aguardar AG saudável após reboot
   ansible.builtin.include_tasks: 44_wait_ag_healthy.yml
   when: execution_topology == 'ag_cluster'
-  run_once: true
 
 - name: Registrar reboot no report
   ansible.builtin.set_fact:
@@ -130,4 +207,3 @@
           } ]
         }, recursive=True)
       }}
-  run_once: true
