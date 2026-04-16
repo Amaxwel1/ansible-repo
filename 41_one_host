@@ -1,3 +1,18 @@
+- name: Validar se o patch existe no localhost do job
+  ansible.builtin.stat:
+    path: "{{ patch_package_local_path }}"
+  delegate_to: localhost
+  register: _patch_local_stat
+  run_once: true
+
+- name: Mostrar resultado do stat do patch local
+  ansible.builtin.debug:
+    msg:
+      - "exists={{ _patch_local_stat.stat.exists | default(false) }}"
+      - "path={{ patch_package_local_path }}"
+      - "size={{ _patch_local_stat.stat.size | default(0) }}"
+  run_once: true
+
 - name: Copiar patch do share SMB para o host {{ patch_target_host }}
   ansible.windows.win_powershell:
     script: |
