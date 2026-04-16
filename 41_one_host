@@ -1,3 +1,192 @@
+patch_execution_timeout_seconds: 14400
+patch_execution_poll_interval_seconds: 30
+patch_kill_on_timeout: false
+sql_setup_bootstrap_log_root: 'C:\Program Files\Microsoft SQL Server\160\Setup Bootstrap\Log'
+
+
+- name: Executar patch no host {{ patch_target_host }}
+  ansible.windows.win_powershell:
+    script: |
+      $patch = '{{ windows_patch_stage_dir }}\{{ patch_package_name }}'
+      $args = '{{ patch_installer_args_effective }}'
+      $timeoutSeconds = {{ patch_execution_timeout_seconds | default(14400) }}
+      $pollSeconds = {{ patch_execution_poll_interval_seconds | default(30) }}
+      $logRoot = '{{ sql_setup_bootstrap_log_root | default("C:\Program Files\Microsoft SQL Server\160\Setup Bootstrap\Log") }}'
+      $killOnTimeout = [System.Convert]::ToBoolean('{{ patch_kill_on_timeout | default(false) | bool | string }}')
+
+      function Get-LatestSqlSetupLogInfo {
+        param(
+          [string]$Root
+        )
+
+        $result = [ordered]@{
+          RunDir      = ""
+          SummaryPath = ""
+          DetailPath  = ""
+          SummaryTail = ""
+          DetailTail  = ""
+        }
+
+        if (-not (Test-Path $Root)) {
+          return [pscustomobject]$result
+        }
+
+        $runDir = Get-ChildItem -Path $Root -Directory -ErrorAction SilentlyContinue |
+          Sort-Object LastWriteTime -Descending |
+          Select-Object -First 1
+
+        if ($null -eq $runDir) {
+          return [pscustomobject]$result
+        }
+
+        $result.RunDir = $runDir.FullName
+
+        $summary = Get-ChildItem -Path $runDir.FullName -Filter 'Summary.txt' -Recurse -File -ErrorAction SilentlyContinue |
+          Sort-Object LastWriteTime -Descending |
+          Select-Object -First 1
+
+        if ($summary) {
+          $result.SummaryPath = $summary.FullName
+          $result.SummaryTail = ((Get-Content -Path $summary.FullName -Tail 40 -ErrorAction SilentlyContinue) -join "`n")
+        }
+
+        $detail = Get-ChildItem -Path $runDir.FullName -Filter 'Detail.txt' -Recurse -File -ErrorAction SilentlyContinue |
+          Sort-Object LastWriteTime -Descending |
+          Select-Object -First 1
+
+        if ($detail) {
+          $result.DetailPath = $detail.FullName
+          $result.DetailTail = ((Get-Content -Path $detail.FullName -Tail 40 -ErrorAction SilentlyContinue) -join "`n")
+        }
+
+        return [pscustomobject]$result
+      }
+
+      if (-not (Test-Path $patch)) {
+        throw "Patch não encontrado no host: $patch"
+      }
+
+      $startedAt = Get-Date
+      $deadline = $startedAt.AddSeconds($timeoutSeconds)
+
+      $proc = Start-Process `
+        -FilePath $patch `
+        -ArgumentList $args `
+        -PassThru `
+        -ErrorAction Stop
+
+      while ($true) {
+        Start-Sleep -Seconds $pollSeconds
+        $proc.Refresh()
+
+        if ($proc.HasExited) {
+          break
+        }
+
+        if ((Get-Date) -ge $deadline) {
+          if ($killOnTimeout) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          }
+
+          $logInfo = Get-LatestSqlSetupLogInfo -Root $logRoot
+
+          throw (
+            [pscustomobject]@{
+              Timeout     = $true
+              Pid         = $proc.Id
+              Patch       = $patch
+              Args        = $args
+              StartedAt   = $startedAt.ToString("s")
+              DurationSec = [int]((Get-Date) - $startedAt).TotalSeconds
+              LogRunDir   = $logInfo.RunDir
+              SummaryPath = $logInfo.SummaryPath
+              DetailPath  = $logInfo.DetailPath
+              SummaryTail = $logInfo.SummaryTail
+              DetailTail  = $logInfo.DetailTail
+            } | ConvertTo-Json -Compress -Depth 6
+          )
+        }
+      }
+
+      Start-Sleep -Seconds 5
+      $finishedAt = Get-Date
+      $logInfo = Get-LatestSqlSetupLogInfo -Root $logRoot
+
+      [pscustomobject]@{
+        ExitCode    = $proc.ExitCode
+        Pid         = $proc.Id
+        Patch       = $patch
+        Args        = $args
+        StartedAt   = $startedAt.ToString("s")
+        FinishedAt  = $finishedAt.ToString("s")
+        DurationSec = [int]($finishedAt - $startedAt).TotalSeconds
+        LogRunDir   = $logInfo.RunDir
+        SummaryPath = $logInfo.SummaryPath
+        DetailPath  = $logInfo.DetailPath
+        SummaryTail = $logInfo.SummaryTail
+        DetailTail  = $logInfo.DetailTail
+      } | ConvertTo-Json -Compress -Depth 6
+  delegate_to: "{{ patch_target_host }}"
+  register: _patch_exec
+  changed_when: true
+  failed_when: >-
+    (
+      (
+        (_patch_exec.output | default([]) | join('') | trim | default('{}', true))
+        | from_json
+      ).ExitCode | int
+    ) not in (patch_expected_return_codes | map('int') | list)
+
+- name: Parse do resultado do patch
+  ansible.builtin.set_fact:
+    _patch_exec_json: >-
+      {{
+        (_patch_exec.output | default([]) | join('') | trim | default('{}', true))
+        | from_json
+      }}
+  run_once: true
+
+- name: Registrar ação de patch
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'actions': patch_report.actions + [ {
+            'host': patch_target_host,
+            'instance_name': (
+              'ALLINSTANCES'
+              if patch_mode_effective == 'allinstances'
+              else patch_instance_name_effective
+            ),
+            'step': 'patch',
+            'rc': (_patch_exec_json.ExitCode | default(1) | int),
+            'message': (
+              'Patch aplicado em todas as instâncias detectadas do host com exit code '
+              ~ ((_patch_exec_json.ExitCode | default(1) | int) | string)
+              ~ ' em '
+              ~ ((_patch_exec_json.DurationSec | default(0) | int) | string)
+              ~ ' segundos. Instâncias: '
+              ~ ((patch_target_instance_names | default([])) | join(', '))
+            )
+            if patch_mode_effective == 'allinstances'
+            else
+            (
+              'Patch aplicado na instância '
+              ~ patch_instance_name_effective
+              ~ ' com exit code '
+              ~ ((_patch_exec_json.ExitCode | default(1) | int) | string)
+              ~ ' em '
+              ~ ((_patch_exec_json.DurationSec | default(0) | int) | string)
+              ~ ' segundos.'
+            ),
+            'summary_path': (_patch_exec_json.SummaryPath | default('')),
+            'detail_path': (_patch_exec_json.DetailPath | default(''))
+          } ]
+        }, recursive=True)
+      }}
+  run_once: true
+
+
 patch_cifs_share_root: "\\ag-ah-vv-fs-001.agorasenior.corp\apps"
 patch_cifs_subpath: "ansible\BD_SQLSERVER"
 
