@@ -1,0 +1,44 @@
+- name: Copiar patch do share SMB para o host {{ patch_target_host }}
+  ansible.windows.win_powershell:
+    script: |
+      $share = "\\192.168.0.115\certs\sql-patchs"
+      $fullUser = "192.168.0.115\ansible"
+      $password = "ans2025"
+      $dest = "{{ windows_patch_stage_dir }}\{{ patch_package_name }}"
+
+      $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+      $cred = New-Object System.Management.Automation.PSCredential($fullUser, $securePassword)
+
+      $driveName = "PATCHSRC"
+
+      try {
+        if (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue) {
+          Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
+        }
+
+        New-PSDrive -Name $driveName -PSProvider FileSystem -Root $share -Credential $cred -ErrorAction Stop | Out-Null
+
+        $file = Get-ChildItem "PATCHSRC:\" -File -ErrorAction Stop |
+          Where-Object { $_.Name -eq "{{ patch_package_name }}" } |
+          Select-Object -First 1
+
+        if (-not $file) {
+          throw "Arquivo não encontrado no share: {{ patch_package_name }}"
+        }
+
+        Copy-Item -Path $file.FullName -Destination $dest -Force -ErrorAction Stop
+
+        [pscustomobject]@{
+          ok   = $true
+          src  = $file.FullName
+          dest = $dest
+        } | ConvertTo-Json -Compress
+      }
+      finally {
+        if (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue) {
+          Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
+        }
+      }
+  delegate_to: "{{ patch_target_host }}"
+  register: _patch_copy
+  changed_when: true
