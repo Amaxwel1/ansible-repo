@@ -1,26 +1,15 @@
-- name: Validar se o patch existe no localhost do job
-  ansible.builtin.stat:
-    path: "{{ patch_package_local_path }}"
-  delegate_to: localhost
-  register: _patch_local_stat
-  run_once: true
-
-- name: Mostrar resultado do stat do patch local
-  ansible.builtin.debug:
-    msg:
-      - "exists={{ _patch_local_stat.stat.exists | default(false) }}"
-      - "path={{ patch_package_local_path }}"
-      - "size={{ _patch_local_stat.stat.size | default(0) }}"
-  run_once: true
+patch_cifs_share_root: "\\ag-ah-vv-fs-001.agorasenior.corp\apps"
+patch_cifs_subpath: "ansible\BD_SQLSERVER"
 
 - name: Copiar patch do share SMB para o host {{ patch_target_host }}
   ansible.windows.win_powershell:
     script: |
-      $share = "{{ patch_cifs_share | regex_replace('^//', '\\\\') | replace('/', '\\') }}"
-      $username = "{{ patch_cifs_username }}"
-      $password = "{{ patch_cifs_password }}"
-      $domain = "{{ patch_cifs_domain | default('') }}"
-      $dest = "{{ windows_patch_stage_dir }}\{{ patch_package_name }}"
+      $shareRoot = "{{ patch_cifs_share_root }}"
+      $subPath   = "{{ patch_cifs_subpath }}"
+      $username  = "{{ patch_cifs_username }}"
+      $password  = "{{ patch_cifs_password }}"
+      $domain    = "{{ patch_cifs_domain | default('') }}"
+      $dest      = "{{ windows_patch_stage_dir }}\{{ patch_package_name }}"
 
       if ([string]::IsNullOrWhiteSpace($domain) -or $username.Contains('\') -or $username.Contains('@')) {
         $fullUser = $username
@@ -39,9 +28,15 @@
           Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
         }
 
-        New-PSDrive -Name $driveName -PSProvider FileSystem -Root $share -Credential $cred -ErrorAction Stop | Out-Null
+        New-PSDrive -Name $driveName -PSProvider FileSystem -Root $shareRoot -Credential $cred -ErrorAction Stop | Out-Null
 
-        $file = Get-ChildItem -Path "${driveName}:\" -File -Recurse -ErrorAction Stop |
+        $sourceFolder = Join-Path "${driveName}:\" $subPath
+
+        if (-not (Test-Path $sourceFolder)) {
+          throw "Subdiretório não encontrado no share: $sourceFolder"
+        }
+
+        $file = Get-ChildItem -Path $sourceFolder -File -Recurse -ErrorAction Stop |
           Where-Object { $_.Name -eq "{{ patch_package_name }}" } |
           Select-Object -First 1
 
@@ -52,10 +47,12 @@
         Copy-Item -Path $file.FullName -Destination $dest -Force -ErrorAction Stop
 
         [pscustomobject]@{
-          ok    = $true
-          src   = $file.FullName
-          dest  = $dest
-          share = $share
+          ok           = $true
+          shareRoot    = $shareRoot
+          subPath      = $subPath
+          sourceFolder = $sourceFolder
+          src          = $file.FullName
+          dest         = $dest
         } | ConvertTo-Json -Compress -Depth 5
       }
       finally {
