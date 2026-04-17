@@ -1,0 +1,205 @@
+- name: Skip discovery when there are no namespaces
+  ansible.builtin.debug:
+    msg: "Nenhum namespace para descobrir (namespaces está vazio)."
+  when: (namespaces | default([])) | length == 0
+
+- name: Stop here when there are no namespaces
+  ansible.builtin.meta: end_play
+  when: (namespaces | default([])) | length == 0
+
+- name: Compose label option for oc (labels are optional)
+  ansible.builtin.set_fact:
+    label_opt: "{{ ('-l ' ~ (label_list | join(','))) if (label_list | default([]) | length > 0) else '' }}"
+
+- name: Init objects dict
+  ansible.builtin.set_fact:
+    ns_objects: {}
+
+- name: Discover DeploymentConfigs in each namespace
+  ansible.builtin.shell: |
+    set -euo pipefail
+    oc -n "{{ item }}" get dc {{ label_opt }} \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+      --kubeconfig "{{ paths.kubeconfig }}" 2>/dev/null || true
+  loop: "{{ namespaces }}"
+  register: _dc_by_ns
+  changed_when: false
+
+- name: Discover Deployments in each namespace
+  ansible.builtin.shell: |
+    set -euo pipefail
+    oc -n "{{ item }}" get deploy {{ label_opt }} \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+      --kubeconfig "{{ paths.kubeconfig }}" 2>/dev/null || true
+  loop: "{{ namespaces }}"
+  register: _dep_by_ns
+  changed_when: false
+
+- name: Build ns_objects with discovered items
+  ansible.builtin.set_fact:
+    ns_objects: >-
+      {{
+        ns_objects
+        | combine({
+            item: {
+              'dc':     (_dc_by_ns.results[idx].stdout_lines   | default([])),
+              'deploy': (_dep_by_ns.results[idx].stdout_lines | default([]))
+            }
+          }, recursive=True)
+      }}
+  loop: "{{ namespaces }}"
+  loop_control:
+    index_var: idx
+
+- name: Ensure ns_objects has keys for include-only namespaces
+  when: (include_map | default({})) | length > 0
+  ansible.builtin.set_fact:
+    ns_objects: "{{ ns_objects | combine({ item.key: ns_objects.get(item.key, {'dc': [], 'deploy': []}) }, recursive=True) }}"
+  loop: "{{ include_map | dict2items }}"
+
+- name: Ensure lista_notfound exists
+  ansible.builtin.set_fact:
+    lista_notfound: "{{ lista_notfound | default([]) }}"
+
+- name: Resolve include kind with bash
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ paths.kubeconfig | default('') }}"
+
+    NS="{{ item.0.key }}"
+    NAME_RAW="{{ item.1 }}"
+    KIND_HINT="${NAME_RAW%%/*}"
+    BASE="${NAME_RAW#*/}"
+    if [ "$KIND_HINT" != "$NAME_RAW" ]; then
+      case "$KIND_HINT" in
+        dc|deploymentconfig)
+          echo "dc|$BASE"
+          exit 0
+          ;;
+        deploy|deployment)
+          echo "deploy|$BASE"
+          exit 0
+          ;;
+      esac
+    fi
+
+    BASE="$NAME_RAW"
+    if oc -n "$NS" get dc "$BASE" --kubeconfig "$KUBECONFIG" -o name >/dev/null 2>&1 \
+       || oc -n "$NS" get deploymentconfig "$BASE" --kubeconfig "$KUBECONFIG" -o name >/dev/null 2>&1 ; then
+      echo "dc|$BASE"
+      exit 0
+    fi
+
+    if oc -n "$NS" get deploy "$BASE" --kubeconfig "$KUBECONFIG" -o name >/dev/null 2>&1 \
+       || oc -n "$NS" get deployment "$BASE" --kubeconfig "$KUBECONFIG" -o name >/dev/null 2>&1 ; then
+      echo "deploy|$BASE"
+      exit 0
+    fi
+
+    echo "miss|$BASE"
+  args:
+    executable: /bin/bash
+  register: _inc_kind
+  changed_when: false
+  failed_when: false
+  loop: "{{ include_map | dict2items | subelements('value') }}"
+  loop_control:
+    label: "{{ item.0.key }}/{{ item.1 }}"
+
+- name: Apply include result to ns_objects / lista_notfound
+  vars:
+    _ns: "{{ item.item.0.key }}"
+    _pipe: "{{ (item.stdout | default('') | trim) }}"
+    _kind: "{{ (_pipe.split('|')[0] if '|' in _pipe else '') }}"
+    _name: "{{ (_pipe.split('|')[1] if '|' in _pipe else item.item.1) }}"
+    _ts: "{{ lookup('pipe','date +%H:%M:%S') }}"
+  ansible.builtin.set_fact:
+    ns_objects: >-
+      {{
+        ns_objects | combine(
+          {
+            _ns: {
+              'dc':     ((ns_objects[_ns].dc     | default([])) + ( [_name] if _kind == 'dc'     else [] )) | unique | list,
+              'deploy': ((ns_objects[_ns].deploy | default([])) + ( [_name] if _kind == 'deploy' else [] )) | unique | list
+            }
+          }, recursive=True
+        )
+      }}
+    lista_notfound: >-
+      {{
+        (lista_notfound | default([]))
+        + (
+            [ {'namespace': _ns, 'objeto': _name, 'hora': _ts, 'mensagem': 'Objeto incluído não encontrado (miss).'} ]
+            if _kind == 'miss' else []
+          )
+      }}
+  loop: "{{ _inc_kind.results }}"
+  loop_control:
+    label: "{{ _ns }}/{{ _name }} -> {{ _kind }}"
+
+- name: Init include/exclude logs
+  ansible.builtin.set_fact:
+    include_applied_log: []
+    exclude_applied_log: []
+
+- name: Log include applied (append)
+  ansible.builtin.set_fact:
+    include_applied_log: >-
+      {{
+        include_applied_log + [ {
+          'namespace': (item.item.0.key),
+          'type': (item.stdout | default('unknown')),
+          'name': (item.item.1)
+        } ]
+      }}
+  loop: "{{ _inc_kind.results | default([]) }}"
+  when:
+    - _inc_kind is defined
+    - (item.stdout | default('')) in ['dc','deploy']
+
+- name: Compute and apply excludes, capturing removed per namespace
+  vars:
+    _ns: "{{ item.key }}"
+    _list: "{{ item.value | default([]) }}"
+    _cur: "{{ ns_objects.get(_ns, {'dc':[],'deploy':[]}) }}"
+    _dc_before: "{{ _cur.dc | default([]) }}"
+    _dp_before: "{{ _cur.deploy | default([]) }}"
+    _dc_after: "{{ _dc_before | difference(_list) }}"
+    _dp_after: "{{ _dp_before | difference(_list) }}"
+    _removed_dc: "{{ _dc_before | difference(_dc_after) }}"
+    _removed_dp: "{{ _dp_before | difference(_dp_after) }}"
+  ansible.builtin.set_fact:
+    ns_objects: "{{ ns_objects | combine({ _ns: {'dc': _dc_after, 'deploy': _dp_after} }, recursive=True) }}"
+    _removed_dc_map: "{{ (_removed_dc_map | default({})) | combine({ _ns: _removed_dc }) }}"
+    _removed_dp_map: "{{ (_removed_dp_map | default({})) | combine({ _ns: _removed_dp }) }}"
+  loop: "{{ (exclude_map | default({})) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Append removed DCs to exclude log
+  ansible.builtin.set_fact:
+    exclude_applied_log: >-
+      {{
+        exclude_applied_log
+        + [ { 'namespace': item.0.key, 'type': 'dc', 'name': item.1 } ]
+      }}
+  loop: "{{ (_removed_dc_map | default({})) | dict2items | subelements('value') }}"
+  loop_control:
+    label: "{{ item.0.key }}/dc/{{ item.1 }}"
+  when: (_removed_dc_map | default({})) | length > 0
+
+- name: Append removed Deploys to exclude log
+  ansible.builtin.set_fact:
+    exclude_applied_log: >-
+      {{
+        exclude_applied_log
+        + [ { 'namespace': item.0.key, 'type': 'deploy', 'name': item.1 } ]
+      }}
+  loop: "{{ (_removed_dp_map | default({})) | dict2items | subelements('value') }}"
+  loop_control:
+    label: "{{ item.0.key }}/deploy/{{ item.1 }}"
+  when: (_removed_dp_map | default({})) | length > 0
+
+- name: Debug – objetos por namespace (descoberta final)
+  ansible.builtin.debug:
+    var: ns_objects

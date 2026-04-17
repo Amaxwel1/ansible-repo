@@ -1,0 +1,11 @@
+---
+- name: DEBUG execution_plan
+  ansible.builtin.debug:
+    var: execution_plan
+
+- name: Execute plan step-by-step (interleaving sync/async)
+  ansible.builtin.include_tasks: 51_execute_step.yml
+  loop: "{{ execution_plan | default([]) }}"
+  loop_control:
+    loop_var: step
+    label: "{{ step.mode }}"

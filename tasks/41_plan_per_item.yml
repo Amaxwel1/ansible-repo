@@ -1,0 +1,53 @@
+---
+- name: Compute discovered/explicit lists
+  ansible.builtin.set_fact:
+    __disc_dc: "{{ (ns_objects.get(nsdef.namespace, {}).dc     | default([])) }}"
+    __disc_dp: "{{ (ns_objects.get(nsdef.namespace, {}).deploy | default([])) }}"
+    __exp_dc: "{{ (nsdef.objects | default([]) | selectattr('type','equalto','dc')     | map(attribute='name') | list) }}"
+    __exp_dp: "{{ (nsdef.objects | default([]) | selectattr('type','equalto','deploy') | map(attribute='name') | list) }}"
+
+- name: Compute rest lists
+  ansible.builtin.set_fact:
+    __rest_dc: "{{ (__disc_dc | difference(__exp_dc)) }}"
+    __rest_dp: "{{ (__disc_dp | difference(__exp_dp)) }}"
+
+- name: Plan step - SYNC explicit objects
+  when: (nsdef.objects | default([]) | length) > 0
+  ansible.builtin.set_fact:
+    execution_plan: "{{ execution_plan + [ { 'mode': 'sync', 'ns_item': nsdef } ] }}"
+
+- name: Plan step - ASYNC full namespace
+  when: (nsdef.objects | default([]) | length) == 0
+  ansible.builtin.set_fact:
+    execution_plan: "{{ execution_plan + [ { 'mode':'async', 'ns_async_map': { (nsdef.namespace): { 'dc': __disc_dc, 'deploy': __disc_dp } } } ] }}"
+
+- name: Accumulate ASYNC (full) into ns_async_all
+  when: (nsdef.objects | default([]) | length) == 0
+  vars:
+    _prev_dc: "{{ ns_async_all.get(nsdef.namespace, {}).get('dc', []) }}"
+    _prev_dp: "{{ ns_async_all.get(nsdef.namespace, {}).get('deploy', []) }}"
+    _new_dc: "{{ (_prev_dc + __disc_dc) | unique }}"
+    _new_dp: "{{ (_prev_dp + __disc_dp) | unique }}"
+  ansible.builtin.set_fact:
+    ns_async_all: "{{ (ns_async_all | default({})) | combine({ (nsdef.namespace): { 'dc': _new_dc, 'deploy': _new_dp } }, recursive=True) }}"
+
+- name: Plan step - ASYNC remainder after SYNC
+  when:
+    - (async_remainder_after_sync | default(true))
+    - (nsdef.objects | default([]) | length) > 0
+    - ( (__rest_dc | length) + (__rest_dp | length) ) > 0
+  ansible.builtin.set_fact:
+    execution_plan: "{{ execution_plan + [ { 'mode':'async', 'ns_async_map': { (nsdef.namespace): { 'dc': __rest_dc, 'deploy': __rest_dp } } } ] }}"
+
+- name: Accumulate ASYNC (remainder) into ns_async_all
+  when:
+    - (async_remainder_after_sync | default(true))
+    - (nsdef.objects | default([]) | length) > 0
+    - ( (__rest_dc | length) + (__rest_dp | length) ) > 0
+  vars:
+    _prev_dc: "{{ ns_async_all.get(nsdef.namespace, {}).get('dc', []) }}"
+    _prev_dp: "{{ ns_async_all.get(nsdef.namespace, {}).get('deploy', []) }}"
+    _new_dc: "{{ (_prev_dc + __rest_dc) | unique }}"
+    _new_dp: "{{ (_prev_dp + __rest_dp) | unique }}"
+  ansible.builtin.set_fact:
+    ns_async_all: "{{ (ns_async_all | default({})) | combine({ (nsdef.namespace): { 'dc': _new_dc, 'deploy': _new_dp } }, recursive=True) }}"

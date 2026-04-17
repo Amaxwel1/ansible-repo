@@ -1,0 +1,134 @@
+- name: Ensure tmpdir exists
+  ansible.builtin.file:
+    path: "{{ tmpdir }}"
+    state: directory
+    mode: "0755"
+
+- name: Define report_file (fixo no tmpdir)
+  ansible.builtin.set_fact:
+    report_file: "{{ tmpdir }}/report.html"
+    _cifs_delegate_host: "{{ cifs_delegate_host | default('192.168.122.34') }}"
+    _delegate_log_file: "{{ tmpdir }}/{{ report_filename_log }}"
+    _delegate_report_file: "{{ tmpdir }}/report.html"
+
+- name: Render HTML report
+  ansible.builtin.template:
+    src: report.html.j2
+    dest: "{{ report_file }}"
+
+- name: Resolve CIFS server/dir
+  ansible.builtin.set_fact:
+    _cifs_server: "{{ send_mail_cifs_address[send_mail_cifs | lower] }}"
+    _cifs_dir: "{{ send_mail_cifs_path }}"
+    _cifs_user: "{{ cifs_user | default(ansible_user | default('')) }}"
+    _cifs_pass: "{{ cifs_password | default(ansible_password | default('')) }}"
+    _cifs_workgroup: "{{ cifs_workgroup | default('agorasenior.corp') }}"
+    _cifs_password_file: "{{ tmpdir }}/.cifs-pass"
+  no_log: true
+
+- name: Fail early if CIFS mapping is missing
+  ansible.builtin.fail:
+    msg: "CIFS não mapeado: send_mail_cifs='{{ send_mail_cifs }}' não existe em send_mail_cifs_address."
+  when: _cifs_server is not defined or (_cifs_server | length) == 0
+
+- name: Ler HTML renderizado localmente
+  ansible.builtin.slurp:
+    src: "{{ report_file }}"
+  register: _report_html_local
+
+- name: Ler log localmente
+  ansible.builtin.slurp:
+    src: "{{ log_file }}"
+  register: _log_local
+  when: (log_file is defined) and (log_file | length > 0)
+
+- name: Ensure tmpdir exists on CIFS delegate
+  ansible.builtin.file:
+    path: "{{ tmpdir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: 192.168.122.34
+
+- name: Criar arquivo para autenticação no CIFS
+  ansible.builtin.copy:
+    dest: "{{ _cifs_password_file }}"
+    content: "{{ _cifs_pass }}"
+    mode: "0600"
+  delegate_to: 192.168.122.34
+  no_log: true
+
+- name: Copiar log para o host delegado
+  ansible.builtin.copy:
+    dest: "{{ _delegate_log_file }}"
+    content: "{{ _log_local.content | b64decode }}"
+    mode: "0644"
+  when:
+    - _log_local is defined
+    - _log_local.content is defined
+  delegate_to: 192.168.122.34
+
+- name: Copiar report HTML para o host delegado (opcional)
+  ansible.builtin.copy:
+    dest: "{{ _delegate_report_file }}"
+    content: "{{ _report_html_local.content | b64decode }}"
+    mode: "0644"
+  delegate_to: 192.168.122.34
+
+- name: Testar acesso ao CIFS
+  ansible.builtin.shell: >
+    smbclient "{{ _cifs_server }}"
+    -U "{{ _cifs_user }}%$(cat {{ _cifs_password_file }})"
+    -W "{{ _cifs_workgroup }}"
+    -c "ls {{ _cifs_dir }}"
+  register: _cifs_probe
+  retries: 5
+  delay: 10
+  until: _cifs_probe.rc == 0
+  changed_when: false
+  delegate_to: 192.168.122.34
+  no_log: true
+
+- name: Enviar log para CIFS (opcional)
+  ansible.builtin.shell: >
+    smbclient "{{ _cifs_server }}"
+    -U "{{ _cifs_user }}%$(cat {{ _cifs_password_file }})"
+    -W "{{ _cifs_workgroup }}"
+    -c 'cd {{ _cifs_dir }} ; put {{ _delegate_log_file }} {{ report_filename_log }}'
+  when: (log_file is defined) and (log_file | length > 0)
+  register: _cifs_put_log
+  changed_when: true
+  delegate_to: 192.168.122.34
+  no_log: true
+
+- name: Remover arquivo de senha temporário (CIFS)
+  ansible.builtin.file:
+    path: "{{ _cifs_password_file }}"
+    state: absent
+  delegate_to: 192.168.122.34
+
+- name: Remover staging temporário do log no host delegado
+  ansible.builtin.file:
+    path: "{{ _delegate_log_file }}"
+    state: absent
+  when: (log_file is defined) and (log_file | length > 0)
+  delegate_to: 192.168.122.34
+
+- name: Remover staging temporário do HTML no host delegado
+  ansible.builtin.file:
+    path: "{{ _delegate_report_file }}"
+    state: absent
+  delegate_to: 192.168.122.34
+
+- name: Compat var for email play
+  ansible.builtin.set_fact:
+    tmp_path_local: "{{ tmpdir }}"
+
+- name: set_stats para play de e-mail (corpo HTML + info do CIFS)
+  ansible.builtin.set_stats:
+    data:
+      send_mail_subject: "Ansible-Report - Job #{{ awx_job_id | default(job_id) }} - {{ awx_job_template_name | default('OCP Restart') }}"
+      send_mail_attachments:
+        - "{{ report_filename_log }}"
+      send_mail_cifs: "{{ send_mail_cifs }}"
+      send_mail_cifs_path: "{{ send_mail_cifs_path }}"
+      send_mail_body: "{{ _report_html_local.content | b64decode }}"

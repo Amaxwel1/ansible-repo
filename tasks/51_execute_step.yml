@@ -1,0 +1,50 @@
+---
+# SYNC
+- name: Run SYNC step
+  when: step.mode == 'sync'
+  ansible.builtin.include_tasks: execute_ns.yml
+  vars:
+    ns_item: "{{ step.ns_item }}"
+
+# ASYNC
+
+- name: Normalize async settings (this step)
+  when: step.mode == 'async'
+  ansible.builtin.set_fact:
+    _async_batch: "{{ [ (async_batch | default(20) | int), 1 ] | max }}"
+    _async_delay: "{{ [ (async_poll_delay | default(15) | int), 1 ] | max }}"
+    _async_objects_per_namespace: "{{ [ (async_objects_per_namespace | default(1) | int), 1 ] | max }}"
+
+- name: Compute async polling retries (this step)
+  when: step.mode == 'async'
+  ansible.builtin.set_fact:
+    _async_retries: "{{ [ ((max_async_seconds | default(18000) | int) // (_async_delay | int)), 1 ] | max }}"
+
+- name: Build async namespace list (this step)
+  when: step.mode == 'async'
+  ansible.builtin.set_fact:
+    _async_namespaces: "{{ (step.ns_async_map | default({})) | dict2items | map(attribute='key') | list }}"
+
+- name: Skip async when empty (this step)
+  when:
+    - step.mode == 'async'
+    - _async_namespaces | length == 0
+  ansible.builtin.meta: noop
+
+- name: Compute batches (this step)
+  when:
+    - step.mode == 'async'
+    - _async_namespaces | length > 0
+  ansible.builtin.set_fact:
+    _batches: "{{ (_async_namespaces | batch(_async_batch)) | list }}"
+
+- name: Run namespaces in batches (this step)
+  when:
+    - step.mode == 'async'
+    - _async_namespaces | length > 0
+  ansible.builtin.include_tasks: run_async_batch.yml
+  vars:
+    ns_async: "{{ step.ns_async_map }}"
+  loop: "{{ _batches }}"
+  loop_control:
+    loop_var: batch_list

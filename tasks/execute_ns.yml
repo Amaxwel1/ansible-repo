@@ -1,0 +1,97 @@
+---
+- name: Set current namespace and explicit objects (if any)
+  ansible.builtin.set_fact:
+    ns: "{{ ns_item.namespace }}"
+    _explicit_objs: "{{ ns_item.objects | default([]) }}"
+
+- name: Use explicit objects list when provided
+  when: (_explicit_objs | length) > 0
+  ansible.builtin.set_fact:
+    _ns_objects_list: "{{ _explicit_objs }}"
+
+- name: Init discovered list for namespace
+  when: (_explicit_objs | length) == 0
+  ansible.builtin.set_fact:
+    _ns_objects_list: []
+
+- name: Append discovered DC (as {type,name})
+  when: (_explicit_objs | length) == 0
+  ansible.builtin.set_fact:
+    _ns_objects_list: "{{ _ns_objects_list + [ { 'type': 'dc', 'name': item } ] }}"
+  loop: "{{ ns_objects.get(ns, {}).get('dc', []) | default([]) }}"
+
+- name: Append discovered Deploy (as {type,name})
+  when: (_explicit_objs | length) == 0
+  ansible.builtin.set_fact:
+    _ns_objects_list: "{{ _ns_objects_list + [ { 'type': 'deploy', 'name': item } ] }}"
+  loop: "{{ ns_objects.get(ns, {}).get('deploy', []) | default([]) }}"
+
+- name: Mark ns start
+  ansible.builtin.command: date +"%d/%m/%Y %H:%M:%S"
+  register: _ns_start_h
+  changed_when: false
+
+- name: Mark ns start (epoch)
+  ansible.builtin.command: date +%s
+  register: _ns_start_epoch
+  changed_when: false
+
+- name: Prepare sync skipfile path
+  ansible.builtin.set_fact:
+    _skip_sync: "{{ skipfile_sync | default(tmpdir ~ '/skip-sync.csv') }}"
+
+- name: Ensure tmpdir for skipfile exists
+  ansible.builtin.file:
+    path: "{{ _skip_sync | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Log start sync ns
+  ansible.builtin.debug:
+    msg: "SYNC >> Namespace {{ ns }} ({{ _ns_objects_list | length }} objeto(s))"
+
+- name: Process ordered objects (dc/deploy)
+  ansible.builtin.include_tasks: execute_one.yml
+  loop: "{{ _ns_objects_list }}"
+  loop_control:
+    loop_var: obj
+  vars:
+    run_mode: "sync"
+
+- name: Mark ns end (human)
+  ansible.builtin.command: date +"%d/%m/%Y %H:%M:%S"
+  register: _ns_end_h
+  changed_when: false
+
+- name: Mark ns end (epoch)
+  ansible.builtin.command: date +%s
+  register: _ns_end_epoch
+  changed_when: false
+
+- name: Compute ns duration seconds
+  ansible.builtin.set_fact:
+    _ns_dur_sec: "{{ (_ns_end_epoch.stdout | int) - (_ns_start_epoch.stdout | int) }}"
+
+- name: Format ns duration (HH:MM:SS)
+  ansible.builtin.set_fact:
+    _ns_dur_hhmmss: >-
+      {{
+        "%02d:%02d:%02d" % (
+          (((_ns_dur_sec | int) // 3600) % 100),
+          (((_ns_dur_sec | int) % 3600) // 60),
+          ((_ns_dur_sec | int) % 60)
+        )
+      }}
+
+- name: Append ns timing (sync)
+  ansible.builtin.set_fact:
+    ns_timings: >-
+      {{
+        (ns_timings | default([])) + [{
+          'namespace': ns,
+          'mode': 'sync',
+          'start': _ns_start_h.stdout,
+          'end': _ns_end_h.stdout,
+          'duration': _ns_dur_hhmmss
+        }]
+      }}

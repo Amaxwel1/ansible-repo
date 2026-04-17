@@ -1,0 +1,9 @@
+---
+- import_tasks: 00_prep.yml
+- import_tasks: 10_login.yml
+- import_tasks: 20_discover_namespaces.yml
+- import_tasks: 30_discover_objects.yml
+- import_tasks: 40_build_execution_sets.yml
+- import_tasks: 50_execute.yml
+- import_tasks: 60_collect_metrics.yml
+- import_tasks: 70_report.yml

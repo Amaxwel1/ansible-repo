@@ -1,0 +1,82 @@
+---
+- name: Normalize aplication_scope (string ou lista)
+  ansible.builtin.set_fact:
+    aplication_scope_norm: >-
+      {{
+        (aplication_scope is string) | ternary([aplication_scope], aplication_scope | default([]))
+      }}
+
+- name: Build apps_in_order from grupos (ALL ou subset)
+  ansible.builtin.set_fact:
+    apps_in_order: >-
+      {{
+        ('ALL' in aplication_scope_norm)
+          | ternary(aplicacoes | map(attribute='grupo') | list,
+                    aplication_scope_norm)
+      }}
+
+- name: Collect namespaces prefixes
+  ansible.builtin.set_fact:
+    namespaces_prefix_toquery: >-
+      {{
+        aplicacoes
+        | selectattr('grupo','in', apps_in_order)
+        | map(attribute='namespaces_prefix')
+        | list | flatten
+      }}
+
+- name: Get namespaces for each prefix from cluster
+  when: namespaces_prefix_toquery | length > 0
+  ansible.builtin.shell: |
+    set -euo pipefail
+    prefix="{{ item }}"
+    oc get ns --no-headers -o custom-columns=NAME:.metadata.name --kubeconfig "{{ paths.kubeconfig }}" \
+      | grep -E "^${prefix}" || true
+  loop: "{{ namespaces_prefix_toquery }}"
+  register: ns_grep
+  changed_when: false
+
+- name: Compose namespaces list (vazio se nada encontrado)
+  ansible.builtin.set_fact:
+    namespaces_raw: >-
+      {{
+        (ns_grep is defined)
+          | ternary(ns_grep.results | map(attribute='stdout_lines') | list | flatten | unique, [])
+      }}
+
+- name: Normalize only_these_namespaces (string ou lista)
+  ansible.builtin.set_fact:
+    only_these_namespaces_norm: >-
+      {{
+        (only_these_namespaces is string)
+          | ternary(
+              (only_these_namespaces | default('') | trim | length > 0)
+                | ternary( (only_these_namespaces | trim).split(',') | map('trim') | list, [] ),
+              (only_these_namespaces | default([]))
+            )
+      }}
+
+- name: Build exclude_ns_pattern_safe
+  ansible.builtin.set_fact:
+    exclude_ns_pattern_safe: >-
+      {{
+        (exclude_namespaces | default('') | trim | length > 0)
+          | ternary( (exclude_namespaces | trim).split(',') | map('trim') | join('|'), '' )
+      }}
+
+- name: Apply NS whitelist/blacklist (sempre retorna LIST)
+  ansible.builtin.set_fact:
+    namespaces: >-
+      {{
+        only_these_namespaces_norm
+        if (only_these_namespaces_norm | length > 0)
+        else (
+          (namespaces_raw | reject('match', exclude_ns_pattern_safe) | list)
+          if (exclude_ns_pattern_safe | length > 0)
+          else (namespaces_raw | list)
+        )
+      }}
+
+- name: Debug – namespaces finais
+  ansible.builtin.debug:
+    var: namespaces
