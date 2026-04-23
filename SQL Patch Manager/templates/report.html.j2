@@ -373,7 +373,7 @@
   {% for item in visible_actions %}
     {% set rc = item.rc | default('') %}
     {% set row_class = 'ok' %}
-    {% if item.step in ['wait_ag_healthy', 'wait_single_instance_ready'] %}
+    {% if item.step in ['wait_ag_healthy', 'wait_single_instance_ready', 'wait_single_instance_ready_after_reboot', 'wait_ag_instance_ready_after_reboot'] %}
       {% set row_class = 'ok' %}
     {% elif rc != '' and (rc | int) not in [0, 3010] %}
       {% set row_class = 'bad' %}
@@ -391,6 +391,8 @@
       {% set step_label = 'Reboot após validação final' %}
     {% elif item.step == 'wait_single_instance_ready_after_reboot' %}
       {% set step_label = 'Validação da instância após reboot' %}
+    {% elif item.step == 'wait_ag_instance_ready_after_reboot' %}
+      {% set step_label = 'Validação da instância do AG após reboot' %}
     {% else %}
       {% set step_label = item.step %}
     {% endif %}
@@ -404,6 +406,10 @@
           <span class="mono">AG saudável após a etapa anterior.</span>
         {% elif item.step == 'wait_single_instance_ready' %}
           <span class="mono">Instância pronta para pós-check.</span>
+        {% elif item.step == 'wait_single_instance_ready_after_reboot' %}
+          <span class="mono">Instância respondeu normalmente após reboot.</span>
+        {% elif item.step == 'wait_ag_instance_ready_after_reboot' %}
+          <span class="mono">Instância SQL do host rebootado respondeu normalmente antes da redescoberta do AG.</span>
         {% elif item.message is defined and item.message %}
           <span class="mono">{{ item.message }}</span>
         {% elif item.stdout is defined and item.stdout %}
