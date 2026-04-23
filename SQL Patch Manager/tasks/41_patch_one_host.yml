@@ -117,12 +117,36 @@
 - name: Executar patch no host {{ patch_target_host }}
   ansible.windows.win_powershell:
     script: |
-      $patch = '{{ windows_patch_stage_dir }}\{{ patch_package_name }}'
+      $patch = '{{ windows_patch_stage_dir }}\{{ patch_package_name }}.exe'
       $args = '{{ patch_installer_args_effective }}'
-      $timeoutSeconds = {{ patch_execution_timeout_seconds | default(14400) }}
+      $timeoutSeconds = {{ patch_execution_timeout_seconds | default(5200) }}
       $pollSeconds = {{ patch_execution_poll_interval_seconds | default(30) }}
       $logRoot = '{{ sql_setup_bootstrap_log_root | default("C:\Program Files\Microsoft SQL Server\160\Setup Bootstrap\Log") }}'
       $killOnTimeout = [System.Convert]::ToBoolean('{{ patch_kill_on_timeout | default(false) | bool | string }}')
+
+      function Get-MatchValue {
+        param(
+          [string]$Text,
+          [string]$Pattern
+        )
+
+        if ([string]::IsNullOrWhiteSpace($Text)) {
+          return ""
+        }
+
+        $m = [regex]::Match(
+          $Text,
+          $Pattern,
+          [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
+          [System.Text.RegularExpressions.RegexOptions]::Multiline
+        )
+
+        if ($m.Success -and $m.Groups.Count -gt 1) {
+          return $m.Groups[1].Value.Trim()
+        }
+
+        return ""
+      }
 
       function Get-LatestSqlSetupLogInfo {
         param(
@@ -130,11 +154,19 @@
         )
 
         $result = [ordered]@{
-          RunDir      = ""
-          SummaryPath = ""
-          DetailPath  = ""
-          SummaryTail = ""
-          DetailTail  = ""
+          RunDir               = ""
+          SummaryPath          = ""
+          DetailPath           = ""
+          SummaryFinalResult   = ""
+          SummaryExitCode      = ""
+          SummaryFacilityCode  = ""
+          SummaryErrorCode     = ""
+          SummaryExitMessage   = ""
+          SummaryStartTime     = ""
+          SummaryEndTime       = ""
+          SummaryRequestedAction = ""
+          FailureCategory      = ""
+          ImportantDetail      = ""
         }
 
         if (-not (Test-Path $Root)) {
@@ -157,7 +189,16 @@
 
         if ($summary) {
           $result.SummaryPath = $summary.FullName
-          $result.SummaryTail = ((Get-Content -Path $summary.FullName -Tail 40 -ErrorAction SilentlyContinue) -join "`n")
+          $summaryText = Get-Content -Path $summary.FullName -Raw -ErrorAction SilentlyContinue
+
+          $result.SummaryFinalResult = Get-MatchValue -Text $summaryText -Pattern 'Final result:\s*(.+)'
+          $result.SummaryExitCode = Get-MatchValue -Text $summaryText -Pattern 'Exit code \(Decimal\):\s*(.+)'
+          $result.SummaryFacilityCode = Get-MatchValue -Text $summaryText -Pattern 'Exit facility code:\s*(.+)'
+          $result.SummaryErrorCode = Get-MatchValue -Text $summaryText -Pattern 'Exit error code:\s*(.+)'
+          $result.SummaryExitMessage = Get-MatchValue -Text $summaryText -Pattern 'Exit message:\s*(.+)'
+          $result.SummaryStartTime = Get-MatchValue -Text $summaryText -Pattern 'Start time:\s*(.+)'
+          $result.SummaryEndTime = Get-MatchValue -Text $summaryText -Pattern 'End time:\s*(.+)'
+          $result.SummaryRequestedAction = Get-MatchValue -Text $summaryText -Pattern 'Requested action:\s*(.+)'
         }
 
         $detail = Get-ChildItem -Path $runDir.FullName -Filter 'Detail.txt' -Recurse -File -ErrorAction SilentlyContinue |
@@ -166,7 +207,29 @@
 
         if ($detail) {
           $result.DetailPath = $detail.FullName
-          $result.DetailTail = ((Get-Content -Path $detail.FullName -Tail 40 -ErrorAction SilentlyContinue) -join "`n")
+          $detailLines = Get-Content -Path $detail.FullName -ErrorAction SilentlyContinue
+
+          $failureCategoryLine = $detailLines |
+            Where-Object { $_ -match 'SQL\.Setup\.FailureCategory\s*=' } |
+            Select-Object -Last 1
+
+          if ($failureCategoryLine) {
+            $result.FailureCategory = (($failureCategoryLine -split '=', 2)[1]).Trim()
+          }
+
+          $importantLines = $detailLines |
+            Where-Object {
+              $_ -match 'SQL\.Setup\.FailureCategory' -or
+              $_ -match 'Error result:' -or
+              $_ -match 'Result facility code:' -or
+              $_ -match 'Result error code:' -or
+              $_ -match 'reboot' -or
+              $_ -match 'restart' -or
+              $_ -match 'RuleViolationFailure'
+            } |
+            Select-Object -Unique
+
+          $result.ImportantDetail = (($importantLines | Select-Object -Last 12) -join "`n").Trim()
         }
 
         return [pscustomobject]$result
@@ -202,17 +265,26 @@
 
           throw (
             [pscustomobject]@{
-              Timeout     = $true
-              Pid         = $proc.Id
-              Patch       = $patch
-              Args        = $args
-              StartedAt   = $startedAt.ToString("s")
-              DurationSec = [int]((Get-Date) - $startedAt).TotalSeconds
-              LogRunDir   = $logInfo.RunDir
-              SummaryPath = $logInfo.SummaryPath
-              DetailPath  = $logInfo.DetailPath
-              SummaryTail = $logInfo.SummaryTail
-              DetailTail  = $logInfo.DetailTail
+              Timeout             = $true
+              ExitCode            = -999999
+              Pid                 = $proc.Id
+              Patch               = $patch
+              Args                = $args
+              StartedAt           = $startedAt.ToString("s")
+              FinishedAt          = ""
+              DurationSec         = [int]((Get-Date) - $startedAt).TotalSeconds
+              LogRunDir           = $logInfo.RunDir
+              SummaryPath         = $logInfo.SummaryPath
+              DetailPath          = $logInfo.DetailPath
+              FinalResult         = $logInfo.SummaryFinalResult
+              ExitFacilityCode    = $logInfo.SummaryFacilityCode
+              ExitErrorCode       = $logInfo.SummaryErrorCode
+              ExitMessage         = $logInfo.SummaryExitMessage
+              SummaryStartTime    = $logInfo.SummaryStartTime
+              SummaryEndTime      = $logInfo.SummaryEndTime
+              RequestedAction     = $logInfo.SummaryRequestedAction
+              FailureCategory     = $logInfo.FailureCategory
+              ImportantDetail     = $logInfo.ImportantDetail
             } | ConvertTo-Json -Compress -Depth 6
           )
         }
@@ -223,22 +295,31 @@
       $logInfo = Get-LatestSqlSetupLogInfo -Root $logRoot
 
       [pscustomobject]@{
-        ExitCode    = $proc.ExitCode
-        Pid         = $proc.Id
-        Patch       = $patch
-        Args        = $args
-        StartedAt   = $startedAt.ToString("s")
-        FinishedAt  = $finishedAt.ToString("s")
-        DurationSec = [int]($finishedAt - $startedAt).TotalSeconds
-        LogRunDir   = $logInfo.RunDir
-        SummaryPath = $logInfo.SummaryPath
-        DetailPath  = $logInfo.DetailPath
-        SummaryTail = $logInfo.SummaryTail
-        DetailTail  = $logInfo.DetailTail
+        Timeout             = $false
+        ExitCode            = $proc.ExitCode
+        Pid                 = $proc.Id
+        Patch               = $patch
+        Args                = $args
+        StartedAt           = $startedAt.ToString("s")
+        FinishedAt          = $finishedAt.ToString("s")
+        DurationSec         = [int]($finishedAt - $startedAt).TotalSeconds
+        LogRunDir           = $logInfo.RunDir
+        SummaryPath         = $logInfo.SummaryPath
+        DetailPath          = $logInfo.DetailPath
+        FinalResult         = $logInfo.SummaryFinalResult
+        ExitFacilityCode    = $logInfo.SummaryFacilityCode
+        ExitErrorCode       = $logInfo.SummaryErrorCode
+        ExitMessage         = $logInfo.SummaryExitMessage
+        SummaryStartTime    = $logInfo.SummaryStartTime
+        SummaryEndTime      = $logInfo.SummaryEndTime
+        RequestedAction     = $logInfo.SummaryRequestedAction
+        FailureCategory     = $logInfo.FailureCategory
+        ImportantDetail     = $logInfo.ImportantDetail
       } | ConvertTo-Json -Compress -Depth 6
   delegate_to: "{{ patch_target_host }}"
   register: _patch_exec
   changed_when: true
+  become_method: enable
   failed_when: >-
     (
       (
@@ -256,6 +337,25 @@
       }}
   run_once: true
 
+- name: Definir mensagem amigável do patch
+  ansible.builtin.set_fact:
+    _patch_exec_human_message: >-
+      {{
+        (
+          'Patch bloqueado: reboot pendente antes da instalação.'
+          if (_patch_exec_json.ExitErrorCode | default('') | string) == '3010'
+          else
+          'Patch aplicado na instância '
+          ~ patch_instance_name_effective
+          ~ ' com exit code '
+          ~ ((_patch_exec_json.ExitCode | default(1) | int) | string)
+          ~ ' em '
+          ~ ((_patch_exec_json.DurationSec | default(0) | int) | string)
+          ~ ' segundos.'
+        )
+      }}
+  run_once: true
+
 - name: Registrar ação de patch
   ansible.builtin.set_fact:
     patch_report: >-
@@ -270,27 +370,14 @@
             ),
             'step': 'patch',
             'rc': (_patch_exec_json.ExitCode | default(1) | int),
-            'message': (
-              'Patch aplicado em todas as instâncias detectadas do host com exit code '
-              ~ ((_patch_exec_json.ExitCode | default(1) | int) | string)
-              ~ ' em '
-              ~ ((_patch_exec_json.DurationSec | default(0) | int) | string)
-              ~ ' segundos. Instâncias: '
-              ~ ((patch_target_instance_names | default([])) | join(', '))
-            )
-            if patch_mode_effective == 'allinstances'
-            else
-            (
-              'Patch aplicado na instância '
-              ~ patch_instance_name_effective
-              ~ ' com exit code '
-              ~ ((_patch_exec_json.ExitCode | default(1) | int) | string)
-              ~ ' em '
-              ~ ((_patch_exec_json.DurationSec | default(0) | int) | string)
-              ~ ' segundos.'
-            ),
+            'message': _patch_exec_human_message,
             'summary_path': (_patch_exec_json.SummaryPath | default('')),
-            'detail_path': (_patch_exec_json.DetailPath | default(''))
+            'detail_path': (_patch_exec_json.DetailPath | default('')),
+            'final_result': (_patch_exec_json.FinalResult | default('')),
+            'exit_error_code': (_patch_exec_json.ExitErrorCode | default('')),
+            'exit_message': (_patch_exec_json.ExitMessage | default('')),
+            'failure_category': (_patch_exec_json.FailureCategory | default('')),
+            'important_detail': (_patch_exec_json.ImportantDetail | default(''))
           } ]
         }, recursive=True)
       }}
