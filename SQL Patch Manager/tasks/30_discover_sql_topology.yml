@@ -1,3 +1,20 @@
+- name: Registrar PRIMARY resolvida do AG para delegação WinRM
+  ansible.builtin.add_host:
+    name: "{{ ag_primary_host }}"
+    groups: sql_patch_targets
+    ansible_host: "{{ hostvars[ag_primary_host].ansible_host | default(ag_primary_host) }}"
+    ansible_user: "{{ ansible_user }}"
+    ansible_password: "{{ ansible_password }}"
+    ansible_connection: winrm
+    ansible_port: "{{ winrm_port }}"
+    ansible_winrm_transport: "{{ winrm_transport }}"
+    ansible_winrm_scheme: "{{ winrm_scheme }}"
+    ansible_winrm_server_cert_validation: "{{ winrm_server_cert_validation }}"
+  when:
+    - execution_topology == 'ag_cluster'
+    - ag_primary_host is defined
+    - ag_primary_host | trim | length > 0
+
 ---
 - name: Inicializar estruturas de discovery
   ansible.builtin.set_fact:
