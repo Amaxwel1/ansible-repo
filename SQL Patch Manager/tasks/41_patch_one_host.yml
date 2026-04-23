@@ -77,6 +77,43 @@
   register: _patch_copy
   changed_when: true
 
+- name: Desbloquear patch no host {{ patch_target_host }}
+  ansible.windows.win_powershell:
+    script: |
+      $patch = "{{ windows_patch_stage_dir }}\{{ patch_package_name }}"
+
+      if (-not (Test-Path $patch)) {
+        throw "Patch não encontrado para desbloqueio: $patch"
+      }
+
+      Unblock-File -Path $patch -ErrorAction SilentlyContinue
+      Remove-Item -Path $patch -Stream Zone.Identifier -ErrorAction SilentlyContinue
+      Remove-Item -Path $patch -Stream SmartScreen -ErrorAction SilentlyContinue
+
+      Get-Item -Path $patch -Stream * -ErrorAction SilentlyContinue |
+        Select-Object Stream, Length |
+        ConvertTo-Json -Compress
+  delegate_to: "{{ patch_target_host }}"
+  register: _patch_unblock
+  changed_when: true
+
+- name: Validar streams do patch após desbloqueio
+  ansible.windows.win_powershell:
+    script: |
+      $patch = "{{ windows_patch_stage_dir }}\{{ patch_package_name }}"
+
+      if (-not (Test-Path $patch)) {
+        throw "Patch não encontrado para validação de stream: $patch"
+      }
+
+      $streams = Get-Item -Path $patch -Stream * -ErrorAction SilentlyContinue |
+        Select-Object Stream, Length
+
+      @($streams) | ConvertTo-Json -Compress -Depth 4
+  delegate_to: "{{ patch_target_host }}"
+  register: _patch_streams
+  changed_when: false
+
 - name: Executar patch no host {{ patch_target_host }}
   ansible.windows.win_powershell:
     script: |
