@@ -3,7 +3,7 @@
   ansible.windows.win_powershell:
     script: |
       Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
-      $serverInstance = "{{ item.connection_target }}"
+      $serverInstance = "{{ single_postcheck_target.connection_target }}"
       $row = Invoke-Sqlcmd `
         -ServerInstance $serverInstance `
         -TrustServerCertificate `
@@ -12,8 +12,11 @@
         -ErrorAction Stop | Select-Object -First 1
 
       ([string]$row.SqlVersion).Trim()
-  delegate_to: "{{ item.host }}"
+  delegate_to: "{{ single_postcheck_target.host }}"
   loop: "{{ single_instance_targets }}"
+  loop_control:
+    loop_var: single_postcheck_target
+    label: "{{ single_postcheck_target.host }} / {{ single_postcheck_target.instance_name }}"
   register: _sql_version_after_single
   changed_when: false
   run_once: true
@@ -30,14 +33,19 @@
     single_postcheck_rows: >-
       {{
         single_postcheck_rows + [ {
-          'host': item.item.host,
-          'instance_name': item.item.instance_name,
-          'connection_target': item.item.connection_target,
-          'version_after': (item.output | default([]) | join('') | trim),
-          'version_after_rc': (0 if not (item.failed | default(false)) and ((item.output | default([]) | join('') | trim | length) > 0) else 1)
+          'host': _single_postcheck_target.host,
+          'instance_name': _single_postcheck_target.instance_name,
+          'connection_target': _single_postcheck_target.connection_target,
+          'version_after': (single_postcheck_result.output | default([]) | join('') | trim),
+          'version_after_rc': (0 if not (single_postcheck_result.failed | default(false)) and ((single_postcheck_result.output | default([]) | join('') | trim | length) > 0) else 1)
         } ]
       }}
+  vars:
+    _single_postcheck_target: "{{ single_postcheck_result.single_postcheck_target }}"
   loop: "{{ _sql_version_after_single.results | default([]) }}"
+  loop_control:
+    loop_var: single_postcheck_result
+    label: "{{ single_postcheck_result.single_postcheck_target.host }} / {{ single_postcheck_result.single_postcheck_target.instance_name }}"
   when: execution_topology == 'single'
   run_once: true
 
@@ -45,7 +53,7 @@
   ansible.windows.win_powershell:
     script: |
       Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
-      $serverInstance = "{{ item.ServerName }}"
+      $serverInstance = "{{ ag_postcheck_row.ServerName }}"
       $row = Invoke-Sqlcmd `
         -ServerInstance $serverInstance `
         -TrustServerCertificate `
@@ -54,10 +62,11 @@
         -ErrorAction Stop | Select-Object -First 1
 
       ([string]$row.SqlVersion).Trim()
-  delegate_to: "{{ item.InventoryHost }}"
+  delegate_to: "{{ ag_postcheck_row.InventoryHost }}"
   loop: "{{ ag_discovery.topology_rows }}"
   loop_control:
-    label: "{{ item.InventoryHost }}"
+    loop_var: ag_postcheck_row
+    label: "{{ ag_postcheck_row.InventoryHost }}"
   register: _sql_version_after_ag
   changed_when: false
   run_once: true
@@ -74,14 +83,19 @@
     sql_postcheck_by_host: >-
       {{
         sql_postcheck_by_host | combine({
-          item.item.InventoryHost: {
-            'server_name': item.item.ServerName,
-            'version_after': (item.output | default([]) | join('') | trim),
-            'version_after_rc': (0 if not (item.failed | default(false)) and ((item.output | default([]) | join('') | trim | length) > 0) else 1)
+          _ag_postcheck_row.InventoryHost: {
+            'server_name': _ag_postcheck_row.ServerName,
+            'version_after': (ag_postcheck_result.output | default([]) | join('') | trim),
+            'version_after_rc': (0 if not (ag_postcheck_result.failed | default(false)) and ((ag_postcheck_result.output | default([]) | join('') | trim | length) > 0) else 1)
           }
         }, recursive=True)
       }}
+  vars:
+    _ag_postcheck_row: "{{ ag_postcheck_result.ag_postcheck_row }}"
   loop: "{{ _sql_version_after_ag.results | default([]) }}"
+  loop_control:
+    loop_var: ag_postcheck_result
+    label: "{{ ag_postcheck_result.ag_postcheck_row.InventoryHost }}"
   when: execution_topology == 'ag_cluster'
   run_once: true
 
