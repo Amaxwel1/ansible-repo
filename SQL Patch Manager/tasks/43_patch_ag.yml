@@ -8,25 +8,14 @@
   run_once: true
 
 - name: Aplicar patch nas réplicas pré-failover
-  ansible.builtin.include_tasks: 41_patch_one_host.yml
+  ansible.builtin.include_tasks: 43_patch_ag_one_pre_failover_host.yml
   vars:
-    patch_target_host: "{{ item }}"
+    ag_patch_target_host: "{{ ag_pre_failover_host }}"
   loop: "{{ ag_pre_failover_patch_hosts }}"
+  loop_control:
+    loop_var: ag_pre_failover_host
+    label: "{{ ag_pre_failover_host }}"
   when: ag_pre_failover_patch_hosts | length > 0
-  run_once: true
-
-- name: Refazer discovery após patch das pré-failover
-  ansible.builtin.include_tasks: 30_discover_sql_topology.yml
-  when:
-    - sql_require_healthy_after_each_step | bool
-    - ag_pre_failover_patch_hosts | length > 0
-  run_once: true
-
-- name: Aguardar AG saudável após patch das pré-failover
-  ansible.builtin.include_tasks: 44_wait_ag_healthy.yml
-  when:
-    - sql_require_healthy_after_each_step | bool
-    - ag_pre_failover_patch_hosts | length > 0
   run_once: true
 
 - name: Executar failover quando a PRIMARY original estiver no escopo
@@ -67,7 +56,16 @@
     - ag_failover_enabled | bool
   run_once: true
 
-- name: Aplicar patch na PRIMARY original (agora SECONDARY)
+- name: Reboot antes do patch da PRIMARY original agora como SECONDARY
+  ansible.builtin.include_tasks: 39_reboot_host_before_patch.yml
+  vars:
+    patch_pre_reboot_target_host: "{{ ag_original_primary_host }}"
+  when:
+    - ag_original_primary_in_scope | bool
+    - patch_reboot_before_patch | default(false) | bool
+  run_once: true
+
+- name: Aplicar patch na PRIMARY original agora como SECONDARY
   ansible.builtin.include_tasks: 41_patch_one_host.yml
   vars:
     patch_target_host: "{{ ag_original_primary_host }}"
@@ -120,7 +118,7 @@
         patch_report | combine({
           'actions': patch_report.actions + [ {
             'step': 'ag_patch_summary',
-            'message': 'Fluxo AG executado com ordem real: secondaries selecionadas -> failover -> primary original -> espera AG saudável.'
+            'message': 'Fluxo AG executado com ordem real: reboot/patch em secondaries selecionadas -> failover -> reboot/patch da primary original -> espera AG saudável.'
           } ]
         }, recursive=True)
       }}
