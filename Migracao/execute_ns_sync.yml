@@ -1,0 +1,145 @@
+- name: Namespace {{ objeto.namespace }} Scale Down/Up Sequencial
+  ansible.builtin.shell: |
+    {% set condition_towait = objeto.condition if objeto.condition != '' else condicao_progresso %}
+    {% set timeout_condition_towait = pod_phases_timeout[condition_towait].seconds if condition_towait in pod_phases_timeout.keys() else pod_conditions_timeout[condition_towait].seconds %}
+    {% set behavior_timedout_condition_towait = pod_conditions_timeout[condition_towait].action if condition_towait in pod_conditions_timeout.keys() else pod_phases_timeout[condition_towait].action %}
+    set -u
+
+    start_time=$(date '+%d/%m/%Y %H:%M:%S')
+    namespace="{{ objeto.namespace }}"
+    kube_origem="{{ tmp_path_local }}/ocp_origem"
+    kube_destino="{{ tmp_path_local }}/ocp_destino"
+
+    scale_down_default="{{ perform_scale_down }}"
+    scale_down_dds_cfg="{{ baixar_dds }}"
+    dds_pattern='^({{ dds_namespaces_pattern }})'
+
+    wait_for_scale_down() {
+      local namespace="$1"
+      local dc="$2"
+      local timeout_seconds="$3"
+      local start_ts
+      local output
+
+      start_ts=$(date +%s)
+      while true; do
+        output=$(oc get pods -n "$namespace" --selector=app="$dc" --field-selector=status.phase=Running --no-headers -o custom-columns=NAME:.metadata.name --kubeconfig="$kube_origem" 2>/dev/null || true)
+        [ -z "$output" ] && return 0
+
+        if [ $(( $(date +%s) - start_ts )) -ge "$timeout_seconds" ]; then
+          return 124
+        fi
+
+        sleep {{ wait_poll_interval }}
+      done
+    }
+
+    wait_for_progress() {
+      local namespace="$1"
+      local dc="$2"
+      local condition="$3"
+      local timeout_seconds="$4"
+      local start_ts
+      local pod_json
+
+      start_ts=$(date +%s)
+      while true; do
+        pod_json=$(oc get pods -n "$namespace" --selector=app="$dc" -o json --kubeconfig="$kube_destino" 2>/dev/null || true)
+
+        if echo "$pod_json" | jq -e --arg cond "$condition" '
+          if ($cond == "Pending") then
+            any(.items[]?; .status.phase == "Pending" or .status.phase == "Running")
+          elif ($cond == "Running" or $cond == "Succeeded") then
+            any(.items[]?; .status.phase == $cond)
+          else
+            any(.items[]?;
+              (.status.phase == "Pending" or .status.phase == "Running" or .status.phase == "Succeeded")
+              and any(.status.conditions[]?; .type == $cond and .status == "True")
+            )
+          end
+        ' >/dev/null 2>&1; then
+          return 0
+        fi
+
+        if [ $(( $(date +%s) - start_ts )) -ge "$timeout_seconds" ]; then
+          return 124
+        fi
+
+        sleep {{ wait_poll_interval }}
+      done
+    }
+
+    should_scale_down_namespace="SIM"
+    if echo "$namespace" | grep -Eq "$dds_pattern" && [ "$scale_down_dds_cfg" = "NAO" ]; then
+      should_scale_down_namespace="NAO"
+    fi
+
+    echo -e "----- {{ objeto.namespace }}\t $start_time\t Sequencial Iniciado" | tee -a deployments_sequencial.txt
+
+    current_dcs=$(oc get deploymentconfig -n "$namespace" -o custom-columns=NAME:.metadata.name,CURRENT:.status.replicas --no-headers --kubeconfig="$kube_origem" | awk '$2 != "<none>" && $2 + 0 > 0 {print $1}')
+
+    for dc in {{ objeto.dc | map('quote') | join(' ') }}; do
+      if echo "$current_dcs" | grep -qx "$dc"; then
+
+        if [ "$scale_down_default" = "SIM" ] && [ "$should_scale_down_namespace" = "SIM" ]; then
+          oc scale deploymentconfig "$dc" --replicas=0 -n "$namespace" --kubeconfig="$kube_origem"
+
+          wait_for_scale_down "$namespace" "$dc" "{{ scale_down_timeout.seconds }}"
+          if [ $? -eq 124 ]; then
+    {% if scale_down_timeout.action == "ignore" %}
+            message="Ignorado. Avançando para Scale Up."
+            action=""
+    {% elif scale_down_timeout.action == "stop_dc" %}
+            message="Scale up cancelado. Avançando para próximo deploymentconfig."
+            action="continue"
+    {% elif scale_down_timeout.action == "stop_namespace" %}
+            message="Migração do namespace interrompida."
+            action="break"
+    {% endif %}
+            echo -e "\t {{ objeto.namespace }} $dc\t $(date '+%d/%m/%Y %H:%M:%S')\t Timeout para scale down ({{ scale_down_timeout.seconds }}s). $message" | tee -a deployments_sequencial.txt
+            $action
+          fi
+        else
+          echo -e "\t {{ objeto.namespace }} $dc\t $(date '+%d/%m/%Y %H:%M:%S')\t Scale down ignorado por configuração." | tee -a deployments_sequencial.txt
+        fi
+
+        scale_up_result=$(oc scale deploymentconfig "$dc" --replicas=1 -n "$namespace" --kubeconfig="$kube_destino" 2>&1)
+
+        if [ $? != 0 ]; then
+          echo -e "\t {{ objeto.namespace }} $dc\t $(date '+%d/%m/%Y %H:%M:%S')\t Scale up falhou. Objeto não encontrado no cluster de destino." | tee -a deployments_sequencial.txt
+        else
+          wait_for_progress "$namespace" "$dc" "{{ condition_towait }}" "{{ timeout_condition_towait }}"
+
+          if [ $? -eq 124 ]; then
+            if [ "{{ behavior_timedout_condition_towait }}" = "stop_namespace" ]; then
+              message="Migração do namespace interrompida."
+              action="break"
+            else
+              message="Ignorado. Avançando para próximo deploymentconfig."
+              action=""
+            fi
+            echo -e "\t {{ objeto.namespace }} $dc\t $(date '+%d/%m/%Y %H:%M:%S')\t Timeout de espera de Pods com estado {{ condition_towait }} ({{ timeout_condition_towait }}s). $message" | tee -a deployments_sequencial.txt
+            $action
+          else
+            echo -e "\t {{ objeto.namespace }} $dc\t $(date '+%d/%m/%Y %H:%M:%S')\t Sucesso. Pod com estado {{ condition_towait }} encontrado." | tee -a deployments_sequencial.txt
+          fi
+        fi
+      else
+        echo -e "\t {{ objeto.namespace }} $dc\t $(date '+%d/%m/%Y %H:%M:%S')\t Objeto desconsiderado para migração. Current Pods igual a zero no cluster de origem." | tee -a deployments_sequencial.txt
+      fi
+    done
+
+    end_time=$(date '+%d/%m/%Y %H:%M:%S')
+    echo -e "----- {{ objeto.namespace }}\t $end_time\t Sequencial Concluido" | tee -a deployments_sequencial.txt
+    echo -e "- namespace: {{ objeto.namespace }}\n  inicio: \"$start_time\"\n  termino: \"$end_time\"" >> namespaces_timming_sequencial.yml
+  register: sync_results
+  environment:
+    TZ: "America/Sao_Paulo"
+
+- name: Consultar resultado da Migração Sequencial
+  ansible.builtin.shell: cat deployments_sequencial.txt
+  register: deployments_sync
+
+- name: Visualizar resultado da Migração Sequencial
+  ansible.builtin.debug:
+    var: deployments_sync

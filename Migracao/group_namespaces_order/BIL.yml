@@ -1,0 +1,5 @@
+- namespace: ag-bkg-teste-ansible-bil-1
+  dc:
+    - database-ag-bkg-teste-ansible-bil-1
+    - webserver-ag-bkg-teste-ansible-bil-1
+    - application-ag-bkg-teste-ansible-bil-1

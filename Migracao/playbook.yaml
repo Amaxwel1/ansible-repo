@@ -1,0 +1,990 @@
+- name: Migração de DeploymentConfig entre Clusters OpenShift
+  hosts: localhost
+  gather_facts: false
+  vars:
+    ocp_clusters:
+      tutihofix: https://api.agibccoshoocp.ocp.agorasenior.corp:6443
+      producao: https://api.crc.testing:6443
+      dr: https://api.cluster-2xjzf.2xjzf.sandbox3088.opentlc.com:6443
+    condicao_progresso: Running
+    async_batch: 20
+    async_dc_batch: 2
+    wait_poll_interval: 2
+
+    perform_scale_down: "SIM"
+    migrar_paginas_manutencao: "SIM"
+    migrar_sinv: "SIM"
+    baixar_dds: "SIM"
+
+    scale_down_timeout:
+      seconds: 30
+      action: stop_namespace
+    pod_phases_timeout:
+      Pending:
+        seconds: 30
+        action: ignore
+      Running:
+        seconds: 30
+        action: ignore
+      Succeeded:
+        seconds: 30
+        action: ignore
+    pod_conditions_timeout:
+      Initialized:
+        seconds: 30
+        action: ignore
+      ContainersReady:
+        seconds: 30
+        action: ignore
+      Ready:
+        seconds: 30
+        action: stop_namespace
+    exclude_namespaces: ""
+    deployments_toquery: ""
+    exclude_deployments: ""
+    namespaces: []
+    namespaces_prefix_toquery: []
+    deployments_toquery_pattern: {}
+    deployments_exclude_pattern: {}
+    ns_order_dict: {}
+    ns_order_list: []
+    ns_async: {}
+    ns_sync: []
+    send_mail_cifs_path: "/Ansible/mail_attachments/"
+    send_mail_cifs_address:
+      tutihofix: "//AG-AH-VV-FS-001.agorasenior.corp/Apps"
+      producao: "//AG-MZ-VV-FS-002.corp.bradesco.com.br/Apps"
+    send_mail_cifs: producao
+    tmp_path_local: /tmp
+
+  vars_files:
+    - grupos.yml
+
+  tasks:
+    - name: Processo de Migração
+      block:
+        - name: Definir horário de inicio
+          ansible.builtin.command: date +"%d/%m/%Y %H:%M:%S"
+          register: start_time
+          environment:
+            TZ: "America/Sao_Paulo"
+
+        - name: Definir Cluster de Origem
+          ansible.builtin.set_fact:
+            ocp_cluster_origem: "{{ ocp_clusters['producao'] if cluster_active == 'OSASCO' else ocp_clusters['dr'] }}"
+
+        - name: Definir Cluster de Destino
+          ansible.builtin.set_fact:
+            ocp_cluster_destino: "{{ ocp_clusters['producao'] if cluster_migration == 'OSASCO' else ocp_clusters['dr'] }}"
+
+        - name: Cluster de Origem
+          ansible.builtin.debug:
+            var: ocp_cluster_origem
+
+        - name: Cluster de Destino
+          ansible.builtin.debug:
+            var: ocp_cluster_destino
+
+        - name: Cria o arquivo para autenticação no OCP
+          ansible.builtin.copy:
+            dest: "{{ tmp_path_local }}/ocp-password-{{ awx_job_id }}"
+            content: "{{ ocp_password }}"
+
+        - name: Cria arquivo para autenticação no CIFS
+          ansible.builtin.copy:
+            dest: "{{ tmp_path_local }}/ansible-shared-password"
+            content: "{{ ansible_password }}"
+
+        # - name: Testar acesso ao CIFS
+        #   ansible.builtin.shell: |
+        #     smbclient {{ send_mail_cifs_address[send_mail_cifs|lower] }} -U "{{ ansible_user }}%$(cat {{ tmp_path_local }}/ansible-shared-password)" -W agorasenior.corp -c "ls {{ send_mail_cifs_path }}"
+        #   register: smbclient_put_result
+        #   retries: 5
+        #   delay: 30
+        #   until: smbclient_put_result.rc == 0
+
+        - name: Cluster de Origem - Autenticação
+          ansible.builtin.shell: >
+            oc login {{ ocp_cluster_origem }}
+            -u {{ ocp_user }}
+            -p $(cat "{{ tmp_path_local }}/ocp-password-{{ awx_job_id | string }}")
+            --kubeconfig={{ tmp_path_local }}/ocp_origem
+            --insecure-skip-tls-verify
+          register: origem_auth_results
+
+        - name: Cluster de Destino - Autenticação
+          ansible.builtin.shell: >
+            oc login {{ ocp_cluster_destino }}
+            -u {{ ocp_user }}
+            -p $(cat "{{ tmp_path_local }}/ocp-password-{{ awx_job_id | string }}")
+            --kubeconfig={{ tmp_path_local }}/ocp_destino
+            --insecure-skip-tls-verify
+          register: destino_auth_results
+
+        - name: Definir ordem dos grupos a migrar
+          ansible.builtin.set_fact:
+            apps_in_order: |
+              {%- set result = [] -%}
+              {%- if 'ALL' not in aplication_migration -%}
+                {%- for grupo in aplicacoes -%}
+                  {% if grupo.grupo in aplication_migration %}
+                  {%- set _ = result.append(grupo.grupo) -%}
+                  {% endif %}
+                {%- endfor -%}
+              {%- else -%}
+                {%- for grupo in aplicacoes -%}
+                  {%- set _ = result.append(grupo.grupo) -%}
+                {%- endfor -%}
+              {%- endif -%}
+              {{ result | flatten }}
+
+        - name: Define lista de namespaces e prefixos a pesquisa
+          ansible.builtin.set_fact:
+            namespaces_prefix_toquery: >-
+              {{
+                namespaces_prefix_toquery
+                + (
+                    aplicacoes
+                    | json_query("[?grupo=='" + item + "'].namespaces_prefix")
+                    | first
+                    | default([])
+                  )
+              }}
+          loop: "{{ apps_in_order }}"
+
+        - name: Remover prefixos duplicados
+          ansible.builtin.set_fact:
+            namespaces_prefix_toquery: "{{ namespaces_prefix_toquery | unique | list }}"
+
+        - name: Visualizar prefixos dos grupos selecionados
+          ansible.builtin.debug:
+            var: namespaces_prefix_toquery
+
+        - name: Preparar lista de namespaces a desconsiderar
+          ansible.builtin.set_fact:
+            exclude_ns_pattern: "{{ exclude_namespaces.split(',') | map('regex_replace', ' ', '') | join('|') }}"
+          when: exclude_namespaces | length > 0
+
+        - name: Pesquisa de namespaces no Cluster de Origem
+          ansible.builtin.shell: >
+            oc get namespaces -o custom-columns=NAME:.metadata.name --no-headers --kubeconfig={{ tmp_path_local }}/ocp_origem
+            | grep "^{{ prefix }}"
+            {% if exclude_ns_pattern is defined %}
+            | grep -v -E "({{ exclude_ns_pattern }})"
+            {% endif %}
+            || true
+          register: namespaces_output
+          loop: "{{ namespaces_prefix_toquery }}"
+          loop_control:
+            loop_var: prefix
+
+        - name: Falhar Playbook caso haja erro na pesquisa
+          ansible.builtin.fail:
+            msg: "Falha ao pesquisar namespaces: {{ item.stderr }}"
+          when: item.stderr != ""
+          loop: "{{ namespaces_output.results }}"
+
+        - name: Combina namespaces encontrados
+          ansible.builtin.set_fact:
+            namespaces: "{{ (namespaces | default([]) + (namespaces_output.results | map(attribute='stdout_lines')) | flatten) | unique | list }}"
+
+        - name: Visualiza namespaces filtrados a serem utilizados
+          ansible.builtin.debug:
+            var: namespaces
+
+        - name: Preparação para pesquisa de DeploymentConfig - Filtro migrar somente alguns DeploymentConfigs
+          ansible.builtin.set_fact:
+            deployments_toquery_pattern: >-
+              {{
+                deployments_toquery_pattern | combine({
+                  (item.split('/')[0]): deployments_toquery_pattern.get(item.split('/')[0], []) + [item.split('/')[1]]
+                })
+              }}
+          loop: "{{ deployments_toquery.split(',') | map('regex_replace', ' ', '') }}"
+          when: deployments_toquery | length > 0
+
+        - name: Preparação para pesquisa de DeploymentConfig - Filtro desconsiderar alguns DeploymentConfigs
+          ansible.builtin.set_fact:
+            deployments_exclude_pattern: >-
+              {{
+                deployments_exclude_pattern | combine({
+                  (item.split('/')[0]): deployments_exclude_pattern.get(item.split('/')[0], []) + [item.split('/')[1]]
+                })
+              }}
+          loop: "{{ exclude_deployments.split(',') | map('regex_replace', ' ', '') }}"
+          when: exclude_deployments | length > 0
+
+        - name: Visualizar filtro migrar somente alguns DeploymentConfigs
+          ansible.builtin.debug:
+            var: deployments_toquery_pattern
+
+        - name: Visualizar filtro DeploymentConfigs a desconsiderar
+          ansible.builtin.debug:
+            var: deployments_exclude_pattern
+
+        - name: Preparação da lista de labels a filtrar
+          ansible.builtin.set_fact:
+            labels_toquery: "{{ labels.split(',') | map('regex_replace', ' ', '') }}"
+          when: labels is defined and labels | length > 0
+
+        - name: Visualizar filtro de labels
+          ansible.builtin.debug:
+            var: labels_toquery
+          when: labels is defined and labels | length > 0
+
+        - name: Pesquisa DeploymentConfigs no Cluster de origem
+          ansible.builtin.shell: |
+            {% if labels_toquery is defined %}
+            {% for label in labels_toquery %}
+            oc get deploymentconfig -n {{ namespace }} -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name --no-headers --kubeconfig={{ tmp_path_local }}/ocp_origem -l {{ label }} \
+            {% if deployments_exclude_pattern[namespace] is defined %}
+            | grep -v -E "({{ deployments_exclude_pattern[namespace] | join('|') }})" \
+            {% endif %}
+            || true
+            {% endfor %}
+            {% elif deployments_toquery | length > 0 %}
+            {% if deployments_toquery_pattern[namespace] is defined %}
+            oc get deploymentconfig -n {{ namespace }} -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name --no-headers --kubeconfig={{ tmp_path_local }}/ocp_origem \
+            | grep -E "{{ deployments_toquery_pattern[namespace] | join('|') }}" \
+            {% if deployments_exclude_pattern[namespace] is defined %}
+            | grep -v -E "({{ deployments_exclude_pattern[namespace] | join('|') }})" \
+            {% endif %}
+            || \
+            {% endif %}
+            true
+            {% else %}
+            oc get deploymentconfig -n {{ namespace }} -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name --no-headers --kubeconfig={{ tmp_path_local }}/ocp_origem \
+            {% if deployments_exclude_pattern[namespace] is defined %}
+            | grep -v -E "({{ deployments_exclude_pattern[namespace] | join('|') }})" \
+            {% endif %}
+            || true
+            {% endif %}
+          register: deployments_output
+          loop: "{{ namespaces }}"
+          loop_control:
+            loop_var: namespace
+
+        - name: Pesquisa de objetos da lista de Páginas de Manutenção
+          ansible.builtin.shell: |
+            oc get deploymentconfig -n {{ item.namespace }} -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name --no-headers --kubeconfig={{ tmp_path_local }}/ocp_origem \
+            | grep -E "{{ item.dc | join('|') }}" \
+            || true
+          loop: "{{ paginas_manutencao }}"
+          when: "'PAGINAS DE MANUTENCAO' in aplication_migration"
+          register: pag_manutencao_dcs_output
+
+        - name: Pesquisa de objetos da lista do SINV
+          ansible.builtin.shell: |
+            oc get deploymentconfig -n {{ item.namespace }} -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name --no-headers --kubeconfig={{ tmp_path_local }}/ocp_origem \
+            | grep -E "{{ item.dc | join('|') }}" \
+            || true
+          loop: "{{ sinv }}"
+          when:
+            - "'SINV' in aplication_migration"
+            - sinv | length > 0
+          register: sinv_dcs_output
+
+        - name: Prepara lista final de DeploymentConfigs
+          ansible.builtin.set_fact:
+            deployments: >-
+              {{
+                (
+                  (deployments | default([]))
+                  + (
+                      deployments_output.results
+                      | selectattr('stdout_lines', 'defined')
+                      | map(attribute='stdout_lines')
+                      | list
+                    )
+                  + (
+                      pag_manutencao_dcs_output.results
+                      | default([])
+                      | selectattr('stdout_lines', 'defined')
+                      | map(attribute='stdout_lines')
+                      | list
+                    )
+                  + (
+                      sinv_dcs_output.results
+                      | default([])
+                      | selectattr('stdout_lines', 'defined')
+                      | map(attribute='stdout_lines')
+                      | list
+                    )
+                ) | flatten | reject('equalto', '') | unique | list
+              }}
+
+        - name: Visualizar deployments filtrados
+          ansible.builtin.debug:
+            var: deployments
+
+        - name: Remover objetos que constam na lista de Páginas de Manutenção
+          ansible.builtin.set_fact:
+            deployments: "{{ deployments | reject('regex', item.dc | map('regex_replace', '^(.*)$', item.namespace + '   ' + '\\1') | join('|')) | list }}"
+          loop: "{{ paginas_manutencao }}"
+          when: migrar_paginas_manutencao == "NAO"
+
+        - name: Remover objetos que constam na lista do SINV
+          ansible.builtin.set_fact:
+            deployments: "{{ deployments | reject('regex', item.dc | map('regex_replace', '^(.*)$', item.namespace + '   ' + '\\1') | join('|')) | list }}"
+          loop: "{{ sinv }}"
+          when:
+            - migrar_sinv == "NAO"
+            - sinv | length > 0
+
+        - name: Falhar playbook caso a pesquisa não tenha retornado deploymentconfigs
+          ansible.builtin.fail:
+            msg: "A pesquisa não encontrou DeploymentConfig(s). Verificar filtros utilizados."
+          when: deployments | length == 0
+
+        - name: Cria dicionário de namespaces e seus deploymentconfigs
+          ansible.builtin.set_fact:
+            ns: "{{ ns | default({}) | combine({ item.split(' ')[0] : ns[item.split(' ')[0]] | default([]) + [item.split(' ')[-1]] }) }}"
+          loop: "{{ deployments }}"
+
+        - name: Verificar se existe arquivo com ordem para executar scale up sequencial, aguardando condição Ready
+          ansible.builtin.stat:
+            path: "group_namespaces_order/{{ item }}.yml"
+          register: d_file
+          loop: "{{ apps_in_order }}"
+          when: labels_toquery is not defined
+
+        - name: Criar lista de namespaces e deploymentconfigs com ordem para scale up
+          ansible.builtin.set_fact:
+            ns_order_list: >-
+              {{
+                ns_order_list | default([]) + [{
+                  'condition': (
+                    aplicacoes
+                    | json_query("[?grupo=='" + item.item + "'].condition_towait")
+                    | first
+                    | default('')
+                  ),
+                  'itens': lookup('file', 'group_namespaces_order/' ~ item.item ~ '.yml') | from_yaml
+                }]
+              }}
+          loop: "{{ d_file.results }}"
+          when: d_file is defined and item.stat.exists
+
+        - name: Criar dicionario de namespaces e deploymentconfigs com ordem para scale up
+          ansible.builtin.set_fact:
+            ns_order_dict: "{{ ns_order_dict | combine((lookup('file', 'group_namespaces_order/' ~ item.item ~ '.yml') | from_yaml)) }}"
+          loop: "{{ d_file.results }}"
+          when: d_file is defined and item.stat.exists
+
+        - name: Cria Lista de itens com Scale Down/Up Sequencial
+          ansible.builtin.set_fact:
+            ns_sync: >-
+              {%- set result = [] -%}
+              {%- for grupo in ns_order_list -%}
+              {%- for obj in grupo.itens -%}
+                {%- set common_items = [] -%}
+                {%- if obj.dc is defined -%}
+                  {%- for item in obj.dc -%}
+                    {%- if item in ns.get(obj.namespace, []) -%}
+                      {%- set _ = common_items.append(item) -%}
+                    {%- endif -%}
+                  {%- endfor -%}
+                {%- else -%}
+                  {%- for item in ns.get(obj.namespace, []) -%}
+                    {%- set _ = common_items.append(item) -%}
+                  {%- endfor -%}
+                {%- endif -%}
+                {%- if common_items | length > 0 -%}
+                  {%- if result | selectattr('namespace', 'equalto', obj.namespace) | list | length > 0 -%}
+                    {%- for existing_obj in result | selectattr('namespace', 'equalto', obj.namespace) | list -%}
+                      {%- for item in common_items -%}
+                        {%- if item not in existing_obj['dc'] -%}
+                          {%- set _ = existing_obj['dc'].append(item) -%}
+                        {%- endif -%}
+                      {%- endfor -%}
+                    {%- endfor -%}
+                  {%- else -%}
+                    {%- set _ = result.append({'namespace': obj.namespace, 'condition': grupo.condition, 'dc': common_items}) -%}
+                  {%- endif -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {%- endfor -%}
+              {{ result }}
+          when: labels_toquery is not defined
+
+        - name: Cria Dicionário de itens com Scale Down/Up Paralelizado
+          ansible.builtin.set_fact:
+            ns_async: >-
+              {%- set result = {} -%}
+              {%- for key, values in ns.items() -%}
+                {%- if ns_order_list | json_query('[].itens[].namespace') | select('equalto', key) | list | length > 0 -%}
+                  {%- set order_items = ns_order_list | json_query('[].itens[?namespace==`' ~ key ~ '`].dc') | flatten -%}
+                  {%- if order_items | length > 0 -%}
+                    {%- set extra_items = [] -%}
+                    {%- for value in values -%}
+                      {%- if value not in order_items -%}
+                        {%- set _ = extra_items.append(value) -%}
+                      {%- endif -%}
+                    {%- endfor -%}
+                    {%- if extra_items | length > 0 -%}
+                      {%- set _ = result.update({key: extra_items}) -%}
+                    {%- endif -%}
+                  {%- endif -%}
+                {%- else -%}
+                  {%- set _ = result.update({key: values}) -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {{ result }}
+          when: labels_toquery is not defined
+
+        - name: Cria Dicionario de itens com Scale Down/Up Paralelizado
+          ansible.builtin.set_fact:
+            ns_async: "{{ ns }}"
+          when: labels_toquery is defined
+
+        - name: Visualizar Dicionario resultado da Pesquisa de namespaces e deploymentconfigs
+          ansible.builtin.debug:
+            var: ns
+
+        - name: Visualizar Lista de Ordem configurada no diretório group_namespaces_order
+          ansible.builtin.debug:
+            var: ns_order_list
+
+        - name: Visualizar Lista a ser utilizada no scale down/up sequencial
+          ansible.builtin.debug:
+            var: ns_sync
+
+        - name: Visualizar Dicionario a ser utilizado no scale down/up paralelizado
+          ansible.builtin.debug:
+            var: ns_async
+
+        - name: Definir padrão auxiliar para regra de scale down do DDS
+          ansible.builtin.set_fact:
+            dds_namespaces_pattern: >-
+              {{
+                (
+                  ((aplicacoes | json_query("[?grupo=='DDS'].namespaces_prefix") | first) | default([])) | join('|')
+                )
+                if (((aplicacoes | json_query("[?grupo=='DDS'].namespaces_prefix") | first) | default([]) | length) > 0)
+                else '__NO_MATCH__'
+              }}
+
+        - name: Executar tarefa de migração - Sequencial
+          ansible.builtin.include_tasks: execute_ns_sync.yml
+          loop: "{{ ns_sync }}"
+          loop_control:
+            loop_var: objeto
+          when: labels_toquery is not defined
+
+        - name: Executar tarefa de Migração - Paralelizada - Em lotes de {{ async_batch }} Namespaces e {{ async_dc_batch }} DCs por namespace
+          ansible.builtin.include_tasks: execute_ns_async.yml
+          loop: "{{ ns_async.keys() | batch(async_batch) | list }}"
+
+        - name: Definir horario de término da Migração
+          ansible.builtin.command: date +"%d/%m/%Y %H:%M:%S"
+          register: finish_time
+          environment:
+            TZ: "America/Sao_Paulo"
+
+        - name: Unificar de logs produzidos
+          ansible.builtin.shell: |
+            cat deployments_sequencial.txt > ocp-migration-{{ awx_job_id }}.log || true
+            cat deployments_async* >> ocp-migration-{{ awx_job_id }}.log || true
+          register: log_unified
+
+        - name: Calcular tempo de execução
+          ansible.builtin.set_fact:
+            execution_time: "{{ (finish_time.stdout | to_datetime('%d/%m/%Y %H:%M:%S')) - (start_time.stdout | to_datetime('%d/%m/%Y %H:%M:%S')) }}"
+
+        - name: Criar lista com timming de itens sequenciais migrados
+          ansible.builtin.set_fact:
+            sequencial_list: "{{ sequencial_list | default([]) + (lookup('file', 'namespaces_timming_sequencial.yml') | from_yaml) }}"
+          when: ns_sync | length > 0
+
+        - name: Criar lista com timming de itens paralelizados migrados
+          ansible.builtin.set_fact:
+            paralel_list: "{{ paralel_list | default([]) + (lookup('file', 'namespaces_timming_paralelizado.yml') | from_yaml) }}"
+          when: ns_async | length > 0
+
+        - name: Calcular tempo de duração para cada namespace - Lista sequencial
+          ansible.builtin.set_fact:
+            lista_sequencial: >-
+              {%- set result = [] -%}
+              {%- for obj in sequencial_list -%}
+                {%- set duracao_timedelta = (
+                  (obj.termino | to_datetime('%d/%m/%Y %H:%M:%S')) -
+                  (obj.inicio | to_datetime('%d/%m/%Y %H:%M:%S'))
+                ) -%}
+                {%- set duracao_segundos = duracao_timedelta.total_seconds() -%}
+                {%- set horas = (duracao_segundos // 3600) | int -%}
+                {%- set minutos = ((duracao_segundos % 3600) // 60) | int -%}
+                {%- set segundos = (duracao_segundos % 60) | int -%}
+                {%- set duracao_formatada = "%02d:%02d:%02d" % (horas, minutos, segundos) -%}
+                {%- set _ = result.append({
+                  'namespace': obj.namespace,
+                  'inicio': obj.inicio,
+                  'termino': obj.termino,
+                  'duracao': duracao_formatada
+                }) -%}
+              {%- endfor -%}
+              {{ result }}
+          when: ns_sync | length > 0
+
+        - name: Calcular tempo de duração para cada item - Lista paralelizada
+          ansible.builtin.set_fact:
+            lista_paralelos: >-
+              {%- set result = [] -%}
+              {%- for obj in paralel_list -%}
+                {%- set duracao_timedelta = (
+                  (obj.termino | to_datetime('%d/%m/%Y %H:%M:%S')) -
+                  (obj.inicio | to_datetime('%d/%m/%Y %H:%M:%S'))
+                ) -%}
+                {%- set duracao_segundos = duracao_timedelta.total_seconds() -%}
+                {%- set horas = (duracao_segundos // 3600) | int -%}
+                {%- set minutos = ((duracao_segundos % 3600) // 60) | int -%}
+                {%- set segundos = (duracao_segundos % 60) | int -%}
+                {%- set duracao_formatada = "%02d:%02d:%02d" % (horas, minutos, segundos) -%}
+                {%- set _ = result.append({
+                  'namespace': obj.namespace,
+                  'inicio': obj.inicio,
+                  'termino': obj.termino,
+                  'duracao': duracao_formatada
+                }) -%}
+              {%- endfor -%}
+              {{ result }}
+          when: ns_async | length > 0
+
+        - name: Agrupar itens por grupo de aplicação e ordená-los por duração - Lista sequencial
+          ansible.builtin.set_fact:
+            grupo_ns_sequencial: >-
+              {{
+                grupo_ns_sequencial | default([]) + [{
+                  'grupo': item.grupo,
+                  'namespaces': (
+                    lista_sequencial
+                    | selectattr('namespace', 'match', '^((' + (item.namespaces_prefix | join('|')) + '))')
+                    | list
+                  )
+                }]
+              }}
+          loop: "{{ aplicacoes }}"
+          when: ns_sync | length > 0
+
+        - name: Agrupar itens por grupo de aplicação e ordená-los por duração - Lista paralelizada
+          ansible.builtin.set_fact:
+            grupo_ns_paralelos: >-
+              {{
+                grupo_ns_paralelos | default([]) + [{
+                  'grupo': item.grupo,
+                  'namespaces': (
+                    lista_paralelos
+                    | selectattr('namespace', 'match', '^((' + (item.namespaces_prefix | join('|')) + '))')
+                    | list
+                    | sort(attribute='duracao', reverse=true)
+                  )
+                }]
+              }}
+          loop: "{{ aplicacoes }}"
+          when: ns_async | length > 0
+
+        - name: Capturar ocorrência de timeout
+          ansible.builtin.shell: "grep -h -Ei 'timeout' deployments_*"
+          register: timeout_items
+          failed_when: timeout_items.rc not in [0, 1]
+
+        - name: Capturar ocorrencia de objeto não encontrado
+          ansible.builtin.shell: "grep -h -Ei 'não encontrado' deployments_*"
+          register: notfound_items
+          failed_when: notfound_items.rc not in [0, 1]
+
+        - name: Capturar ocorrencia de objetos com current pods zerado
+          ansible.builtin.shell: "grep -h -Ei 'Current Pods igual a zero' deployments_*"
+          register: currentzero_items
+          failed_when: currentzero_items.rc not in [0, 1]
+
+        - name: Converter linhas - timeout - para lista de objetos
+          ansible.builtin.set_fact:
+            lista_timeout: >-
+              {{
+                lista_timeout | default([]) + [{
+                  'namespace': linha[0],
+                  'dc': linha[1],
+                  'hora': linha[2] + ' ' + linha[3],
+                  'mensagem': linha[4:] | join(' ')
+                }]
+              }}
+          loop: "{{ timeout_items.stdout_lines }}"
+          vars:
+            linha: "{{ item.split() }}"
+          when: timeout_items.rc == 0
+
+        - name: Converter linhas - notfound - para lista de objetos
+          ansible.builtin.set_fact:
+            lista_notfound: >-
+              {{
+                lista_notfound | default([]) + [{
+                  'namespace': linha[0],
+                  'dc': linha[1],
+                  'hora': linha[2] + ' ' + linha[3],
+                  'mensagem': linha[4:] | join(' ')
+                }]
+              }}
+          loop: "{{ notfound_items.stdout_lines }}"
+          vars:
+            linha: "{{ item.split() }}"
+          when: notfound_items.rc == 0
+
+        - name: Converter linhas - currentzero - para lista de objetos
+          ansible.builtin.set_fact:
+            lista_currentzero: >-
+              {{
+                lista_currentzero | default([]) + [{
+                  'namespace': linha[0],
+                  'dc': linha[1],
+                  'hora': linha[2] + ' ' + linha[3],
+                  'mensagem': linha[4:] | join(' ')
+                }]
+              }}
+          loop: "{{ currentzero_items.stdout_lines }}"
+          vars:
+            linha: "{{ item.split() }}"
+          when: currentzero_items.rc == 0
+
+        - name: Agrupar itens timeout por grupo de aplicação
+          ansible.builtin.set_fact:
+            grupo_timeout: >-
+              {{
+                grupo_timeout | default([]) + [{
+                  'grupo': item.grupo,
+                  'ocorrencias': (
+                    lista_timeout
+                    | selectattr('namespace', 'match', '^((' + (item.namespaces_prefix | join('|')) + '))')
+                    | list
+                    | sort(attribute='namespace')
+                    | sort(attribute='hora')
+                  )
+                }]
+              }}
+          loop: "{{ aplicacoes }}"
+          when: lista_timeout is defined
+
+        - name: Agrupar itens notfound por grupo de aplicação
+          ansible.builtin.set_fact:
+            grupo_notfound: >-
+              {{
+                grupo_notfound | default([]) + [{
+                  'grupo': item.grupo,
+                  'ocorrencias': (
+                    lista_notfound
+                    | selectattr('namespace', 'match', '^((' + (item.namespaces_prefix | join('|')) + '))')
+                    | list
+                    | sort(attribute='namespace')
+                    | sort(attribute='hora')
+                  )
+                }]
+              }}
+          loop: "{{ aplicacoes }}"
+          when: lista_notfound is defined
+
+        - name: Agrupar itens currentzero por grupo de aplicacao
+          ansible.builtin.set_fact:
+            grupo_currentzero: >-
+              {{
+                grupo_currentzero | default([]) + [{
+                  'grupo': item.grupo,
+                  'ocorrencias': (
+                    lista_currentzero
+                    | selectattr('namespace', 'match', '^((' + (item.namespaces_prefix | join('|')) + '))')
+                    | list
+                    | sort(attribute='namespace')
+                    | sort(attribute='hora')
+                  )
+                }]
+              }}
+          loop: "{{ aplicacoes }}"
+          when: lista_currentzero is defined
+
+        # - name: Enviar Logs para CIFS
+        #   ansible.builtin.shell: |
+        #     smbclient {{ send_mail_cifs_address[send_mail_cifs|lower] }} -U "{{ ansible_user }}%$(cat {{ tmp_path_local }}/ansible-shared-password)" -W agorasenior.corp -c "cd {{ send_mail_cifs_path }}; put ocp-migration-{{ awx_job_id }}.log ocp-migration-{{ awx_job_id }}.log"
+        #   register: smbclient_put_result
+        #   retries: 5
+        #   delay: 30
+        #   until: smbclient_put_result.rc == 0
+        #   when: log_unified.failed == false
+
+        - name: Define o corpo e título do email - sucesso
+          ansible.builtin.set_stats:
+            data:
+              send_mail_subject: "Ansible-Report - Job #{{ awx_job_id }} - {{ awx_job_template_name }}"
+              #send_mail_attachments: "{{ [ tmp_path_local + '/ocp-migration-' + (awx_job_id | string) + '.log' ] if log_unified.failed == false else [] }}"
+              send_mail_cifs: "{{ send_mail_cifs }}"
+              send_mail_body: |
+                <style>
+                table, tr, th, td{
+                  border: 1px solid #a2a2a2;
+                  border-collapse: collapse;
+                  padding: 12px;
+                  text-align: left;
+                }
+                td:first-child {
+                  background-color: #e0e0e0;
+                  font-weight: bold;
+                }
+                th {
+                  background-color: #e0e0e0;
+                  font-weight: bold;
+                }
+                th[colspan] {
+                  text-align: center;
+                  padding: 8px;
+                }
+                </style>
+
+                Migração de aplicações - OpenShift
+                <h2>Parâmetros da Execução</h2>
+                <table>
+                <tr>
+                <th>Cluster Origem:</th><td>{{ ocp_cluster_origem }}</td>
+                </tr>
+                <tr>
+                <th>Cluster Destino:</th><td>{{ ocp_cluster_destino }}</td>
+                </tr>
+                <tr>
+                <th>Baixar aplicações na origem:</th><td>{{ perform_scale_down }}</td>
+                </tr>
+                <tr>
+                <th>Migrar Páginas de manutenção:</th><td>{{ migrar_paginas_manutencao }}</td>
+                </tr>
+                <tr>
+                <th>Migrar SINV:</th><td>{{ migrar_sinv }}</td>
+                </tr>
+                <tr>
+                <th>Baixar DDS:</th><td>{{ baixar_dds }}</td>
+                </tr>
+                <tr>
+                <th>Namespaces paralelos por lote:</th><td>{{ async_batch }}</td>
+                </tr>
+                <tr>
+                <th>DCs paralelos por namespace:</th><td>{{ async_dc_batch }}</td>
+                </tr>
+                <tr>
+                <th>Intervalo de polling:</th><td>{{ wait_poll_interval }}s</td>
+                </tr>
+                <tr>
+                <th>Condição a esperar:</th><td>Pod {{ condicao_progresso }}</td>
+                </tr>
+                <tr>
+                <th>Usuário para autenticação:</th><td>{{ ocp_user }}</td>
+                </tr>
+                <tr>
+                <th colspan="2">Filtros Aplicados</th>
+                </tr>
+                {% if 'PAGINAS DE MANUTENCAO' in aplication_migration %}
+                <tr>
+                <th>Páginas de Manutenção:</th><td>Migrar objetos especiais</td>
+                </tr>
+                {% endif %}
+                {% if 'SINV' in aplication_migration %}
+                <tr>
+                <th>SINV:</th><td>Migrar objetos especiais do SINV</td>
+                </tr>
+                {% endif %}
+                {% if namespaces_prefix_toquery | length > 0 %}
+                <tr>
+                <th>Namespaces com prefixo(s):</th><td>{{ namespaces_prefix_toquery | join('<br />') }}</td>
+                </tr>
+                {% endif %}
+                {% if exclude_namespaces | length > 0 %}
+                <tr>
+                <th>Desconsiderar o(s) Namespace(s):</th><td>{{ exclude_namespaces | replace(',', '<br />') }}</td>
+                </tr>
+                {% endif %}
+                {% if deployments_toquery | length > 0 %}
+                <tr>
+                <th>Somente o(s) DeploymentConfig(s):</th><td>{{ deployments_toquery | replace(',', '<br />') }}</td>
+                </tr>
+                {% endif %}
+                {% if exclude_deployments | length > 0 %}
+                <tr>
+                <th>Desconsiderar o(s) DeploymentConfig(s):</th><td>{{ exclude_deployments | replace(',', '<br />') }}</td>
+                </tr>
+                {% endif %}
+                {% if labels is defined and labels | length > 0 %}
+                <tr>
+                <th>Label(s):</th><td>{{ labels | replace(',', '<br />') }}</td>
+                </tr>
+                {% endif %}
+                </table>
+
+                <h2>Resultado da execução</h2>
+                <table>
+                <tr>
+                <th>Duração total:</th><td>{{ execution_time }}</td>
+                </tr>
+                <tr>
+                <th>Início:</th><td>{{ start_time.stdout }}</td>
+                </tr>
+                <tr>
+                <th>Término:</th><td>{{ finish_time.stdout }}</td>
+                </tr>
+                <tr>
+                <th>Ocorreram timeouts na espera por Pods?</th>
+                <td>{{ ('Sim, ' ~ (lista_timeout | length | string) ~ ' ocorrências') if lista_timeout is defined else 'Não' }}</td>
+                </tr>
+                <tr>
+                <th>Ocorreram objetos não encontrados no destino?</th>
+                <td>{{ ('Sim, ' ~ (lista_notfound | length | string) ~ ' ocorrências') if lista_notfound is defined else 'Não' }}</td>
+                </tr>
+                <tr>
+                <th>Ocorreram objetos desconsiderados por não terem pods ativos na origem?</th>
+                <td>{{ ('Sim, ' ~ (lista_currentzero | length | string) ~ ' ocorrências') if lista_currentzero is defined else 'Não' }}</td>
+                </tr>
+                </table>
+
+                {% if sequencial_list is defined and sequencial_list | length > 0 %}
+                <h2>Migração sequencial:</h2>
+                <table>
+                <tr>
+                <th>Namespace</th>
+                <th>Início</th>
+                <th>Término</th>
+                <th>Duração</th>
+                </tr>
+                {% for item in grupo_ns_sequencial %}
+                {% if item.namespaces | length > 0 %}
+                <tr>
+                <th colspan="4">Grupo {{ item.grupo | upper }}</th>
+                </tr>
+                {% for ns in item.namespaces %}
+                <tr>
+                <td>{{ ns.namespace }}</td>
+                <td>{{ ns.inicio }}</td>
+                <td>{{ ns.termino }}</td>
+                <td>{{ ns.duracao }}</td>
+                </tr>
+                {% endfor %}
+                {% endif %}
+                {% endfor %}
+                </table>
+                {% endif %}
+
+                {% if paralel_list is defined and paralel_list | length > 0 %}
+                <h2>Migração paralelizada:</h2>
+                <table>
+                <tr>
+                <th>Namespace</th>
+                <th>Início</th>
+                <th>Término</th>
+                <th>Duração</th>
+                </tr>
+                {% for item in grupo_ns_paralelos %}
+                {% if item.namespaces | length > 0 %}
+                <tr>
+                <th colspan="4">Grupo {{ item.grupo | upper }}</th>
+                </tr>
+                {% for ns in item.namespaces %}
+                <tr>
+                <td>{{ ns.namespace }}</td>
+                <td>{{ ns.inicio }}</td>
+                <td>{{ ns.termino }}</td>
+                <td>{{ ns.duracao }}</td>
+                </tr>
+                {% endfor %}
+                {% endif %}
+                {% endfor %}
+                </table>
+                {% endif %}
+
+                {% if lista_timeout is defined %}
+                <h2>Ocorrências de timeout:</h2>
+                <table>
+                <tr>
+                <th>Namespace</th>
+                <th>DeploymentConfig</th>
+                <th>Horário</th>
+                <th>Mensagem</th>
+                </tr>
+                {% for item in grupo_timeout %}
+                {% if item.ocorrencias | length > 0 %}
+                <tr>
+                <th colspan="4">Grupo {{ item.grupo | upper }}</th>
+                </tr>
+                {% for ns in item.ocorrencias %}
+                <tr>
+                <td>{{ ns.namespace }}</td>
+                <td>{{ ns.dc }}</td>
+                <td>{{ ns.hora }}</td>
+                <td>{{ ns.mensagem }}</td>
+                </tr>
+                {% endfor %}
+                {% endif %}
+                {% endfor %}
+                </table>
+                {% endif %}
+
+                {% if lista_notfound is defined %}
+                <h2>DeploymentConfigs não encontrados no cluster de destino:</h2>
+                <table>
+                <tr>
+                <th>Namespace</th>
+                <th>DeploymentConfig</th>
+                <th>Horário</th>
+                <th>Mensagem</th>
+                </tr>
+                {% for item in grupo_notfound %}
+                {% if item.ocorrencias | length > 0 %}
+                <tr>
+                <th colspan="4">Grupo {{ item.grupo | upper }}</th>
+                </tr>
+                {% for ns in item.ocorrencias %}
+                <tr>
+                <td>{{ ns.namespace }}</td>
+                <td>{{ ns.dc }}</td>
+                <td>{{ ns.hora }}</td>
+                <td>{{ ns.mensagem }}</td>
+                </tr>
+                {% endfor %}
+                {% endif %}
+                {% endfor %}
+                </table>
+                {% endif %}
+
+                {% if lista_currentzero is defined %}
+                <h2>Ocorrências de objetos desconsiderados por não terem pods ativos na origem:</h2>
+                <table>
+                <tr>
+                <th>Namespace</th>
+                <th>DeploymentConfig</th>
+                <th>Horário</th>
+                <th>Mensagem</th>
+                </tr>
+                {% for item in grupo_currentzero %}
+                {% if item.ocorrencias | length > 0 %}
+                <tr>
+                <th colspan="4">Grupo {{ item.grupo | upper }}</th>
+                </tr>
+                {% for ns in item.ocorrencias %}
+                <tr>
+                <td>{{ ns.namespace }}</td>
+                <td>{{ ns.dc }}</td>
+                <td>{{ ns.hora }}</td>
+                <td>{{ ns.mensagem }}</td>
+                </tr>
+                {% endfor %}
+                {% endif %}
+                {% endfor %}
+                </table>
+                {% endif %}
+
+                <p>Log completo da execução anexo</p>
+
+      rescue:
+        - name: Define o corpo e título do email - falha
+          ansible.builtin.set_stats:
+            data:
+              send_mail_subject: "Ansible-Report - Job #{{ awx_job_id }} - {{ awx_job_template_name }}"
+              send_mail_attachments: "[]"
+              send_mail_cifs: "{{ send_mail_cifs }}"
+              send_mail_body: |
+                <p style="color: red">Houve erro na execução.</p>
+                <p>Informações no output do job: <a href="https://ansible.mca.corp/#/jobs/playbook/{{ awx_job_id }}/output">{{ awx_job_id }}</a></p>
+
+        - name: Encerrar com status de falha
+          ansible.builtin.fail:
+            msg: "Erro na execução da migração de aplicações entre clusters do OpenShift. Verificar output do Job."
