@@ -1,0 +1,161 @@
+---
+- name: Definir host alvo do reboot antes do patch
+  ansible.builtin.set_fact:
+    pre_patch_reboot_target_host: >-
+      {{
+        patch_pre_reboot_target_host
+        | default(patch_target_host | default(reboot_target_host | default('')))
+      }}
+  run_once: true
+
+- name: Validar host alvo do reboot antes do patch
+  ansible.builtin.assert:
+    that:
+      - pre_patch_reboot_target_host | length > 0
+    fail_msg: "Host alvo do reboot antes do patch não foi informado."
+  run_once: true
+
+- name: Validar que o host AG não é PRIMARY no momento do reboot antes do patch
+  ansible.builtin.assert:
+    that:
+      - execution_topology != 'ag_cluster' or pre_patch_reboot_target_host != ag_discovery.primary_host
+    fail_msg: >-
+      O host {{ pre_patch_reboot_target_host }} ainda é a PRIMARY atual do AG.
+      O reboot antes do patch foi bloqueado para evitar indisponibilidade.
+      No fluxo AG, a task 43 deve fazer o failover antes de chamar o reboot da PRIMARY original.
+  run_once: true
+
+- name: Reiniciar host antes da aplicação do patch
+  ansible.windows.win_reboot:
+    reboot_timeout: "{{ patch_reboot_timeout_seconds | default(3600) }}"
+    connect_timeout: "{{ patch_reboot_connect_timeout_seconds | default(30) }}"
+    post_reboot_delay: "{{ patch_reboot_post_delay_seconds | default(60) }}"
+    msg: "Reboot automático antes da aplicação do patch SQL Server."
+  delegate_to: "{{ pre_patch_reboot_target_host }}"
+  register: _pre_patch_reboot
+
+- name: Registrar reboot antes do patch no report
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'actions': patch_report.actions + [ {
+            'host': pre_patch_reboot_target_host,
+            'step': 'reboot_before_patch',
+            'rc': 0,
+            'message': 'Host reiniciado antes da aplicação do patch e retorno do Windows/WinRM confirmado com sucesso.'
+          } ]
+        }, recursive=True)
+      }}
+  run_once: true
+
+- name: Aguardar instâncias standalone responderem após reboot antes do patch
+  ansible.builtin.include_tasks: 45_wait_single_instances_ready.yml
+  vars:
+    single_wait_targets: "{{ single_instance_targets | selectattr('host', 'equalto', pre_patch_reboot_target_host) | list }}"
+    single_wait_action_step: "wait_single_instance_ready_after_pre_patch_reboot"
+    single_wait_action_message: "Instância respondeu normalmente após reboot antes da aplicação do patch."
+  when: execution_topology == 'single'
+
+- name: Definir connection target da instância SQL do host AG após reboot antes do patch
+  ansible.builtin.set_fact:
+    ag_pre_patch_reboot_connection_target: >-
+      {{
+        (
+          ag_discovery.topology_rows
+          | selectattr('InventoryHost', 'equalto', pre_patch_reboot_target_host)
+          | map(attribute='ServerName')
+          | list
+          | first
+        )
+        | default(
+            pre_patch_reboot_target_host
+            if (ag_discovery.instance_name | upper) == 'MSSQLSERVER'
+            else pre_patch_reboot_target_host ~ '\\' ~ ag_discovery.instance_name
+          )
+      }}
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Aguardar instância SQL do host AG responder após reboot antes do patch
+  ansible.windows.win_powershell:
+    script: |
+      Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
+
+      $serverInstance = "{{ ag_pre_patch_reboot_connection_target }}"
+      $timeoutSeconds = {{ ag_reboot_instance_wait_timeout_seconds | default(single_instance_wait_timeout_seconds | default(1800)) }}
+      $pollSeconds = {{ ag_reboot_instance_poll_interval_seconds | default(single_instance_poll_interval_seconds | default(30)) }}
+      $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+      $lastError = ""
+
+      while ((Get-Date) -lt $deadline) {
+        try {
+          $row = Invoke-Sqlcmd `
+            -ServerInstance $serverInstance `
+            -TrustServerCertificate `
+            -QueryTimeout {{ sql_query_timeout_seconds }} `
+            -Query "SELECT @@SERVERNAME AS ServerName;" `
+            -ErrorAction Stop | Select-Object -First 1
+
+          if (([string]$row.ServerName).Trim().Length -gt 0) {
+            [pscustomobject]@{
+              WaitResult      = "READY"
+              Host            = "{{ pre_patch_reboot_target_host }}"
+              InstanceName    = "{{ ag_discovery.instance_name }}"
+              ServerInstance  = $serverInstance
+              WaitTimeoutSec  = $timeoutSeconds
+              PollIntervalSec = $pollSeconds
+            } | ConvertTo-Json -Compress -Depth 5
+            exit 0
+          }
+        }
+        catch {
+          $lastError = $_.Exception.Message
+        }
+
+        Start-Sleep -Seconds $pollSeconds
+      }
+
+      throw (
+        [pscustomobject]@{
+          WaitResult      = "TIMEOUT"
+          Host            = "{{ pre_patch_reboot_target_host }}"
+          InstanceName    = "{{ ag_discovery.instance_name }}"
+          ServerInstance  = $serverInstance
+          WaitTimeoutSec  = $timeoutSeconds
+          PollIntervalSec = $pollSeconds
+          LastError       = $lastError
+        } | ConvertTo-Json -Compress -Depth 8
+      )
+  delegate_to: "{{ pre_patch_reboot_target_host }}"
+  register: _ag_pre_patch_reboot_wait_ready
+  changed_when: false
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Registrar espera da instância SQL do AG após reboot antes do patch
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'actions': patch_report.actions + [ {
+            'host': pre_patch_reboot_target_host,
+            'instance_name': ag_discovery.instance_name,
+            'step': 'wait_ag_instance_ready_after_pre_patch_reboot',
+            'rc': 0,
+            'message': 'Instância SQL do host rebootado respondeu normalmente antes da aplicação do patch.'
+          } ]
+        }, recursive=True)
+      }}
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Refazer discovery após reboot antes do patch em AG
+  ansible.builtin.include_tasks: 30_discover_sql_topology.yml
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Aguardar AG saudável após reboot antes do patch
+  ansible.builtin.include_tasks: 44_wait_ag_healthy.yml
+  when: execution_topology == 'ag_cluster'
+  run_once: true
