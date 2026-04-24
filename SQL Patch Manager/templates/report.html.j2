@@ -373,7 +373,7 @@
   {% for item in visible_actions %}
     {% set rc = item.rc | default('') %}
     {% set row_class = 'ok' %}
-    {% if item.step in ['wait_ag_healthy', 'wait_single_instance_ready', 'wait_single_instance_ready_after_reboot', 'wait_ag_instance_ready_after_reboot'] %}
+    {% if item.step in ['wait_ag_healthy', 'wait_single_instance_ready', 'wait_single_instance_ready_after_reboot', 'wait_ag_instance_ready_after_reboot', 'reboot_before_patch', 'wait_single_instance_ready_after_pre_patch_reboot', 'wait_ag_instance_ready_after_pre_patch_reboot'] %}
       {% set row_class = 'ok' %}
     {% elif rc != '' and (rc | int) not in [0, 3010] %}
       {% set row_class = 'bad' %}
@@ -387,12 +387,20 @@
       {% set step_label = 'Aguardando AG ficar saudável' %}
     {% elif item.step == 'wait_single_instance_ready' %}
       {% set step_label = 'Validação final da instância' %}
+    {% elif item.step == 'reboot_before_patch' %}
+      {% set step_label = 'Reboot antes do patch' %}
+    {% elif item.step == 'reboot_after_validation' %}
+      {% set step_label = 'Reboot após validação final' %}
     {% elif item.step == 'reboot_after_validation' %}
       {% set step_label = 'Reboot após validação final' %}
     {% elif item.step == 'wait_single_instance_ready_after_reboot' %}
       {% set step_label = 'Validação da instância após reboot' %}
     {% elif item.step == 'wait_ag_instance_ready_after_reboot' %}
       {% set step_label = 'Validação da instância do AG após reboot' %}
+    {% elif item.step == 'wait_single_instance_ready_after_pre_patch_reboot' %}
+      {% set step_label = 'Validação da instância após reboot antes do patch' %}
+    {% elif item.step == 'wait_ag_instance_ready_after_pre_patch_reboot' %}
+      {% set step_label = 'Validação da instância do AG após reboot antes do patch' %}
     {% else %}
       {% set step_label = item.step %}
     {% endif %}
@@ -410,6 +418,10 @@
           <span class="mono">Instância respondeu normalmente após reboot.</span>
         {% elif item.step == 'wait_ag_instance_ready_after_reboot' %}
           <span class="mono">Instância SQL do host rebootado respondeu normalmente antes da redescoberta do AG.</span>
+        {% elif item.step == 'wait_single_instance_ready_after_pre_patch_reboot' %}
+          <span class="mono">Instância respondeu normalmente após reboot antes da aplicação do patch.</span>
+        {% elif item.step == 'wait_ag_instance_ready_after_pre_patch_reboot' %}
+          <span class="mono">Instância SQL do host rebootado respondeu normalmente antes da aplicação do patch.</span>
         {% elif item.message is defined and item.message %}
           <span class="mono">{{ item.message }}</span>
         {% elif item.stdout is defined and item.stdout %}
