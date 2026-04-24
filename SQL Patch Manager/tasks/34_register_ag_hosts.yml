@@ -1,9 +1,9 @@
 ---
 - name: Registrar todos os nós descobertos do AG
   ansible.builtin.add_host:
-    name: "{{ item }}"
+    name: "{{ ag_register_host }}"
     groups: sql_patch_targets
-    ansible_host: "{{ hostvars[item].ansible_host | default(item) }}"
+    ansible_host: "{{ hostvars[ag_register_host].ansible_host | default(ag_register_host) }}"
     ansible_user: "{{ ansible_user }}"
     ansible_password: "{{ ansible_password }}"
     ansible_connection: winrm
@@ -11,7 +11,10 @@
     ansible_winrm_transport: "{{ winrm_transport }}"
     ansible_winrm_scheme: "{{ winrm_scheme }}"
     ansible_winrm_server_cert_validation: "{{ winrm_server_cert_validation }}"
-  loop: "{{ ag_discovery.all_hosts | default([]) | unique }}"
+  loop: "{{ ag_discovery.all_hosts }}"
+  loop_control:
+    loop_var: ag_register_host
+    label: "{{ ag_register_host }}"
 
 - name: Expandir execution_hosts para todos os nós do AG quando solicitado
   ansible.builtin.set_fact:
