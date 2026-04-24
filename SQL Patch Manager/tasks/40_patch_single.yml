@@ -8,11 +8,11 @@
   run_once: true
 
 - name: Aplicar patch nos hosts standalone
-  ansible.builtin.include_tasks: 41_patch_one_host.yml
+  ansible.builtin.include_tasks: 40_patch_single_one_host.yml
   vars:
-    patch_target_host: "{{ item.host }}"
-    patch_target_instance: "{{ item.patch_instance_name }}"
-    patch_target_patch_mode: "{{ item.patch_mode }}"
-    patch_target_instance_names: "{{ item.instance_names }}"
+    single_patch_plan_row: "{{ single_patch_plan_item }}"
   loop: "{{ single_patch_plan_rows }}"
+  loop_control:
+    loop_var: single_patch_plan_item
+    label: "{{ single_patch_plan_item.host }}"
   run_once: true
