@@ -23,8 +23,10 @@
 
 - name: Executar reboot validado por host
   ansible.builtin.include_tasks: 55_reboot_one_host.yml
+  vars:
+    reboot_target_host: "{{ reboot_after_validation_host }}"
   loop: "{{ reboot_targets }}"
   loop_control:
-    loop_var: reboot_target_host
-    label: "{{ reboot_target_host }}"
+    loop_var: reboot_after_validation_host
+    label: "{{ reboot_after_validation_host }}"
   run_once: true
