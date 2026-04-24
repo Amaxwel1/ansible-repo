@@ -150,6 +150,16 @@
   when: execution_topology == 'ag_cluster'
   run_once: true
 
+- name: Aguardar WinRM autenticado no host rebootado antes de refazer discovery
+  ansible.windows.win_ping:
+  delegate_to: "{{ pre_patch_reboot_target_host }}"
+  register: _winrm_ready_after_pre_patch_reboot
+  retries: 20
+  delay: 30
+  until: _winrm_ready_after_pre_patch_reboot is succeeded
+  when: execution_topology == 'ag_cluster'
+  run_once: true
+
 - name: Refazer discovery após reboot antes do patch em AG
   ansible.builtin.include_tasks: 30_discover_sql_topology.yml
   when: execution_topology == 'ag_cluster'
