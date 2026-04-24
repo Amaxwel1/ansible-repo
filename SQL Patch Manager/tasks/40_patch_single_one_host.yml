@@ -1,0 +1,16 @@
+---
+- name: Reboot antes do patch standalone no host {{ single_patch_plan_row.host }}
+  ansible.builtin.include_tasks: 39_reboot_host_before_patch.yml
+  vars:
+    patch_pre_reboot_target_host: "{{ single_patch_plan_row.host }}"
+  when: patch_reboot_before_patch | default(false) | bool
+  run_once: true
+
+- name: Aplicar patch standalone no host {{ single_patch_plan_row.host }}
+  ansible.builtin.include_tasks: 41_patch_one_host.yml
+  vars:
+    patch_target_host: "{{ single_patch_plan_row.host }}"
+    patch_target_instance: "{{ single_patch_plan_row.patch_instance_name }}"
+    patch_target_patch_mode: "{{ single_patch_plan_row.patch_mode }}"
+    patch_target_instance_names: "{{ single_patch_plan_row.instance_names }}"
+  run_once: true

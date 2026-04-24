@@ -1,0 +1,23 @@
+---
+- name: Reboot antes do patch da réplica pré-failover {{ ag_patch_target_host }}
+  ansible.builtin.include_tasks: 39_reboot_host_before_patch.yml
+  vars:
+    patch_pre_reboot_target_host: "{{ ag_patch_target_host }}"
+  when: patch_reboot_before_patch | default(false) | bool
+  run_once: true
+
+- name: Aplicar patch na réplica pré-failover {{ ag_patch_target_host }}
+  ansible.builtin.include_tasks: 41_patch_one_host.yml
+  vars:
+    patch_target_host: "{{ ag_patch_target_host }}"
+  run_once: true
+
+- name: Refazer discovery após patch da réplica pré-failover {{ ag_patch_target_host }}
+  ansible.builtin.include_tasks: 30_discover_sql_topology.yml
+  when: sql_require_healthy_after_each_step | bool
+  run_once: true
+
+- name: Aguardar AG saudável após patch da réplica pré-failover {{ ag_patch_target_host }}
+  ansible.builtin.include_tasks: 44_wait_ag_healthy.yml
+  when: sql_require_healthy_after_each_step | bool
+  run_once: true
