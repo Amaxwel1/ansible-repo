@@ -44,6 +44,7 @@ sql_powershell_module_name: "SqlServer"
 single_instance_wait_timeout_seconds: 1800
 single_instance_poll_interval_seconds: 30
 
+patch_reboot_before_patch: true
 patch_reboot_after_validation: true
 
 patch_reboot_timeout_seconds: 3600
