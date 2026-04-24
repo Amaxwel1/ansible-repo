@@ -1,20 +1,3 @@
-- name: Registrar PRIMARY resolvida do AG para delegação WinRM
-  ansible.builtin.add_host:
-    name: "{{ ag_primary_host }}"
-    groups: sql_patch_targets
-    ansible_host: "{{ hostvars[ag_primary_host].ansible_host | default(ag_primary_host) }}"
-    ansible_user: "{{ ansible_user }}"
-    ansible_password: "{{ ansible_password }}"
-    ansible_connection: winrm
-    ansible_port: "{{ winrm_port }}"
-    ansible_winrm_transport: "{{ winrm_transport }}"
-    ansible_winrm_scheme: "{{ winrm_scheme }}"
-    ansible_winrm_server_cert_validation: "{{ winrm_server_cert_validation }}"
-  when:
-    - execution_topology == 'ag_cluster'
-    - ag_primary_host is defined
-    - ag_primary_host | trim | length > 0
-
 ---
 - name: Inicializar estruturas de discovery
   ansible.builtin.set_fact:
@@ -47,7 +30,7 @@
             $instanceName = [string]$p.Name
             $serviceName = if ($instanceName -eq 'MSSQLSERVER') { 'MSSQLSERVER' } else { "MSSQL`$$instanceName" }
             $state = if ($serviceMap.ContainsKey($serviceName)) { $serviceMap[$serviceName] } else { 'UNKNOWN' }
-            $connectionTarget = if ($instanceName -eq 'MSSQLSERVER') { "{{ item }}" } else { "{{ item }}\$instanceName" }
+            $connectionTarget = if ($instanceName -eq 'MSSQLSERVER') { "{{ discovery_host }}" } else { "{{ discovery_host }}\$instanceName" }
 
             $instances += [pscustomobject]@{
               InstanceName     = $instanceName
@@ -62,7 +45,7 @@
       if ($instances.Count -eq 0) {
         foreach ($svc in $serviceMap.Keys) {
           $instanceName = if ($svc -eq 'MSSQLSERVER') { 'MSSQLSERVER' } else { $svc.Substring(6) }
-          $connectionTarget = if ($instanceName -eq 'MSSQLSERVER') { "{{ item }}" } else { "{{ item }}\$instanceName" }
+          $connectionTarget = if ($instanceName -eq 'MSSQLSERVER') { "{{ discovery_host }}" } else { "{{ discovery_host }}\$instanceName" }
 
           $instances += [pscustomobject]@{
             InstanceName     = $instanceName
@@ -74,8 +57,11 @@
       }
 
       @($instances | Sort-Object InstanceName -Unique) | ConvertTo-Json -Compress -Depth 5
-  delegate_to: "{{ item }}"
+  delegate_to: "{{ discovery_host }}"
   loop: "{{ execution_hosts }}"
+  loop_control:
+    loop_var: discovery_host
+    label: "{{ discovery_host }}"
   register: _sql_instances_discovery
   changed_when: false
   run_once: true
@@ -86,7 +72,7 @@
       {{
         sql_instances_by_host
         | combine({
-            item.item: (
+            _discovered_host: (
               (
                 (_instances_raw is mapping)
                 | ternary([_instances_raw], (_instances_raw | default([])))
@@ -95,10 +81,12 @@
           }, recursive=True)
       }}
   vars:
-    _instances_raw: "{{ (item.output | default([]) | join('') | trim | default('[]', true)) | from_json }}"
+    _discovered_host: "{{ sql_instance_discovery_result.discovery_host }}"
+    _instances_raw: "{{ (sql_instance_discovery_result.output | default([]) | join('') | trim | default('[]', true)) | from_json }}"
   loop: "{{ _sql_instances_discovery.results | default([]) }}"
   loop_control:
-    label: "{{ item.item }}"
+    loop_var: sql_instance_discovery_result
+    label: "{{ sql_instance_discovery_result.discovery_host }}"
   run_once: true
 
 - name: Publicar instâncias descobertas no report
@@ -128,18 +116,21 @@
     single_instance_targets: >-
       {{
         single_instance_targets + [ {
-          'host': item.0.key,
-          'instance_name': item.1.InstanceName,
-          'service_name': item.1.ServiceName,
-          'state': item.1.State,
-          'connection_target': item.1.ConnectionTarget
+          'host': single_instance_pair.0.key,
+          'instance_name': single_instance_pair.1.InstanceName,
+          'service_name': single_instance_pair.1.ServiceName,
+          'state': single_instance_pair.1.State,
+          'connection_target': single_instance_pair.1.ConnectionTarget
         } ]
       }}
   loop: "{{ sql_instances_by_host | dict2items | subelements('value') }}"
+  loop_control:
+    loop_var: single_instance_pair
+    label: "{{ single_instance_pair.0.key }} / {{ single_instance_pair.1.InstanceName }}"
   when:
     - execution_topology == 'single'
-    - (item.1.State | default('') | upper) == 'RUNNING'
-    - (sql_instance_name | default('') | trim | length == 0) or ((item.1.InstanceName | upper) == (sql_instance_name | trim | upper))
+    - (single_instance_pair.1.State | default('') | upper) == 'RUNNING'
+    - (sql_instance_name | default('') | trim | length == 0) or ((single_instance_pair.1.InstanceName | upper) == (sql_instance_name | trim | upper))
   run_once: true
 
 - name: Validar que há instâncias SQL elegíveis em single
@@ -163,7 +154,7 @@
     single_patch_plan_rows: >-
       {{
         single_patch_plan_rows + [ {
-          'host': item,
+          'host': single_plan_host,
           'patch_mode': (
             'allinstances'
             if (
@@ -182,8 +173,11 @@
         } ]
       }}
   vars:
-    _instances_for_host: "{{ single_instance_targets | selectattr('host', 'equalto', item) | list }}"
+    _instances_for_host: "{{ single_instance_targets | selectattr('host', 'equalto', single_plan_host) | list }}"
   loop: "{{ execution_hosts }}"
+  loop_control:
+    loop_var: single_plan_host
+    label: "{{ single_plan_host }}"
   when:
     - execution_topology == 'single'
     - _instances_for_host | length > 0
@@ -231,16 +225,19 @@
     ag_probe_targets: >-
       {{
         ag_probe_targets + [ {
-          'host': item.0.key,
-          'instance_name': item.1.InstanceName,
-          'connection_target': item.1.ConnectionTarget
+          'host': ag_probe_pair.0.key,
+          'instance_name': ag_probe_pair.1.InstanceName,
+          'connection_target': ag_probe_pair.1.ConnectionTarget
         } ]
       }}
   loop: "{{ sql_instances_by_host | dict2items | subelements('value') }}"
+  loop_control:
+    loop_var: ag_probe_pair
+    label: "{{ ag_probe_pair.0.key }} / {{ ag_probe_pair.1.InstanceName }}"
   when:
     - execution_topology == 'ag_cluster'
-    - (item.1.State | default('') | upper) == 'RUNNING'
-    - (sql_instance_name | default('') | trim | length == 0) or ((item.1.InstanceName | upper) == (sql_instance_name | trim | upper))
+    - (ag_probe_pair.1.State | default('') | upper) == 'RUNNING'
+    - (sql_instance_name | default('') | trim | length == 0) or ((ag_probe_pair.1.InstanceName | upper) == (sql_instance_name | trim | upper))
   run_once: true
 
 - name: Validar que há instâncias elegíveis para probe do AG
@@ -259,7 +256,7 @@
       try {
         Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
 
-        $serverInstance = "{{ item.connection_target }}"
+        $serverInstance = "{{ ag_probe_target.connection_target }}"
         $queryB64 = "{{ sql_query_local_discovery | b64encode }}"
         $query = [System.Text.Encoding]::UTF8.GetString(
           [System.Convert]::FromBase64String($queryB64)
@@ -281,9 +278,9 @@
         $row = $rows | Select-Object -First 1
 
         [pscustomobject]@{
-          ProbeHost         = "{{ item.host }}"
-          ProbeInstanceName = "{{ item.instance_name }}"
-          ConnectionTarget  = "{{ item.connection_target }}"
+          ProbeHost         = "{{ ag_probe_target.host }}"
+          ProbeInstanceName = "{{ ag_probe_target.instance_name }}"
+          ConnectionTarget  = "{{ ag_probe_target.connection_target }}"
           ServerName        = ([string]$row.ServerName).Trim()
           MachineName       = ([string]$row.MachineName).Trim()
           InstanceName      = ([string]$row.InstanceName).Trim()
@@ -300,12 +297,12 @@
       }
       catch {
         [pscustomobject]@{
-          ProbeHost         = "{{ item.host }}"
-          ProbeInstanceName = "{{ item.instance_name }}"
-          ConnectionTarget  = "{{ item.connection_target }}"
+          ProbeHost         = "{{ ag_probe_target.host }}"
+          ProbeInstanceName = "{{ ag_probe_target.instance_name }}"
+          ConnectionTarget  = "{{ ag_probe_target.connection_target }}"
           ServerName        = ""
-          MachineName       = "{{ item.host }}"
-          InstanceName      = "{{ item.instance_name }}"
+          MachineName       = "{{ ag_probe_target.host }}"
+          InstanceName      = "{{ ag_probe_target.instance_name }}"
           IsHadrEnabled     = 0
           AGName            = ""
           RoleName          = "DISCOVERY_FAILED"
@@ -317,8 +314,11 @@
           DiscoveryError    = $_.Exception.Message
         } | ConvertTo-Json -Compress -Depth 5
       }
-  delegate_to: "{{ item.host }}"
+  delegate_to: "{{ ag_probe_target.host }}"
   loop: "{{ ag_probe_targets }}"
+  loop_control:
+    loop_var: ag_probe_target
+    label: "{{ ag_probe_target.host }} / {{ ag_probe_target.instance_name }}"
   register: _ag_probe_results_raw
   changed_when: false
   run_once: true
@@ -329,12 +329,13 @@
     ag_probe_results: >-
       {{
         ag_probe_results + [
-          ((item.output | default([]) | join('') | trim | default('{}', true)) | from_json)
+          ((ag_probe_result.output | default([]) | join('') | trim | default('{}', true)) | from_json)
         ]
       }}
   loop: "{{ _ag_probe_results_raw.results | default([]) }}"
   loop_control:
-    label: "{{ item.item.host ~ ' / ' ~ item.item.instance_name }}"
+    loop_var: ag_probe_result
+    label: "{{ ag_probe_result.ag_probe_target.host }} / {{ ag_probe_result.ag_probe_target.instance_name }}"
   run_once: true
   when: execution_topology == 'ag_cluster'
 
@@ -388,12 +389,13 @@
       {{
         sql_discovery_by_host
         | combine({
-            item.MachineName: item
+            ag_member_probe_result.MachineName: ag_member_probe_result
           }, recursive=True)
       }}
   loop: "{{ _ag_member_probe_results | selectattr('InstanceName', 'equalto', sql_effective_instance_name) | list }}"
   loop_control:
-    label: "{{ item.MachineName }}"
+    loop_var: ag_member_probe_result
+    label: "{{ ag_member_probe_result.MachineName }}"
   when: execution_topology == 'ag_cluster'
   run_once: true
 
@@ -548,6 +550,23 @@
   when: execution_topology == 'ag_cluster'
   run_once: true
 
+- name: Registrar PRIMARY resolvida do AG para delegação WinRM
+  ansible.builtin.add_host:
+    name: "{{ ag_primary_host }}"
+    groups: sql_patch_targets
+    ansible_host: "{{ hostvars[ag_primary_host].ansible_host | default(ag_primary_host) }}"
+    ansible_user: "{{ ansible_user }}"
+    ansible_password: "{{ ansible_password }}"
+    ansible_connection: winrm
+    ansible_port: "{{ winrm_port }}"
+    ansible_winrm_transport: "{{ winrm_transport }}"
+    ansible_winrm_scheme: "{{ winrm_scheme }}"
+    ansible_winrm_server_cert_validation: "{{ winrm_server_cert_validation }}"
+  when:
+    - execution_topology == 'ag_cluster'
+    - ag_primary_host is defined
+    - ag_primary_host | trim | length > 0
+
 - name: Descobrir topologia completa do AG na PRIMARY
   ansible.windows.win_powershell:
     script: |
@@ -616,12 +635,15 @@
     ag_topology_rows: >-
       {{
         ag_topology_rows + [
-          item | combine({
-            'InventoryHost': item.MachineName
+          ag_topology_row | combine({
+            'InventoryHost': ag_topology_row.MachineName
           })
         ]
       }}
   loop: "{{ _ag_topology_rows }}"
+  loop_control:
+    loop_var: ag_topology_row
+    label: "{{ ag_topology_row.MachineName | default(ag_topology_row.ServerName | default('replica-indefinida')) }}"
   when: execution_topology == 'ag_cluster'
   run_once: true
 
