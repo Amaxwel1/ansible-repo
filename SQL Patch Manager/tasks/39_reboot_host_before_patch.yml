@@ -25,6 +25,193 @@
       No fluxo AG, a task 43 deve fazer o failover antes de chamar o reboot da PRIMARY original.
   run_once: true
 
+- name: Verificar se existe reboot pendente antes do patch
+  ansible.windows.win_powershell:
+    script: |
+      $reasons = New-Object System.Collections.Generic.List[string]
+
+      function Add-ReasonIfPathExists {
+        param(
+          [string]$Path,
+          [string]$Reason
+        )
+
+        if (Test-Path -Path $Path) {
+          $reasons.Add($Reason)
+        }
+      }
+
+      Add-ReasonIfPathExists `
+        -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending' `
+        -Reason 'CBS: RebootPending'
+
+      Add-ReasonIfPathExists `
+        -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootInProgress' `
+        -Reason 'CBS: RebootInProgress'
+
+      Add-ReasonIfPathExists `
+        -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired' `
+        -Reason 'Windows Update: RebootRequired'
+
+      try {
+        $updateExeVolatile = (
+          Get-ItemProperty `
+            -Path 'HKLM:\SOFTWARE\Microsoft\Updates' `
+            -Name UpdateExeVolatile `
+            -ErrorAction SilentlyContinue
+        ).UpdateExeVolatile
+
+        if ($null -ne $updateExeVolatile -and ([int]$updateExeVolatile) -ne 0) {
+          $reasons.Add('Windows Updates: UpdateExeVolatile')
+        }
+      }
+      catch {
+        # Ignora ausência da chave ou valor não numérico.
+      }
+
+      $sessionManagerPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
+      $sessionManager = Get-ItemProperty -Path $sessionManagerPath -ErrorAction SilentlyContinue
+
+      if ($sessionManager) {
+        if (
+          ($sessionManager.PSObject.Properties.Name -contains 'PendingFileRenameOperations') -and
+          ($null -ne $sessionManager.PendingFileRenameOperations) -and
+          (@($sessionManager.PendingFileRenameOperations).Count -gt 0)
+        ) {
+          $reasons.Add('Session Manager: PendingFileRenameOperations')
+        }
+
+        if (
+          ($sessionManager.PSObject.Properties.Name -contains 'PendingFileRenameOperations2') -and
+          ($null -ne $sessionManager.PendingFileRenameOperations2) -and
+          (@($sessionManager.PendingFileRenameOperations2).Count -gt 0)
+        ) {
+          $reasons.Add('Session Manager: PendingFileRenameOperations2')
+        }
+      }
+
+      try {
+        $activeComputerName = (
+          Get-ItemProperty `
+            -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' `
+            -Name ComputerName `
+            -ErrorAction Stop
+        ).ComputerName
+
+        $pendingComputerName = (
+          Get-ItemProperty `
+            -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' `
+            -Name ComputerName `
+            -ErrorAction Stop
+        ).ComputerName
+
+        if (
+          -not [string]::IsNullOrWhiteSpace($activeComputerName) -and
+          -not [string]::IsNullOrWhiteSpace($pendingComputerName) -and
+          $activeComputerName -ne $pendingComputerName
+        ) {
+          $reasons.Add('ComputerName: alteração de hostname pendente')
+        }
+      }
+      catch {
+        # Ignora ambientes onde as chaves de ComputerName não estejam acessíveis.
+      }
+
+      Add-ReasonIfPathExists `
+        -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\JoinDomain' `
+        -Reason 'Netlogon: JoinDomain pendente'
+
+      Add-ReasonIfPathExists `
+        -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\AvoidSpnSet' `
+        -Reason 'Netlogon: AvoidSpnSet pendente'
+
+      try {
+        $ccm = Invoke-WmiMethod `
+          -Namespace 'ROOT\ccm\ClientSDK' `
+          -Class 'CCM_ClientUtilities' `
+          -Name 'DetermineIfRebootPending' `
+          -ErrorAction Stop
+
+        if (
+          ($ccm.ReturnValue -eq 0) -and
+          (($ccm.RebootPending -eq $true) -or ($ccm.IsHardRebootPending -eq $true))
+        ) {
+          $reasons.Add('SCCM/ConfigMgr: reboot pendente')
+        }
+      }
+      catch {
+        # SCCM/ConfigMgr pode não existir no servidor. Não é erro.
+      }
+
+      $uniqueReasons = @($reasons | Sort-Object -Unique)
+
+      [pscustomobject]@{
+        Host      = $env:COMPUTERNAME
+        Pending   = ($uniqueReasons.Count -gt 0)
+        Reasons   = $uniqueReasons
+        CheckedAt = (Get-Date).ToString('s')
+      } | ConvertTo-Json -Compress -Depth 5
+  delegate_to: "{{ pre_patch_reboot_target_host }}"
+  register: _pre_patch_reboot_pending
+  changed_when: false
+  when: patch_reboot_if_required | default(true) | bool
+  run_once: true
+
+- name: Definir resultado de reboot pendente quando modo forçado estiver ativo
+  ansible.builtin.set_fact:
+    _pre_patch_reboot_pending_json:
+      Host: "{{ pre_patch_reboot_target_host }}"
+      Pending: true
+      Reasons:
+        - "Modo forçado: patch_reboot_if_required=false"
+      CheckedAt: ""
+  when: not (patch_reboot_if_required | default(true) | bool)
+  run_once: true
+
+- name: Interpretar resultado da checagem de reboot pendente
+  ansible.builtin.set_fact:
+    _pre_patch_reboot_pending_json: >-
+      {{
+        (
+          _pre_patch_reboot_pending.output
+          | default([])
+          | join('')
+          | trim
+          | default('{"Pending": false, "Reasons": []}', true)
+        ) | from_json
+      }}
+  when: patch_reboot_if_required | default(true) | bool
+  run_once: true
+
+- name: Definir se o reboot antes do patch deve ser executado
+  ansible.builtin.set_fact:
+    pre_patch_reboot_should_run: "{{ _pre_patch_reboot_pending_json.Pending | default(false) | bool }}"
+    pre_patch_reboot_reason_text: >-
+      {{
+        (
+          [_pre_patch_reboot_pending_json.Reasons]
+          if (_pre_patch_reboot_pending_json.Reasons is string)
+          else (_pre_patch_reboot_pending_json.Reasons | default([]))
+        ) | join(', ')
+      }}
+  run_once: true
+
+- name: Registrar reboot antes do patch não necessário no report
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'actions': patch_report.actions + [ {
+            'host': pre_patch_reboot_target_host,
+            'step': 'reboot_before_patch_skipped',
+            'rc': 0,
+            'message': 'Reboot antes do patch não executado: nenhuma pendência de reboot foi encontrada no Windows.'
+          } ]
+        }, recursive=True)
+      }}
+  when: not (pre_patch_reboot_should_run | bool)
+  run_once: true
+
 - name: Reiniciar host antes da aplicação do patch
   ansible.windows.win_reboot:
     reboot_timeout: "{{ patch_reboot_timeout_seconds | default(3600) }}"
@@ -33,6 +220,7 @@
     msg: "Reboot automático antes da aplicação do patch SQL Server."
   delegate_to: "{{ pre_patch_reboot_target_host }}"
   register: _pre_patch_reboot
+  when: pre_patch_reboot_should_run | bool
 
 - name: Registrar reboot antes do patch no report
   ansible.builtin.set_fact:
@@ -43,10 +231,16 @@
             'host': pre_patch_reboot_target_host,
             'step': 'reboot_before_patch',
             'rc': 0,
-            'message': 'Host reiniciado antes da aplicação do patch e retorno do Windows/WinRM confirmado com sucesso.'
+            'message': (
+              'Host reiniciado antes da aplicação do patch. Motivo: ' ~ pre_patch_reboot_reason_text
+              if (pre_patch_reboot_reason_text | length > 0)
+              else
+              'Host reiniciado antes da aplicação do patch e retorno do Windows/WinRM confirmado com sucesso.'
+            )
           } ]
         }, recursive=True)
       }}
+  when: pre_patch_reboot_should_run | bool
   run_once: true
 
 - name: Aguardar instâncias standalone responderem após reboot antes do patch
@@ -55,7 +249,9 @@
     single_wait_targets: "{{ single_instance_targets | selectattr('host', 'equalto', pre_patch_reboot_target_host) | list }}"
     single_wait_action_step: "wait_single_instance_ready_after_pre_patch_reboot"
     single_wait_action_message: "Instância respondeu normalmente após reboot antes da aplicação do patch."
-  when: execution_topology == 'single'
+  when:
+    - execution_topology == 'single'
+    - pre_patch_reboot_should_run | bool
 
 - name: Definir connection target da instância SQL do host AG após reboot antes do patch
   ansible.builtin.set_fact:
@@ -74,7 +270,9 @@
             else pre_patch_reboot_target_host ~ '\\' ~ ag_discovery.instance_name
           )
       }}
-  when: execution_topology == 'ag_cluster'
+  when:
+    - execution_topology == 'ag_cluster'
+    - pre_patch_reboot_should_run | bool
   run_once: true
 
 - name: Aguardar instância SQL do host AG responder após reboot antes do patch
@@ -130,7 +328,9 @@
   delegate_to: "{{ pre_patch_reboot_target_host }}"
   register: _ag_pre_patch_reboot_wait_ready
   changed_when: false
-  when: execution_topology == 'ag_cluster'
+  when:
+    - execution_topology == 'ag_cluster'
+    - pre_patch_reboot_should_run | bool
   run_once: true
 
 - name: Registrar espera da instância SQL do AG após reboot antes do patch
@@ -147,7 +347,9 @@
           } ]
         }, recursive=True)
       }}
-  when: execution_topology == 'ag_cluster'
+  when:
+    - execution_topology == 'ag_cluster'
+    - pre_patch_reboot_should_run | bool
   run_once: true
 
 - name: Aguardar WinRM autenticado no host rebootado antes de refazer discovery
@@ -157,15 +359,21 @@
   retries: 20
   delay: 30
   until: _winrm_ready_after_pre_patch_reboot is succeeded
-  when: execution_topology == 'ag_cluster'
+  when:
+    - execution_topology == 'ag_cluster'
+    - pre_patch_reboot_should_run | bool
   run_once: true
 
 - name: Refazer discovery após reboot antes do patch em AG
   ansible.builtin.include_tasks: 30_discover_sql_topology.yml
-  when: execution_topology == 'ag_cluster'
+  when:
+    - execution_topology == 'ag_cluster'
+    - pre_patch_reboot_should_run | bool
   run_once: true
 
 - name: Aguardar AG saudável após reboot antes do patch
   ansible.builtin.include_tasks: 44_wait_ag_healthy.yml
-  when: execution_topology == 'ag_cluster'
+  when:
+    - execution_topology == 'ag_cluster'
+    - pre_patch_reboot_should_run | bool
   run_once: true
