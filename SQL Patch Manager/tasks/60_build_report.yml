@@ -1,4 +1,48 @@
 ---
+- name: Registrar horário de término da atividade
+  ansible.builtin.set_fact:
+    sql_report_finished_at: "{{ lookup('pipe', 'TZ=\"' ~ (sql_report_timezone | default('America/Sao_Paulo')) ~ '\" date \"+%d/%m/%Y %H:%M:%S %Z\"') }}"
+    sql_report_finished_epoch: "{{ lookup('pipe', 'date +%s') | int }}"
+
+- name: Calcular duração total da atividade
+  ansible.builtin.set_fact:
+    sql_report_duration_seconds: >-
+      {{
+        (sql_report_finished_epoch | int)
+        -
+        (
+          patch_report.execution.started_epoch
+          | default(sql_report_started_epoch | default(sql_report_finished_epoch))
+          | int
+        )
+      }}
+
+- name: Formatar duração total da atividade
+  ansible.builtin.set_fact:
+    sql_report_duration_text: >-
+      {{
+        '%02d:%02d:%02d'
+        | format(
+            (sql_report_duration_seconds | int) // 3600,
+            ((sql_report_duration_seconds | int) % 3600) // 60,
+            (sql_report_duration_seconds | int) % 60
+          )
+      }}
+
+- name: Atualizar report com horário de término e duração
+  ansible.builtin.set_fact:
+    patch_report: >-
+      {{
+        patch_report | combine({
+          'execution': {
+            'ended_at': sql_report_finished_at,
+            'ended_epoch': sql_report_finished_epoch,
+            'duration_seconds': sql_report_duration_seconds,
+            'duration_text': sql_report_duration_text
+          }
+        }, recursive=True)
+      }}
+
 - name: Renderizar HTML do report
   ansible.builtin.set_fact:
     report_html: "{{ lookup('template', 'templates/report.html.j2') }}"
