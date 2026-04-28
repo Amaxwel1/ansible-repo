@@ -119,6 +119,18 @@
     <td class="mono">{{ patch_report.execution.executor | default('—') }}</td>
   </tr>
   <tr>
+    <td>Início da atividade</td>
+    <td class="mono">{{ patch_report.execution.started_at | default('—') }}</td>
+  </tr>
+  <tr>
+    <td>Término da atividade</td>
+    <td class="mono">{{ patch_report.execution.ended_at | default('—') }}</td>
+  </tr>
+  <tr>
+    <td>Duração total</td>
+    <td class="mono">{{ patch_report.execution.duration_text | default('—') }}</td>
+  </tr>
+  <tr>
     <td>Motivo</td>
     <td class="mono">{{ patch_report.execution.motivo | default('—') }}</td>
   </tr>
