@@ -1,4 +1,9 @@
 ---
+- name: Registrar horário de início da atividade
+  ansible.builtin.set_fact:
+    sql_report_started_at: "{{ lookup('pipe', 'TZ=\"' ~ (sql_report_timezone | default('America/Sao_Paulo')) ~ '\" date \"+%d/%m/%Y %H:%M:%S %Z\"') }}"
+    sql_report_started_epoch: "{{ lookup('pipe', 'date +%s') | int }}"
+    
 - name: Normalizar variáveis do survey
   ansible.builtin.set_fact:
     sql_topology_normalized: >-
@@ -54,6 +59,12 @@
         motivo: "{{ motivo }}"
         precheck_only: "{{ sql_precheck_only_bool }}"
         ag_expand_to_all_nodes: "{{ ag_expand_to_all_nodes_bool }}"
+        started_at: "{{ sql_report_started_at }}"
+        started_epoch: "{{ sql_report_started_epoch }}"
+        ended_at: "—"
+        ended_epoch: ""
+        duration_seconds: 0
+        duration_text: "—"
       discovery: {}
       precheck: {}
       actions: []
