@@ -85,38 +85,397 @@
           ansible.builtin.include_tasks: tasks/60_build_report.yml
 
       rescue:
-        - name: Capturar contexto da falha
+        - name: Capturar contexto bruto da falha
           ansible.builtin.set_fact:
             _fail_task: "{{ ansible_failed_task.name | default('—') }}"
             _fail_action: "{{ ansible_failed_task.action | default('—') }}"
-            _fail_msg: >-
+            _fail_raw_result: "{{ ansible_failed_result | default({}) }}"
+            _fail_results_all: "{{ ansible_failed_result.results | default([]) }}"
+            _fail_main_msg: "{{ ansible_failed_result.msg | default('Erro não mapeado') }}"
+
+        - name: Capturar itens que falharam quando a task tinha loop
+          ansible.builtin.set_fact:
+            _fail_failed_results: >-
               {{
-                ansible_failed_result.msg
-                | default(ansible_failed_result | to_nice_json | default('Erro não mapeado'))
+                (
+                  ansible_failed_result.results
+                  | default([])
+                  | selectattr('failed', 'defined')
+                  | selectattr('failed', 'equalto', true)
+                  | list
+                )
+                if (ansible_failed_result.results is defined)
+                else ([ansible_failed_result | default({})])
               }}
 
-        - name: Montar HTML de falha
+        - name: Garantir pelo menos um item de falha para renderização
+          ansible.builtin.set_fact:
+            _fail_failed_results: "{{ _fail_failed_results if (_fail_failed_results | length > 0) else [_fail_raw_result] }}"
+
+        - name: Montar HTML de falha detalhado
           ansible.builtin.set_fact:
             report_html: |
+              {% set pr = patch_report | default({}) %}
+              {% set execution = pr.execution | default({}) %}
+              {% set discovery = pr.discovery | default({}) %}
+              {% set precheck = pr.precheck | default({}) %}
+              {% set raw_lower = (_fail_raw_result | to_json | lower) %}
               <style>
-              table, th, td { border:1px solid #a2a2a2; border-collapse:collapse; padding:8px; }
-              th { background:#e0e0e0; }
-              pre { white-space:pre-wrap; }
+                body {
+                  font-family: Arial, sans-serif;
+                  font-size: 14px;
+                  color: #111827;
+                }
+
+                h1 {
+                  color: #b00020;
+                  font-size: 22px;
+                  margin-bottom: 10px;
+                }
+
+                h2 {
+                  color: #1f2937;
+                  font-size: 18px;
+                  margin-top: 24px;
+                  margin-bottom: 10px;
+                }
+
+                h3 {
+                  color: #1f2937;
+                  font-size: 15px;
+                  margin-top: 18px;
+                  margin-bottom: 8px;
+                }
+
+                table {
+                  border-collapse: collapse;
+                  width: 100%;
+                  margin-bottom: 18px;
+                }
+
+                th, td {
+                  border: 1px solid #a2a2a2;
+                  padding: 8px 10px;
+                  text-align: left;
+                  vertical-align: top;
+                }
+
+                th {
+                  background: #e0e0e0;
+                }
+
+                .ok {
+                  background: #d1fae5;
+                }
+
+                .warn {
+                  background: #fef3c7;
+                }
+
+                .bad {
+                  background: #fee2e2;
+                }
+
+                .mono {
+                  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+                  white-space: pre-wrap;
+                  word-break: break-word;
+                }
+
+                .summary-table td:first-child {
+                  width: 240px;
+                  font-weight: bold;
+                  background: #f3f4f6;
+                }
+
+                .badge-ok {
+                  display: inline-block;
+                  padding: 3px 8px;
+                  border-radius: 10px;
+                  background: #d1fae5;
+                  color: #065f46;
+                  font-weight: bold;
+                  font-size: 12px;
+                }
+
+                .badge-bad {
+                  display: inline-block;
+                  padding: 3px 8px;
+                  border-radius: 10px;
+                  background: #fee2e2;
+                  color: #991b1b;
+                  font-weight: bold;
+                  font-size: 12px;
+                }
+
+                .badge-warn {
+                  display: inline-block;
+                  padding: 3px 8px;
+                  border-radius: 10px;
+                  background: #fef3c7;
+                  color: #92400e;
+                  font-weight: bold;
+                  font-size: 12px;
+                }
+
+                .note {
+                  margin: 8px 0 14px 0;
+                  color: #4b5563;
+                  font-size: 13px;
+                }
               </style>
-              <h2 style="color:#b00020">Falha na automação SQL Patch Manager</h2>
-              <h3>Contexto da falha</h3>
-              <table>
-                <tr><th>Task</th><td>{{ _fail_task }}</td></tr>
-                <tr><th>Ação</th><td>{{ _fail_action }}</td></tr>
-                <tr><th>Mensagem</th><td><pre>{{ _fail_msg }}</pre></td></tr>
+
+              <h1>Falha na automação SQL Patch Manager</h1>
+
+              <h2>Resumo da falha</h2>
+              <table class="summary-table">
+                <tr>
+                  <td>Task que falhou</td>
+                  <td class="mono">{{ _fail_task | default('—') | e }}</td>
+                </tr>
+                <tr>
+                  <td>Ação / módulo</td>
+                  <td class="mono">{{ _fail_action | default('—') | e }}</td>
+                </tr>
+                <tr>
+                  <td>Mensagem resumida do Ansible</td>
+                  <td class="mono">{{ _fail_main_msg | default('—') | e }}</td>
+                </tr>
+                <tr>
+                  <td>Diagnóstico provável</td>
+                  <td>
+                    {% if 'login failed for user' in raw_lower %}
+                      <span class="badge-bad">Falha de login/permissão no SQL Server</span>
+                      <div class="note">
+                        A conexão WinRM funcionou, mas o usuário usado pela automação não conseguiu autenticar ou não possui permissão suficiente na instância SQL.
+                        Valide se o login existe na instância e se possui permissão para executar as consultas usadas no precheck, patch e pós-check.
+                      </div>
+                    {% elif 'access is denied' in raw_lower or 'acesso negado' in raw_lower %}
+                      <span class="badge-bad">Acesso negado</span>
+                      <div class="note">
+                        A falha indica falta de permissão no Windows, SQL Server, arquivo, serviço ou recurso remoto utilizado pela automação.
+                      </div>
+                    {% elif 'winrm' in raw_lower or 'connection' in raw_lower or 'unreachable' in raw_lower %}
+                      <span class="badge-bad">Falha de conectividade/WinRM</span>
+                      <div class="note">
+                        A automação não conseguiu concluir a comunicação com o host alvo. Valide WinRM, DNS, firewall, credencial e conectividade de rede.
+                      </div>
+                    {% elif 'timeout' in raw_lower or 'timed out' in raw_lower %}
+                      <span class="badge-warn">Timeout</span>
+                      <div class="note">
+                        A etapa excedeu o tempo limite configurado. Valide se o SQL Server, o AG ou o Windows demoraram mais do que o esperado para responder.
+                      </div>
+                    {% elif 'failed to import' in raw_lower or 'import-module' in raw_lower or 'sqlserver' in raw_lower %}
+                      <span class="badge-bad">Falha no módulo PowerShell/SqlServer</span>
+                      <div class="note">
+                        A etapa pode ter falhado ao carregar o módulo PowerShell SqlServer ou ao executar Invoke-Sqlcmd.
+                      </div>
+                    {% else %}
+                      <span class="badge-warn">Erro não classificado automaticamente</span>
+                      <div class="note">
+                        Consulte a tabela "Detalhes técnicos da falha" abaixo.
+                      </div>
+                    {% endif %}
+                  </td>
+                </tr>
               </table>
-              <h3>Parâmetros de entrada</h3>
+
+              <h2>Parâmetros de entrada</h2>
+              <table class="summary-table">
+                <tr>
+                  <td>Ambiente</td>
+                  <td class="mono">{{ sql_environment | default(execution.environment | default('—')) | e }}</td>
+                </tr>
+                <tr>
+                  <td>Topologia</td>
+                  <td class="mono">{{ execution.topology | default(sql_topology | default('—')) | e }}</td>
+                </tr>
+                <tr>
+                  <td>Hosts do survey</td>
+                  <td class="mono">{{ execution.requested_hosts_raw | default(survey_hosts | default('—')) | e }}</td>
+                </tr>
+                <tr>
+                  <td>Hosts alvo da execução</td>
+                  <td class="mono">
+                    {% if execution.execution_hosts is defined %}
+                      {{ execution.execution_hosts | join(', ') | e }}
+                    {% else %}
+                      —
+                    {% endif %}
+                  </td>
+                </tr>
+                <tr>
+                  <td>Expandir AG</td>
+                  <td class="mono">{{ ag_expand_to_all_nodes | default(false) | e }}</td>
+                </tr>
+                <tr>
+                  <td>Patch</td>
+                  <td class="mono">{{ execution.patch_package_name | default(patch_package_name | default('—')) | e }}</td>
+                </tr>
+                <tr>
+                  <td>Instância informada</td>
+                  <td class="mono">{{ execution.instance_name | default(sql_instance_name | default('—')) | e }}</td>
+                </tr>
+                <tr>
+                  <td>Precheck only</td>
+                  <td class="mono">{{ execution.precheck_only | default(sql_precheck_only_bool | default(sql_precheck_only | default(false))) | e }}</td>
+                </tr>
+              </table>
+
+              {% if single_instance_targets is defined and (single_instance_targets | length) > 0 %}
+              <h2>Instâncias standalone descobertas antes da falha</h2>
               <table>
-                <tr><th>Topologia</th><td>{{ sql_topology | default('—') }}</td></tr>
-                <tr><th>Hosts do survey</th><td>{{ survey_hosts | default('—') }}</td></tr>
-                <tr><th>Expandir AG</th><td>{{ ag_expand_to_all_nodes | default(false) }}</td></tr>
-                <tr><th>Patch</th><td>{{ patch_package_name | default('—') }}</td></tr>
-                <tr><th>Instância</th><td>{{ sql_instance_name | default('—') }}</td></tr>
+                <tr>
+                  <th>Host</th>
+                  <th>Instância</th>
+                  <th>Serviço</th>
+                  <th>Estado</th>
+                  <th>Connection Target</th>
+                </tr>
+                {% for inst in single_instance_targets %}
+                <tr class="{{ 'ok' if (inst.state | default('') | upper) == 'RUNNING' else 'warn' }}">
+                  <td class="mono">{{ inst.host | default('—') | e }}</td>
+                  <td class="mono">{{ inst.instance_name | default('—') | e }}</td>
+                  <td class="mono">{{ inst.service_name | default('—') | e }}</td>
+                  <td class="mono">{{ inst.state | default('—') | e }}</td>
+                  <td class="mono">{{ inst.connection_target | default('—') | e }}</td>
+                </tr>
+                {% endfor %}
+              </table>
+              {% endif %}
+
+              {% if ag_discovery is defined and ag_discovery.topology_rows is defined and (ag_discovery.topology_rows | length) > 0 %}
+              <h2>Topologia AG conhecida antes da falha</h2>
+              <table>
+                <tr>
+                  <th>Host</th>
+                  <th>Role</th>
+                  <th>Availability Mode</th>
+                  <th>Connected</th>
+                  <th>Health</th>
+                </tr>
+                {% for row in ag_discovery.topology_rows %}
+                <tr class="{{ 'ok' if (row.SyncHealth | default('')) == 'HEALTHY' else 'warn' }}">
+                  <td class="mono">{{ row.InventoryHost | default(row.MachineName | default('—')) | e }}</td>
+                  <td class="mono">{{ row.RoleName | default('—') | e }}</td>
+                  <td class="mono">{{ row.AvailabilityMode | default('—') | e }}</td>
+                  <td class="mono">{{ row.ConnectedState | default('—') | e }}</td>
+                  <td class="mono">{{ row.SyncHealth | default('—') | e }}</td>
+                </tr>
+                {% endfor %}
+              </table>
+              {% endif %}
+
+              <h2>Detalhes técnicos da falha</h2>
+              <table>
+                <tr>
+                  <th>Host</th>
+                  <th>Instância</th>
+                  <th>Connection Target</th>
+                  <th>Atividade</th>
+                  <th>Erro resumido</th>
+                  <th>Detalhe</th>
+                </tr>
+                {% for r in _fail_failed_results %}
+                  {% set failed_item = r.item | default({}) %}
+                  {% set delegated = r._ansible_delegated_vars | default({}) %}
+                  {% set first_err = (r.error | default([]) | first) | default({}) %}
+                  {% set err_exception = first_err.exception | default({}) %}
+                  {% set err_category = first_err.category_info | default({}) %}
+                  {% set err_msg = err_exception.message | default(r.msg | default(first_err.output | default(r.stderr | default('Erro não mapeado')))) %}
+                  {% set err_detail = first_err.output | default(r.stderr | default(r.host_err | default(r.msg | default('—')))) %}
+                <tr class="bad">
+                  <td class="mono">{{ failed_item.host | default(delegated.ansible_host | default('—')) | e }}</td>
+                  <td class="mono">{{ failed_item.instance_name | default('—') | e }}</td>
+                  <td class="mono">{{ failed_item.connection_target | default('—') | e }}</td>
+                  <td class="mono">{{ err_category.activity | default(_fail_action | default('—')) | e }}</td>
+                  <td class="mono">{{ err_msg | default('—') | e }}</td>
+                  <td class="mono">{{ err_detail | default('—') | e }}</td>
+                </tr>
+                {% endfor %}
+              </table>
+
+              {% set ok_loop_results = _fail_results_all | rejectattr('failed', 'equalto', true) | list %}
+              {% if ok_loop_results | length > 0 %}
+              <h2>Itens que concluíram OK no mesmo loop antes da falha</h2>
+              <table>
+                <tr>
+                  <th>Host</th>
+                  <th>Instância</th>
+                  <th>Connection Target</th>
+                  <th>Status</th>
+                </tr>
+                {% for r in ok_loop_results %}
+                  {% set ok_item = r.item | default({}) %}
+                  {% if ok_item %}
+                  <tr class="ok">
+                    <td class="mono">{{ ok_item.host | default('—') | e }}</td>
+                    <td class="mono">{{ ok_item.instance_name | default('—') | e }}</td>
+                    <td class="mono">{{ ok_item.connection_target | default('—') | e }}</td>
+                    <td><span class="badge-ok">OK</span></td>
+                  </tr>
+                  {% endif %}
+                {% endfor %}
+              </table>
+              {% endif %}
+
+              {% if pr.actions is defined and (pr.actions | length) > 0 %}
+              <h2>Ações registradas antes da falha</h2>
+              <table>
+                <tr>
+                  <th>Host</th>
+                  <th>Instância</th>
+                  <th>Etapa</th>
+                  <th>Mensagem</th>
+                </tr>
+                {% for action in pr.actions %}
+                <tr class="{{ 'bad' if (action.rc | default(0) | int) not in [0, 3010] else 'ok' }}">
+                  <td class="mono">{{ action.host | default('—') | e }}</td>
+                  <td class="mono">{{ action.instance_name | default('—') | e }}</td>
+                  <td class="mono">{{ action.step | default('—') | e }}</td>
+                  <td class="mono">{{ action.message | default(action.stdout | default('—')) | e }}</td>
+                </tr>
+                {% endfor %}
+              </table>
+              {% endif %}
+
+              <h2>Orientação para correção</h2>
+              <table>
+                <tr>
+                  <th>Cenário detectado</th>
+                  <th>Ação recomendada</th>
+                </tr>
+                {% if 'login failed for user' in raw_lower %}
+                <tr class="bad">
+                  <td>Falha de login no SQL Server</td>
+                  <td class="mono">
+                    Validar na instância SQL afetada se o login usado pelo Ansible existe e possui permissão.
+                    Para este tipo de precheck, o usuário precisa conseguir executar Invoke-Sqlcmd e consultar SELECT @@VERSION.
+                    Se a automação também aplica patch e valida AG, garanta as permissões necessárias nas instâncias envolvidas.
+                  </td>
+                </tr>
+                {% elif 'winrm' in raw_lower or 'unreachable' in raw_lower %}
+                <tr class="bad">
+                  <td>Falha de conectividade com o Windows</td>
+                  <td class="mono">
+                    Validar DNS, firewall, porta WinRM, credencial, transporte NTLM/Kerberos e acesso do controller/AAP ao host.
+                  </td>
+                </tr>
+                {% elif 'timeout' in raw_lower %}
+                <tr class="warn">
+                  <td>Timeout</td>
+                  <td class="mono">
+                    Validar se o timeout configurado é suficiente para o ambiente e se o SQL/AG ficou indisponível por mais tempo que o esperado.
+                  </td>
+                </tr>
+                {% else %}
+                <tr class="warn">
+                  <td>Falha genérica</td>
+                  <td class="mono">
+                    Usar a seção "Detalhes técnicos da falha" para identificar o host, instância, módulo e mensagem retornada.
+                  </td>
+                </tr>
+                {% endif %}
               </table>
 
         - name: Publicar para e-mail (falha)
@@ -130,7 +489,7 @@
 
         - name: Aviso de falha tratada
           ansible.builtin.debug:
-            msg: "Falha tratada: {{ _fail_task }} / {{ _fail_action }}. O e-mail de falha será enviado."
+            msg: "Falha tratada: {{ _fail_task }} / {{ _fail_action }}. Detalhes técnicos foram adicionados ao e-mail de falha."
 
       always:
         - name: Desmontar CIFS no controller
