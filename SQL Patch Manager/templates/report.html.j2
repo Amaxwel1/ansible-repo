@@ -373,7 +373,7 @@
   {% for item in visible_actions %}
     {% set rc = item.rc | default('') %}
     {% set row_class = 'ok' %}
-    {% if item.step in ['wait_ag_healthy', 'wait_single_instance_ready', 'wait_single_instance_ready_after_reboot', 'wait_ag_instance_ready_after_reboot', 'reboot_before_patch', 'wait_single_instance_ready_after_pre_patch_reboot', 'wait_ag_instance_ready_after_pre_patch_reboot'] %}
+    {% if item.step in ['wait_ag_healthy', 'wait_single_instance_ready', 'wait_single_instance_ready_after_reboot', 'wait_ag_instance_ready_after_reboot', 'reboot_before_patch', 'reboot_before_patch_skipped', 'wait_single_instance_ready_after_pre_patch_reboot', 'wait_ag_instance_ready_after_pre_patch_reboot'] %}
       {% set row_class = 'ok' %}
     {% elif rc != '' and (rc | int) not in [0, 3010] %}
       {% set row_class = 'bad' %}
@@ -389,6 +389,8 @@
       {% set step_label = 'Validação final da instância' %}
     {% elif item.step == 'reboot_before_patch' %}
       {% set step_label = 'Reboot antes do patch' %}
+    {% elif item.step == 'reboot_before_patch_skipped' %}
+      {% set step_label = 'Reboot antes do patch ignorado' %}
     {% elif item.step == 'reboot_after_validation' %}
       {% set step_label = 'Reboot após validação final' %}
     {% elif item.step == 'reboot_after_validation' %}
