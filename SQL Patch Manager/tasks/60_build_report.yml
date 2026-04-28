@@ -1,7 +1,7 @@
 ---
 - name: Registrar horário de término da atividade
   ansible.builtin.set_fact:
-    sql_report_finished_at: "{{ lookup('pipe', 'TZ=\"' ~ (sql_report_timezone | default('America/Sao_Paulo')) ~ '\" date \"+%d/%m/%Y %H:%M:%S %Z\"') }}"
+    sql_report_finished_at: "{{ lookup('pipe', 'TZ=\"' ~ (sql_report_timezone | default('America/Sao_Paulo')) ~ '\" date \"+%H:%M:%S\"') }}"
     sql_report_finished_epoch: "{{ lookup('pipe', 'date +%s') | int }}"
 
 - name: Calcular duração total da atividade
