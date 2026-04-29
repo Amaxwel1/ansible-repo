@@ -50,6 +50,17 @@
     - f5_enable_duplicate_cleanup | bool
   changed_when: false
 
+- name: Config Sync após cleanup quando houve alteração no site
+  ansible.builtin.include_tasks: 70_configsync_site.yml
+  vars:
+    f5_configsync_reason: "cleanup de certificados duplicados"
+  when:
+    - f5_certs_mode == 'check'
+    - f5_enable_duplicate_cleanup | bool
+    - f5_enable_configsync | bool
+    - f5_configsync_run_on_cleanup | bool
+    - (_deleted_certs_now | default([]) | length) > 0
+
 - name: Remover certs deletados das listas de severidade
   ansible.builtin.set_fact:
     f5_expired: >-
@@ -145,7 +156,12 @@
               'warning': (f5_warning | default([])),
               'ok': (f5_ok | default([])),
               'duplicates': (f5_duplicates | default([])),
-              'cleanup_results': (f5_cleanup_results | default([]))
+              'cleanup_results': (f5_cleanup_results | default([])),
+              'configsync_results': (
+                (f5_configsync_results | default([]))
+                | selectattr('site', 'equalto', site.name)
+                | list
+              )
             }
           }, recursive=True)
       }}
