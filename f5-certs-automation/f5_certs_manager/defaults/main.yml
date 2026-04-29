@@ -96,4 +96,5 @@ f5_configsync_delay: 15
 #   hml: "grp_sync"
 #   prd: "grp_sync"
 #   dr: "grp_sync"
-f5_configsync_device_group_by_site: {}
+f5_configsync_device_group_by_site:
+  hml: "grp_sync"
