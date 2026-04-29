@@ -72,3 +72,28 @@ f5_enable_chain_on_profile: false
 # ====== LAB / simulação ======
 # Deixar 0 normalmente
 f5_timewarp_days: 20
+
+# Config Sync HA
+# Habilita execução de Config Sync após alterações no F5.
+f5_enable_configsync: true
+f5_configsync_run_on_apply: true
+# Executa config-sync após CHECK quando o cleanup deletou/reapontou certificados.
+f5_configsync_run_on_cleanup: true
+# Se true, a automação falha caso o sync falhe ou não fique In Sync.
+# Se false, apenas registra no report.
+f5_configsync_fail_on_error: true
+
+# Valida status após executar o sync.
+f5_configsync_validate_after: true
+
+# Quantidade de tentativas e intervalo para aguardar o status In Sync.
+f5_configsync_retries: 20
+f5_configsync_delay: 15
+
+# Device group usado para sync por site.
+# Exemplo:
+# f5_configsync_device_group_by_site:
+#   hml: "grp_sync"
+#   prd: "grp_sync"
+#   dr: "grp_sync"
+f5_configsync_device_group_by_site: {}
