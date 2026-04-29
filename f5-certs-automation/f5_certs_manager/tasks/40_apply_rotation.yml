@@ -55,3 +55,16 @@
         if ((rot.profile_name | default('') | trim | length) > 0)
         else ('prefix=' ~ (rot.certificate_prefix | default('') | trim))
       }}
+
+- name: Config Sync após APPLY quando houve alteração no site
+  ansible.builtin.include_tasks: 70_configsync_site.yml
+  loop: "{{ f5_sites_eff | default([]) }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.name }}:{{ site.server }}"
+  vars:
+    f5_configsync_reason: "apply de certificados"
+  when:
+    - f5_enable_configsync | bool
+    - f5_configsync_run_on_apply | bool
+    - (f5_rotation_results | default([]) | selectattr('site', 'equalto', site.name) | list | length) > 0
