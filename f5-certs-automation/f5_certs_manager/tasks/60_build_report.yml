@@ -1,0 +1,475 @@
+---
+- name: Formatar data do report (pt-BR)
+  ansible.builtin.set_fact:
+    report_date_br: "{{ '%d/%m/%Y %H:%M:%S' | strftime(_now_epoch | int) }}"
+  changed_when: false
+
+- name: Montar HTML do report
+  ansible.builtin.set_fact:
+    f5_report_html: |
+      <style>
+        body { margin:0; padding:0; font-family: Arial, sans-serif; font-size: 13px; color:#111; }
+        table { border-collapse: collapse; }
+        th, td { font-family: Arial, sans-serif; font-size: 13px; }
+        .muted { color:#666; }
+        .code { background:#f3f3f3; padding:2px 6px; border-radius:6px; font-family: Consolas, monospace; font-size:12px; }
+        .tag { display:inline-block; padding:2px 8px; border-radius:8px; font-weight:800; font-size:12px; }
+        .tag-ok { background:#e8f5e9; color:#1b5e20; }
+        .tag-warn { background:#fff3e0; color:#b26a00; }
+        .tag-crit { background:#ffebee; color:#b00020; }
+        .tag-gray { background:#eeeeee; color:#333; }
+        .pill { display:inline-block; padding:4px 10px; border-radius:999px; font-weight:900; font-size:12px; color:#fff; }
+        .pill-ok { background:#1b5e20; }
+        .pill-warn { background:#b26a00; }
+        .pill-crit { background:#b00020; }
+        .h2 { font-size:18px; font-weight:900; margin:0; padding:0; color:#fff; }
+        .hdr { background:#263238; color:#fff; border-radius:12px; }
+        .section-title { margin: 16px 0 6px 0; font-size: 14px; font-weight: 900; }
+        .tbl { width:100%; border:1px solid #e0e0e0; }
+        .tbl th { background:#f5f5f5; text-align:left; padding:8px; border:1px solid #e0e0e0; }
+        .tbl td { padding:8px; border:1px solid #e0e0e0; vertical-align:top; }
+      </style>
+
+      {% macro fmt_f5_gmt(s) -%}
+        {%- if (s | default('') | trim | length) == 0 -%}
+          —
+        {%- else -%}
+          {%- set cleaned = (s | trim | regex_replace('\\s+', ' ')) -%}
+          {%- set dt = (cleaned | to_datetime('%b %d %H:%M:%S %Y %Z')) -%}
+          {{ dt.strftime('%d/%m/%Y %H:%M:%S') }}
+        {%- endif -%}
+      {%- endmacro %}
+
+      {% macro plural_dia(n) -%}
+        {%- if (n | int) == 1 -%}dia{%- else -%}dias{%- endif -%}
+      {%- endmacro %}
+
+      {% macro badge_days(days, level) -%}
+        {%- set d = (days | default(0) | int) -%}
+        {%- if d < 0 -%}
+          <span class="tag tag-crit">EXPIRADO</span>
+        {%- elif d == 0 -%}
+          <span class="tag tag-crit">HOJE</span>
+        {%- else -%}
+          {%- if level == 'crit' -%}
+            <span class="tag tag-crit">{{ d }} {{ plural_dia(d) }}</span>
+          {%- elif level == 'warn' -%}
+            <span class="tag tag-warn">{{ d }} {{ plural_dia(d) }}</span>
+          {%- else -%}
+            <span class="tag tag-ok">{{ d }} {{ plural_dia(d) }}</span>
+          {%- endif -%}
+        {%- endif -%}
+      {%- endmacro %}
+
+      {% macro cert_table(title, rows, level) -%}
+        <div class="section-title">{{ title }}</div>
+        {% if (rows | default([]) | length) == 0 %}
+          <div class="muted" style="margin-bottom:6px;">Nenhum item.</div>
+        {% else %}
+          <table class="tbl" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+            <tr>
+              <th>Certificado</th>
+              <th>Expira em</th>
+              <th>Dias</th>
+              <th>Em uso (profiles)</th>
+            </tr>
+            {% for r in rows %}
+            <tr>
+              <td><span class="code">{{ r.full_path | default('—') }}</span></td>
+              <td>{{ fmt_f5_gmt(r.expirationString | default('')) }}</td>
+              <td>{{ badge_days(r.days_left, level) }}</td>
+              <td class="muted">
+                {% set used = (r.used_by_profiles | default([])) %}
+                {% set usedc = (r.used_as_chain_by_profiles | default([])) %}
+                {% set allu = (used + usedc) | unique %}
+                {{ allu | join('<br/>') if (allu | length) > 0 else '—' }}
+              </td>
+            </tr>
+            {% endfor %}
+          </table>
+        {% endif %}
+      {%- endmacro %}
+
+      {% set ns = namespace(has_crit=false, has_warn=false, apply_fail=false) %}
+      {% for si in (f5_site_findings_by_site | default({}) | dict2items) %}
+        {% set s = (si.value | default({})) %}
+        {% if (s.expired | default([]) | length) > 0 or (s.critical | default([]) | length) > 0 %}
+          {% set ns.has_crit = true %}
+        {% elif (s.warning | default([]) | length) > 0 %}
+          {% set ns.has_warn = true %}
+        {% endif %}
+      {% endfor %}
+      {% for h in (f5_handshake_results | default([])) %}
+        {% if not (h.ok | default(false) | bool) %}
+          {% set ns.apply_fail = true %}
+        {% endif %}
+      {% endfor %}
+
+      {% set level = 'ok' %}
+      {% if ns.has_crit or ns.apply_fail %}{% set level = 'crit' %}{% elif ns.has_warn %}{% set level = 'warn' %}{% endif %}
+
+      {% set pill_class = 'pill-ok' %}
+      {% if level == 'crit' %}{% set pill_class = 'pill-crit' %}{% endif %}
+      {% if level == 'warn' %}{% set pill_class = 'pill-warn' %}{% endif %}
+
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%; margin:0; padding:0;">
+        <tr>
+          <td align="left" style="padding: 8px 8px 12px 8px;">
+
+            <table role="presentation" width="980" cellspacing="0" cellpadding="0" border="0" style="width:980px; max-width:980px;">
+              <tr>
+                <td>
+
+                  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" class="hdr" style="border-radius:12px;">
+                    <tr>
+                      <td style="padding:14px 16px;">
+                        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                          <tr>
+                            <td align="left" valign="top">
+                              <div class="h2">F5 - Gerenciamento de Certificados</div>
+                              <div style="opacity:0.92; margin-top:4px;">
+                                Sites:
+                                <b>
+                                {% for si in (f5_site_findings_by_site | default({}) | dict2items) %}
+                                  {% set s = si.value %}
+                                  {{ s.name | default(si.key) }} ({{ s.server | default('—') }}){% if not loop.last %} &nbsp;•&nbsp; {% endif %}
+                                {% endfor %}
+                                </b><br/>
+                                Modo: <b>{{ f5_certs_mode }}</b><br/>
+                                Data: <b>{{ report_date_br }}</b><br/>
+                              </div>
+                              <div style="opacity:0.85; font-size:12px; margin-top:2px;">
+                                Warning ≤ {{ f5_warning_days }}d &nbsp;•&nbsp; Critical ≤ {{ f5_critical_days }}d &nbsp;•&nbsp; Timewarp: {{ f5_timewarp_days | default(0) }}d
+                              </div>
+                            </td>
+                            <td align="right" valign="top" style="padding-left:10px;">
+                              <span class="pill {{ pill_class }}">{{ level | upper }}</span>
+                            </td>
+                          </tr>
+                        </table>
+                      </td>
+                    </tr>
+                  </table>
+
+                  {% if f5_certs_mode == 'apply' %}
+                    <div class="section-title">Resumo das trocas (apply)</div>
+
+                    {% if (f5_rotation_results | default([]) | length) == 0 %}
+                      <div class="muted" style="margin-bottom:6px;">Nenhuma rotação registrada.</div>
+                    {% else %}
+                      {% set rotation_ids = (f5_rotation_results | default([]) | map(attribute='rotation_id') | reject('equalto','') | unique | list) %}
+
+                      {% for rid in rotation_ids %}
+                        {% set group_rows = (f5_rotation_results | default([]) | selectattr('rotation_id', 'equalto', rid) | list) %}
+                        {% set first = group_rows[0] %}
+                        {% set profiles = (group_rows | map(attribute='profile') | unique | list) %}
+                        {% set vals = (f5_handshake_results | default([]) | selectattr('rotation_id','equalto', rid) | list) %}
+
+                        {% set vns = namespace(keys=[], rows=[]) %}
+                        {% for rr in group_rows %}
+                          {% for v in (rr.virtuals | default([])) %}
+                            {% set vk = (v.virtual | default('')) ~ '|' ~ (v.pool | default('')) ~ '|' ~ (v.target | default('')) %}
+                            {% if vk not in vns.keys %}
+                              {% set _ = vns.keys.append(vk) %}
+                              {% set _ = vns.rows.append(v) %}
+                            {% endif %}
+                          {% endfor %}
+                        {% endfor %}
+
+                        <table class="tbl" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-bottom:10px;">
+                          <tr><th colspan="2">Troca</th></tr>
+                          <tr>
+                            <td><b>Site</b></td>
+                            <td><span class="tag tag-gray">{{ first.site | default('prd') }}</span> &nbsp; <span class="code">{{ first.f5_server | default('—') }}</span></td>
+                          </tr>
+                          <tr>
+                            <td><b>Origem da descoberta</b></td>
+                            <td><span class="code">{{ first.discovery_source | default(first.seed_profile | default('—')) }}</span></td>
+                          </tr>
+                          <tr>
+                            <td><b>Cert compartilhado atual</b></td>
+                            <td><span class="code">{{ first.current_shared_cert | default(first.shared_current_cert | default('—')) }}</span></td>
+                          </tr>
+                          <tr>
+                            <td width="25%"><b>Profiles alterados</b></td>
+                            <td class="muted">
+                              {% for p in profiles %}
+                                <span class="code">{{ p }}</span>{% if not loop.last %}<br/>{% endif %}
+                              {% endfor %}
+                            </td>
+                          </tr>
+                          <tr>
+                            <td><b>Pasta CIFS</b></td>
+                            <td><span class="code">{{ first.cifs_folder | default(first.cifsp_folder | default('—')) }}</span></td>
+                          </tr>
+                          <tr>
+                            <td><b>Antes</b></td>
+                            <td class="muted">
+                              cert: <span class="code">{{ first.before.cert }}</span><br/>
+                              key: <span class="code">{{ first.before.key | default('—') }}</span><br/>
+                              chain: <span class="code">{{ first.before.chain }}</span>
+                            </td>
+                          </tr>
+                          <tr>
+                            <td><b>Depois</b></td>
+                            <td class="muted">
+                              cert: <span class="code">{{ first.after.cert }}</span><br/>
+                              key: <span class="code">{{ first.after.key | default('—') }}</span><br/>
+                              chain: <span class="code">{{ first.after.chain }}</span>
+                            </td>
+                          </tr>
+                          <tr>
+                            <td><b>Virtuals / Pools / Targets</b></td>
+                            <td class="muted">
+                              {% if (vns.rows | length) == 0 %}
+                                —
+                              {% else %}
+                                {% for v in vns.rows %}
+                                  <span class="code">{{ v.virtual | default('—') }}</span>
+                                  {% if v.pool|default('')|length > 0 %} → <b>pool:</b> <span class="code">{{ v.pool }}</span>{% endif %}
+                                  {% if v.target|default('')|length > 0 %} → <b>target:</b> <span class="code">{{ v.target }}</span>{% endif %}
+                                  <br/>
+                                {% endfor %}
+                              {% endif %}
+                            </td>
+                          </tr>
+                        </table>
+
+                        <div class="section-title" style="margin-top:0;">Validação (TLS + HTTP)</div>
+                        {% if vals | length == 0 %}
+                          <div class="muted" style="margin-bottom:12px;">Sem validação configurada para esta troca.</div>
+                        {% else %}
+                          <table class="tbl" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-bottom:14px;">
+                            <tr>
+                              <th>Target</th><th>SNI</th><th>Path</th><th>Enddate visto</th><th>Esperado</th>
+                              <th>TLS</th><th>HTTP</th><th>Status</th>
+                            </tr>
+                            {% for h in vals %}
+                            <tr>
+                              <td><span class="code">{{ h.target }}</span></td>
+                              <td>{{ h.sni if (h.sni|default('')|length)>0 else '—' }}</td>
+                              <td><span class="code">{{ h.path | default('/') }}</span></td>
+                              <td class="muted">{{ h.enddate if (h.enddate|default('')|length)>0 else '—' }}</td>
+                              <td class="muted">{{ h.expected_enddate if (h.expected_enddate|default('')|length)>0 else '—' }}</td>
+                              <td>{% if h.tls_ok %}<span class="tag tag-ok">OK</span>{% else %}<span class="tag tag-crit">FAIL</span>{% endif %}</td>
+                              <td>
+                                {% if h.http_error|default('') == 'curl_not_found' %}
+                                  <span class="tag tag-gray">SEM CURL</span>
+                                  <div class="muted">fallback: {{ h.http_code if (h.http_code|default('')|length)>0 else '—' }}</div>
+                                {% else %}
+                                  {% if h.http_ok %}
+                                    <span class="tag tag-ok">{{ h.http_code }}</span>
+                                  {% else %}
+                                    <span class="tag tag-crit">{{ h.http_code if (h.http_code|default('')|length)>0 else '—' }}</span>
+                                  {% endif %}
+                                {% endif %}
+                              </td>
+                              <td>{% if h.ok %}<span class="tag tag-ok">OK</span>{% else %}<span class="tag tag-crit">FAIL</span>{% endif %}</td>
+                            </tr>
+                            {% endfor %}
+                          </table>
+                        {% endif %}
+                      {% endfor %}
+                    {% endif %}
+                  {% endif %}
+
+                  {% for si in (f5_site_findings_by_site | default({}) | dict2items) %}
+                    {% set s = (si.value | default({})) %}
+
+                    {% set expired_sorted = (s.expired | default([]) | sort(attribute='days_left')) %}
+                    {% set critical_sorted = (s.critical | default([]) | sort(attribute='days_left')) %}
+                    {% set warning_sorted = (s.warning | default([]) | sort(attribute='days_left')) %}
+                    {% set ok_sorted = (s.ok | default([]) | sort(attribute='days_left')) %}
+
+                    <div class="section-title" style="margin-top:14px;">
+                      Inventário - {{ s.name | default(si.key) }} ({{ s.server | default('—') }})
+                    </div>
+
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:6px;">
+                      <tr>
+                        <td style="padding:0;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                            <tr>
+                              <td width="20%" style="padding:6px;">
+                                <table role="presentation" width="100%" class="tbl" cellspacing="0" cellpadding="0" border="0" style="border-radius:12px; background:#fafafa;">
+                                  <tr><td style="border:none; padding:10px 12px;">
+                                    <div class="muted" style="font-size:12px;">Expirados</div>
+                                    <div style="font-size:20px; font-weight:900; color:#b00020;">{{ expired_sorted|length }}</div>
+                                  </td></tr>
+                                </table>
+                              </td>
+                              <td width="20%" style="padding:6px;">
+                                <table role="presentation" width="100%" class="tbl" cellspacing="0" cellpadding="0" border="0" style="border-radius:12px; background:#fafafa;">
+                                  <tr><td style="border:none; padding:10px 12px;">
+                                    <div class="muted" style="font-size:12px;">Críticos (≤ {{ f5_critical_days }}d)</div>
+                                    <div style="font-size:20px; font-weight:900; color:#b00020;">{{ critical_sorted|length }}</div>
+                                  </td></tr>
+                                </table>
+                              </td>
+                              <td width="20%" style="padding:6px;">
+                                <table role="presentation" width="100%" class="tbl" cellspacing="0" cellpadding="0" border="0" style="border-radius:12px; background:#fafafa;">
+                                  <tr><td style="border:none; padding:10px 12px;">
+                                    <div class="muted" style="font-size:12px;">Warning (≤ {{ f5_warning_days }}d)</div>
+                                    <div style="font-size:20px; font-weight:900; color:#b26a00;">{{ warning_sorted|length }}</div>
+                                  </td></tr>
+                                </table>
+                              </td>
+                              <td width="20%" style="padding:6px;">
+                                <table role="presentation" width="100%" class="tbl" cellspacing="0" cellpadding="0" border="0" style="border-radius:12px; background:#fafafa;">
+                                  <tr><td style="border:none; padding:10px 12px;">
+                                    <div class="muted" style="font-size:12px;">OK</div>
+                                    <div style="font-size:20px; font-weight:900; color:#1b5e20;">{{ ok_sorted|length }}</div>
+                                  </td></tr>
+                                </table>
+                              </td>
+                              <td width="20%" style="padding:6px;">
+                                <table role="presentation" width="100%" class="tbl" cellspacing="0" cellpadding="0" border="0" style="border-radius:12px; background:#fafafa;">
+                                  <tr><td style="border:none; padding:10px 12px;">
+                                    <div class="muted" style="font-size:12px;">Duplicados</div>
+                                    <div style="font-size:20px; font-weight:900;">{{ (s.duplicates | default([]) | length) }}</div>
+                                  </td></tr>
+                                </table>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                      </tr>
+                    </table>
+
+                    {{ cert_table('Expirados', expired_sorted, 'crit') }}
+                    {{ cert_table('Críticos',  critical_sorted, 'crit') }}
+                    {{ cert_table('Warning',   warning_sorted, 'warn') }}
+                    {% if f5_certs_mode == 'list' %}
+                    {{ cert_table('OK', ok_sorted, 'ok') }}
+                    {% endif %}
+
+                    <div class="section-title">Duplicidade (por SAN/Subject)</div>
+                    {% if (s.duplicates | default([]) | length) == 0 %}
+                      <div class="muted">Nenhum grupo duplicado identificado.</div>
+                    {% else %}
+                      <table class="tbl" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                        <tr>
+                          <th>Chave (SAN/Subject)</th>
+                          <th>Qtd</th>
+                          <th>Mais antigo</th>
+                          <th>Status deleção</th>
+                          <th>Em uso?</th>
+                        </tr>
+                        {% for d in (s.duplicates | default([])) %}
+                        <tr>
+                          <td><pre>{{ d.dup_key | default('') }}</pre></td>
+                          <td><span class="tag tag-gray">{{ d.count }}</span></td>
+                          <td>
+                            <span class="code">{{ d.oldest.full_path | default('—') }}</span><br/>
+                            <span class="muted">{{ fmt_f5_gmt(d.oldest.expirationString | default('')) }}</span>
+                          </td>
+                          <td>
+                            {% if d.delete_candidate %}
+                              <span class="tag tag-crit">CANDIDATO</span><br/>
+                              <span class="muted">Expirado há {{ d.days_since_expired_oldest }} {{ plural_dia(d.days_since_expired_oldest) }}</span>
+                            {% elif (d.oldest.days_left | default(0) | int) < 0 %}
+                              <span class="tag tag-warn">AGUARDANDO DELETE</span><br/>
+                              <span class="muted">Falta(m) {{ d.delete_in_days }} {{ plural_dia(d.delete_in_days) }}</span>
+                            {% else %}
+                              <span class="tag tag-ok">NÃO EXPIRADO</span>
+                            {% endif %}
+                          </td>
+                          <td>
+                            {% if d.oldest_in_use %}
+                              <span class="tag tag-crit">SIM</span>
+                            {% else %}
+                              <span class="tag tag-ok">NÃO</span>
+                            {% endif %}
+                          </td>
+                        </tr>
+                        {% endfor %}
+                      </table>
+                    {% endif %}
+
+                    {% if s.cleanup_results is defined and (s.cleanup_results | length) > 0 %}
+                      <div class="section-title">Limpeza de duplicados (executado)</div>
+                      <table class="tbl" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                        <tr>
+                          <th>Cert</th>
+                          <th>Ação</th>
+                          <th>Motivo/Detalhe</th>
+                          <th>Certificado destino</th>
+                          <th>Profiles ajustados</th>
+                        </tr>
+                        {% for c in s.cleanup_results %}
+                        <tr>
+                          <td><span class="code">{{ c.cert }}</span></td>
+                          <td>
+                            {% set act = (c.action | default('')) %}
+                            {% if act in ['DELETADO', 'DELETED'] %}
+                              <span class="tag tag-crit">DELETADO</span>
+                            {% elif act in ['PULADO', 'SKIPPED'] %}
+                              <span class="tag tag-gray">PULADO</span>
+                            {% else %}
+                              <span class="tag tag-gray">{{ act if (act | length) > 0 else '—' }}</span>
+                            {% endif %}
+                          </td>
+                          <td class="muted">{{ c.reason | default('—') }}</td>
+                          <td>
+                            {% set destino = (c.cert_destino | default(c.survivor | default(''))) %}
+                            {% if (destino | default('') | length) > 0 %}
+                              <span class="code">{{ destino }}</span>
+                            {% else %}
+                              —
+                            {% endif %}
+                          </td>
+                          <td class="muted">
+                            {% set perfis = (c.profiles_ajustados | default(c.profiles_repointed | default([]))) %}
+                            {% if (perfis | length) > 0 %}
+                              {{ perfis | join('<br/>') }}
+                            {% else %}
+                              —
+                            {% endif %}
+                          </td>
+                        </tr>
+                        {% endfor %}
+                      </table>
+                    {% endif %}
+
+                  {% endfor %}
+
+                </td>
+              </tr>
+            </table>
+
+          </td>
+        </tr>
+      </table>
+  changed_when: false
+
+- name: Definir subject do e-mail
+  ansible.builtin.set_fact:
+    _subject_level: >-
+      {%- set ns = namespace(has_crit=false, has_warn=false, apply_fail=false) -%}
+      {%- for si in (f5_site_findings_by_site | default({}) | dict2items) -%}
+        {%- set s = (si.value | default({})) -%}
+        {%- if (s.expired | default([]) | length) > 0 or (s.critical | default([]) | length) > 0 -%}
+          {%- set ns.has_crit = true -%}
+        {%- elif (s.warning | default([]) | length) > 0 -%}
+          {%- set ns.has_warn = true -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {%- for h in (f5_handshake_results | default([])) -%}
+        {%- if not (h.ok | default(false) | bool) -%}
+          {%- set ns.apply_fail = true -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ 'CRITICO' if (ns.has_crit or ns.apply_fail) else ('ALERTA' if ns.has_warn else 'OK') }}
+  changed_when: false
+
+- name: Publicar para e-mail (set_stats)
+  ansible.builtin.set_stats:
+    data:
+      send_mail_subject: >-
+        Ansible-Report ({{ _subject_level }}) - {{ awx_job_template_name | default('F5 Certificados') }} - Sites:
+        {%- for si in (f5_site_findings_by_site | default({}) | dict2items) -%}
+          {%- set s = si.value -%}
+          {{ s.name | default(si.key) }}={{ s.server | default('—') }}{% if not loop.last %} / {% endif %}
+        {%- endfor -%}
+        - Job #{{ awx_job_id | default('local') }}
+      send_mail_body: "{{ f5_report_html }}"
