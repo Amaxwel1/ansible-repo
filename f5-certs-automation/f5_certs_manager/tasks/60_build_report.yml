@@ -430,7 +430,42 @@
                         {% endfor %}
                       </table>
                     {% endif %}
-
+                    
+                    {% if s.configsync_results is defined and (s.configsync_results | length) > 0 %}
+                      <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Config Sync HA</div>
+                      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
+                        <tr>
+                          {{ th('Site') }}
+                          {{ th('Device Group') }}
+                          {{ th('Ação') }}
+                          {{ th('Status') }}
+                          {{ th('Motivo') }}
+                          {{ th('Detalhe') }}
+                        </tr>
+                        {% for cs in s.configsync_results %}
+                        <tr>
+                          {{ td_open() }}{{ cs.site | default('—') }}</td>
+                          {{ td_open() }}{{ code(cs.device_group | default('—')) }}</td>
+                          {{ td_open() }}{{ cs.action | default('—') }}</td>
+                          {{ td_open() }}
+                            {% set st = (cs.status | default('')) %}
+                            {% if st in ['IN_SYNC', 'EXECUTADO_SEM_VALIDACAO'] %}
+                              {{ badge(st, 'ok') }}
+                            {% elif st in ['SYNCING', 'CHANGES_PENDING', 'STATUS_DESCONHECIDO'] %}
+                              {{ badge(st, 'warn') }}
+                            {% elif st in ['FALHA'] %}
+                              {{ badge(st, 'crit') }}
+                            {% else %}
+                              {{ badge((st if (st | length) > 0 else '—'), 'gray') }}
+                            {% endif %}
+                          </td>
+                          {{ td_open() }}<span style="color:#666666;">{{ cs.reason | default('—') }}</span></td>
+                          {{ td_open() }}<span style="color:#666666;">{{ cs.message | default('—') }}</span></td>
+                        </tr>
+                        {% endfor %}
+                      </table>
+                    {% endif %}
+                    
                   {% endfor %}
 
                 </td>
