@@ -7,29 +7,6 @@
 - name: Montar HTML do report
   ansible.builtin.set_fact:
     f5_report_html: |
-      <style>
-        body { margin:0; padding:0; font-family: Arial, sans-serif; font-size: 13px; color:#111; }
-        table { border-collapse: collapse; }
-        th, td { font-family: Arial, sans-serif; font-size: 13px; }
-        .muted { color:#666; }
-        .code { background:#f3f3f3; padding:2px 6px; border-radius:6px; font-family: Consolas, monospace; font-size:12px; }
-        .tag { display:inline-block; padding:2px 8px; border-radius:8px; font-weight:800; font-size:12px; }
-        .tag-ok { background:#e8f5e9; color:#1b5e20; }
-        .tag-warn { background:#fff3e0; color:#b26a00; }
-        .tag-crit { background:#ffebee; color:#b00020; }
-        .tag-gray { background:#eeeeee; color:#333; }
-        .pill { display:inline-block; padding:4px 10px; border-radius:999px; font-weight:900; font-size:12px; color:#fff; }
-        .pill-ok { background:#1b5e20; }
-        .pill-warn { background:#b26a00; }
-        .pill-crit { background:#b00020; }
-        .h2 { font-size:18px; font-weight:900; margin:0; padding:0; color:#fff; }
-        .hdr { background:#263238; color:#fff; border-radius:12px; }
-        .section-title { margin: 16px 0 6px 0; font-size: 14px; font-weight: 900; }
-        .tbl { width:100%; border:1px solid #e0e0e0; }
-        .tbl th { background:#f5f5f5; text-align:left; padding:8px; border:1px solid #e0e0e0; }
-        .tbl td { padding:8px; border:1px solid #e0e0e0; vertical-align:top; }
-      </style>
-
       {% macro fmt_f5_gmt(s) -%}
         {%- if (s | default('') | trim | length) == 0 -%}
           —
@@ -44,45 +21,79 @@
         {%- if (n | int) == 1 -%}dia{%- else -%}dias{%- endif -%}
       {%- endmacro %}
 
+      {% macro code(v) -%}
+        <span style="font-family:Consolas,'Courier New',monospace;font-size:12px;background-color:#f3f3f3;color:#222;padding:2px 5px;">{{ v | default('—') }}</span>
+      {%- endmacro %}
+
+      {% macro muted(v) -%}
+        <span style="color:#666666;">{{ v }}</span>
+      {%- endmacro %}
+
+      {% macro badge(text, kind) -%}
+        {%- if kind == 'crit' -%}
+          <span style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;background-color:#ffebee;color:#b00020;padding:2px 6px;">{{ text }}</span>
+        {%- elif kind == 'warn' -%}
+          <span style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;background-color:#fff3e0;color:#b26a00;padding:2px 6px;">{{ text }}</span>
+        {%- elif kind == 'ok' -%}
+          <span style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;background-color:#e8f5e9;color:#1b5e20;padding:2px 6px;">{{ text }}</span>
+        {%- else -%}
+          <span style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;background-color:#eeeeee;color:#333333;padding:2px 6px;">{{ text }}</span>
+        {%- endif -%}
+      {%- endmacro %}
+
       {% macro badge_days(days, level) -%}
         {%- set d = (days | default(0) | int) -%}
         {%- if d < 0 -%}
-          <span class="tag tag-crit">EXPIRADO</span>
+          {{ badge('EXPIRADO', 'crit') }}
         {%- elif d == 0 -%}
-          <span class="tag tag-crit">HOJE</span>
+          {{ badge('HOJE', 'crit') }}
         {%- else -%}
           {%- if level == 'crit' -%}
-            <span class="tag tag-crit">{{ d }} {{ plural_dia(d) }}</span>
+            {{ badge(d ~ ' ' ~ plural_dia(d), 'crit') }}
           {%- elif level == 'warn' -%}
-            <span class="tag tag-warn">{{ d }} {{ plural_dia(d) }}</span>
+            {{ badge(d ~ ' ' ~ plural_dia(d), 'warn') }}
           {%- else -%}
-            <span class="tag tag-ok">{{ d }} {{ plural_dia(d) }}</span>
+            {{ badge(d ~ ' ' ~ plural_dia(d), 'ok') }}
           {%- endif -%}
         {%- endif -%}
       {%- endmacro %}
 
+      {% macro th(v) -%}
+        <th bgcolor="#f2f2f2" style="background-color:#f2f2f2;color:#111111;font-family:Arial,sans-serif;font-size:13px;font-weight:bold;text-align:left;border:1px solid #d9d9d9;padding:8px;">{{ v }}</th>
+      {%- endmacro %}
+
+      {% macro td_open() -%}
+        <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">
+      {%- endmacro %}
+
       {% macro cert_table(title, rows, level) -%}
-        <div class="section-title">{{ title }}</div>
+        <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">{{ title }}</div>
         {% if (rows | default([]) | length) == 0 %}
-          <div class="muted" style="margin-bottom:6px;">Nenhum item.</div>
+          <div style="font-family:Arial,sans-serif;font-size:13px;color:#666666;margin-bottom:6px;">Nenhum item.</div>
         {% else %}
-          <table class="tbl" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
             <tr>
-              <th>Certificado</th>
-              <th>Expira em</th>
-              <th>Dias</th>
-              <th>Em uso (profiles)</th>
+              {{ th('Certificado') }}
+              {{ th('Expira em') }}
+              {{ th('Dias') }}
+              {{ th('Em uso (profiles)') }}
             </tr>
             {% for r in rows %}
             <tr>
-              <td><span class="code">{{ r.full_path | default('—') }}</span></td>
-              <td>{{ fmt_f5_gmt(r.expirationString | default('')) }}</td>
-              <td>{{ badge_days(r.days_left, level) }}</td>
-              <td class="muted">
+              {{ td_open() }}{{ code(r.full_path | default('—')) }}</td>
+              {{ td_open() }}{{ fmt_f5_gmt(r.expirationString | default('')) }}</td>
+              {{ td_open() }}{{ badge_days(r.days_left, level) }}</td>
+              {{ td_open() }}
                 {% set used = (r.used_by_profiles | default([])) %}
                 {% set usedc = (r.used_as_chain_by_profiles | default([])) %}
                 {% set allu = (used + usedc) | unique %}
-                {{ allu | join('<br/>') if (allu | length) > 0 else '—' }}
+                <span style="color:#666666;">
+                {% if (allu | length) > 0 %}
+                  {{ allu | join('<br/>') }}
+                {% else %}
+                  —
+                {% endif %}
+                </span>
               </td>
             </tr>
             {% endfor %}
@@ -106,28 +117,35 @@
       {% endfor %}
 
       {% set level = 'ok' %}
-      {% if ns.has_crit or ns.apply_fail %}{% set level = 'crit' %}{% elif ns.has_warn %}{% set level = 'warn' %}{% endif %}
+      {% if ns.has_crit or ns.apply_fail %}
+        {% set level = 'crit' %}
+      {% elif ns.has_warn %}
+        {% set level = 'warn' %}
+      {% endif %}
 
-      {% set pill_class = 'pill-ok' %}
-      {% if level == 'crit' %}{% set pill_class = 'pill-crit' %}{% endif %}
-      {% if level == 'warn' %}{% set pill_class = 'pill-warn' %}{% endif %}
+      {% set level_bg = '#1b5e20' %}
+      {% if level == 'crit' %}
+        {% set level_bg = '#b00020' %}
+      {% elif level == 'warn' %}
+        {% set level_bg = '#b26a00' %}
+      {% endif %}
 
-      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%; margin:0; padding:0;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
         <tr>
-          <td align="left" style="padding: 8px 8px 12px 8px;">
+          <td align="left" style="padding:8px 8px 12px 8px;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
 
-            <table role="presentation" width="980" cellspacing="0" cellpadding="0" border="0" style="width:980px; max-width:980px;">
+            <table role="presentation" width="980" cellspacing="0" cellpadding="0" border="0" style="width:980px;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
               <tr>
-                <td>
+                <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;">
 
-                  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" class="hdr" style="border-radius:12px;">
+                  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#263238" style="width:100%;background-color:#263238;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;">
                     <tr>
-                      <td style="padding:14px 16px;">
-                        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                      <td bgcolor="#263238" style="background-color:#263238;padding:14px 16px;font-family:Arial,sans-serif;color:#ffffff;">
+                        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;">
                           <tr>
-                            <td align="left" valign="top">
-                              <div class="h2">F5 - Gerenciamento de Certificados</div>
-                              <div style="opacity:0.92; margin-top:4px;">
+                            <td align="left" valign="top" style="font-family:Arial,sans-serif;color:#ffffff;">
+                              <div style="font-family:Arial,sans-serif;font-size:18px;font-weight:bold;color:#ffffff;margin:0;padding:0;">F5 - Gerenciamento de Certificados</div>
+                              <div style="font-family:Arial,sans-serif;font-size:13px;color:#dbe3e6;margin-top:4px;">
                                 Sites:
                                 <b>
                                 {% for si in (f5_site_findings_by_site | default({}) | dict2items) %}
@@ -138,12 +156,18 @@
                                 Modo: <b>{{ f5_certs_mode }}</b><br/>
                                 Data: <b>{{ report_date_br }}</b><br/>
                               </div>
-                              <div style="opacity:0.85; font-size:12px; margin-top:2px;">
+                              <div style="font-family:Arial,sans-serif;font-size:12px;color:#c8d1d5;margin-top:2px;">
                                 Warning ≤ {{ f5_warning_days }}d &nbsp;•&nbsp; Critical ≤ {{ f5_critical_days }}d &nbsp;•&nbsp; Timewarp: {{ f5_timewarp_days | default(0) }}d
                               </div>
                             </td>
-                            <td align="right" valign="top" style="padding-left:10px;">
-                              <span class="pill {{ pill_class }}">{{ level | upper }}</span>
+                            <td align="right" valign="top" style="font-family:Arial,sans-serif;color:#ffffff;padding-left:10px;">
+                              <table role="presentation" cellspacing="0" cellpadding="0" border="0" bgcolor="{{ level_bg }}" style="border-collapse:collapse;background-color:{{ level_bg }};">
+                                <tr>
+                                  <td bgcolor="{{ level_bg }}" style="background-color:{{ level_bg }};font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#ffffff;padding:4px 10px;text-align:center;">
+                                    {{ level | upper }}
+                                  </td>
+                                </tr>
+                              </table>
                             </td>
                           </tr>
                         </table>
@@ -152,10 +176,10 @@
                   </table>
 
                   {% if f5_certs_mode == 'apply' %}
-                    <div class="section-title">Resumo das trocas (apply)</div>
+                    <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Resumo das trocas (apply)</div>
 
                     {% if (f5_rotation_results | default([]) | length) == 0 %}
-                      <div class="muted" style="margin-bottom:6px;">Nenhuma rotação registrada.</div>
+                      <div style="font-family:Arial,sans-serif;font-size:13px;color:#666666;margin-bottom:6px;">Nenhuma rotação registrada.</div>
                     {% else %}
                       {% set rotation_ids = (f5_rotation_results | default([]) | map(attribute='rotation_id') | reject('equalto','') | unique | list) %}
 
@@ -176,95 +200,111 @@
                           {% endfor %}
                         {% endfor %}
 
-                        <table class="tbl" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-bottom:10px;">
-                          <tr><th colspan="2">Troca</th></tr>
+                        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
                           <tr>
-                            <td><b>Site</b></td>
-                            <td><span class="tag tag-gray">{{ first.site | default('prd') }}</span> &nbsp; <span class="code">{{ first.f5_server | default('—') }}</span></td>
+                            <th colspan="2" bgcolor="#f2f2f2" style="background-color:#f2f2f2;color:#111111;font-family:Arial,sans-serif;font-size:13px;font-weight:bold;text-align:left;border:1px solid #d9d9d9;padding:8px;">Troca</th>
                           </tr>
                           <tr>
-                            <td><b>Origem da descoberta</b></td>
-                            <td><span class="code">{{ first.discovery_source | default(first.seed_profile | default('—')) }}</span></td>
+                            {{ td_open() }}<b>Site</b></td>
+                            {{ td_open() }}{{ badge(first.site | default('prd'), 'gray') }} &nbsp; {{ code(first.f5_server | default('—')) }}</td>
                           </tr>
                           <tr>
-                            <td><b>Cert compartilhado atual</b></td>
-                            <td><span class="code">{{ first.current_shared_cert | default(first.shared_current_cert | default('—')) }}</span></td>
+                            {{ td_open() }}<b>Origem da descoberta</b></td>
+                            {{ td_open() }}{{ code(first.discovery_source | default(first.seed_profile | default('—'))) }}</td>
                           </tr>
                           <tr>
-                            <td width="25%"><b>Profiles alterados</b></td>
-                            <td class="muted">
+                            {{ td_open() }}<b>Cert compartilhado atual</b></td>
+                            {{ td_open() }}{{ code(first.current_shared_cert | default(first.shared_current_cert | default('—'))) }}</td>
+                          </tr>
+                          <tr>
+                            {{ td_open() }}<b>Profiles alterados</b></td>
+                            {{ td_open() }}
+                              <span style="color:#666666;">
                               {% for p in profiles %}
-                                <span class="code">{{ p }}</span>{% if not loop.last %}<br/>{% endif %}
+                                {{ code(p) }}{% if not loop.last %}<br/>{% endif %}
                               {% endfor %}
+                              </span>
                             </td>
                           </tr>
                           <tr>
-                            <td><b>Pasta CIFS</b></td>
-                            <td><span class="code">{{ first.cifs_folder | default(first.cifsp_folder | default('—')) }}</span></td>
+                            {{ td_open() }}<b>Pasta CIFS</b></td>
+                            {{ td_open() }}{{ code(first.cifs_folder | default(first.cifsp_folder | default('—'))) }}</td>
                           </tr>
                           <tr>
-                            <td><b>Antes</b></td>
-                            <td class="muted">
-                              cert: <span class="code">{{ first.before.cert }}</span><br/>
-                              key: <span class="code">{{ first.before.key | default('—') }}</span><br/>
-                              chain: <span class="code">{{ first.before.chain }}</span>
+                            {{ td_open() }}<b>Antes</b></td>
+                            {{ td_open() }}
+                              <span style="color:#666666;">
+                                cert: {{ code(first.before.cert) }}<br/>
+                                key: {{ code(first.before.key | default('—')) }}<br/>
+                                chain: {{ code(first.before.chain) }}
+                              </span>
                             </td>
                           </tr>
                           <tr>
-                            <td><b>Depois</b></td>
-                            <td class="muted">
-                              cert: <span class="code">{{ first.after.cert }}</span><br/>
-                              key: <span class="code">{{ first.after.key | default('—') }}</span><br/>
-                              chain: <span class="code">{{ first.after.chain }}</span>
+                            {{ td_open() }}<b>Depois</b></td>
+                            {{ td_open() }}
+                              <span style="color:#666666;">
+                                cert: {{ code(first.after.cert) }}<br/>
+                                key: {{ code(first.after.key | default('—')) }}<br/>
+                                chain: {{ code(first.after.chain) }}
+                              </span>
                             </td>
                           </tr>
                           <tr>
-                            <td><b>Virtuals / Pools / Targets</b></td>
-                            <td class="muted">
+                            {{ td_open() }}<b>Virtuals / Pools / Targets</b></td>
+                            {{ td_open() }}
+                              <span style="color:#666666;">
                               {% if (vns.rows | length) == 0 %}
                                 —
                               {% else %}
                                 {% for v in vns.rows %}
-                                  <span class="code">{{ v.virtual | default('—') }}</span>
-                                  {% if v.pool|default('')|length > 0 %} → <b>pool:</b> <span class="code">{{ v.pool }}</span>{% endif %}
-                                  {% if v.target|default('')|length > 0 %} → <b>target:</b> <span class="code">{{ v.target }}</span>{% endif %}
+                                  {{ code(v.virtual | default('—')) }}
+                                  {% if v.pool|default('')|length > 0 %} → <b>pool:</b> {{ code(v.pool) }}{% endif %}
+                                  {% if v.target|default('')|length > 0 %} → <b>target:</b> {{ code(v.target) }}{% endif %}
                                   <br/>
                                 {% endfor %}
                               {% endif %}
+                              </span>
                             </td>
                           </tr>
                         </table>
 
-                        <div class="section-title" style="margin-top:0;">Validação (TLS + HTTP)</div>
+                        <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:10px;margin-bottom:6px;">Validação (TLS + HTTP)</div>
                         {% if vals | length == 0 %}
-                          <div class="muted" style="margin-bottom:12px;">Sem validação configurada para esta troca.</div>
+                          <div style="font-family:Arial,sans-serif;font-size:13px;color:#666666;margin-bottom:12px;">Sem validação configurada para esta troca.</div>
                         {% else %}
-                          <table class="tbl" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-bottom:14px;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:14px;">
                             <tr>
-                              <th>Target</th><th>SNI</th><th>Path</th><th>Enddate visto</th><th>Esperado</th>
-                              <th>TLS</th><th>HTTP</th><th>Status</th>
+                              {{ th('Target') }}
+                              {{ th('SNI') }}
+                              {{ th('Path') }}
+                              {{ th('Enddate visto') }}
+                              {{ th('Esperado') }}
+                              {{ th('TLS') }}
+                              {{ th('HTTP') }}
+                              {{ th('Status') }}
                             </tr>
                             {% for h in vals %}
                             <tr>
-                              <td><span class="code">{{ h.target }}</span></td>
-                              <td>{{ h.sni if (h.sni|default('')|length)>0 else '—' }}</td>
-                              <td><span class="code">{{ h.path | default('/') }}</span></td>
-                              <td class="muted">{{ h.enddate if (h.enddate|default('')|length)>0 else '—' }}</td>
-                              <td class="muted">{{ h.expected_enddate if (h.expected_enddate|default('')|length)>0 else '—' }}</td>
-                              <td>{% if h.tls_ok %}<span class="tag tag-ok">OK</span>{% else %}<span class="tag tag-crit">FAIL</span>{% endif %}</td>
-                              <td>
+                              {{ td_open() }}{{ code(h.target) }}</td>
+                              {{ td_open() }}{{ h.sni if (h.sni|default('')|length)>0 else '—' }}</td>
+                              {{ td_open() }}{{ code(h.path | default('/')) }}</td>
+                              {{ td_open() }}<span style="color:#666666;">{{ h.enddate if (h.enddate|default('')|length)>0 else '—' }}</span></td>
+                              {{ td_open() }}<span style="color:#666666;">{{ h.expected_enddate if (h.expected_enddate|default('')|length)>0 else '—' }}</span></td>
+                              {{ td_open() }}{% if h.tls_ok %}{{ badge('OK', 'ok') }}{% else %}{{ badge('FAIL', 'crit') }}{% endif %}</td>
+                              {{ td_open() }}
                                 {% if h.http_error|default('') == 'curl_not_found' %}
-                                  <span class="tag tag-gray">SEM CURL</span>
-                                  <div class="muted">fallback: {{ h.http_code if (h.http_code|default('')|length)>0 else '—' }}</div>
+                                  {{ badge('SEM CURL', 'gray') }}
+                                  <div style="font-family:Arial,sans-serif;font-size:12px;color:#666666;">fallback: {{ h.http_code if (h.http_code|default('')|length)>0 else '—' }}</div>
                                 {% else %}
                                   {% if h.http_ok %}
-                                    <span class="tag tag-ok">{{ h.http_code }}</span>
+                                    {{ badge(h.http_code, 'ok') }}
                                   {% else %}
-                                    <span class="tag tag-crit">{{ h.http_code if (h.http_code|default('')|length)>0 else '—' }}</span>
+                                    {{ badge((h.http_code if (h.http_code|default('')|length)>0 else '—'), 'crit') }}
                                   {% endif %}
                                 {% endif %}
                               </td>
-                              <td>{% if h.ok %}<span class="tag tag-ok">OK</span>{% else %}<span class="tag tag-crit">FAIL</span>{% endif %}</td>
+                              {{ td_open() }}{% if h.ok %}{{ badge('OK', 'ok') }}{% else %}{{ badge('FAIL', 'crit') }}{% endif %}</td>
                             </tr>
                             {% endfor %}
                           </table>
@@ -281,54 +321,58 @@
                     {% set warning_sorted = (s.warning | default([]) | sort(attribute='days_left')) %}
                     {% set ok_sorted = (s.ok | default([]) | sort(attribute='days_left')) %}
 
-                    <div class="section-title" style="margin-top:14px;">
+                    <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:14px;margin-bottom:6px;">
                       Inventário - {{ s.name | default(si.key) }} ({{ s.server | default('—') }})
                     </div>
 
-                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:6px;">
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-top:6px;margin-bottom:10px;">
                       <tr>
-                        <td style="padding:0;">
-                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                        <td width="20%" style="padding:6px;font-family:Arial,sans-serif;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fafafa" style="width:100%;background-color:#fafafa;border:1px solid #eeeeee;border-collapse:collapse;">
                             <tr>
-                              <td width="20%" style="padding:6px;">
-                                <table role="presentation" width="100%" class="tbl" cellspacing="0" cellpadding="0" border="0" style="border-radius:12px; background:#fafafa;">
-                                  <tr><td style="border:none; padding:10px 12px;">
-                                    <div class="muted" style="font-size:12px;">Expirados</div>
-                                    <div style="font-size:20px; font-weight:900; color:#b00020;">{{ expired_sorted|length }}</div>
-                                  </td></tr>
-                                </table>
+                              <td bgcolor="#fafafa" style="background-color:#fafafa;padding:10px 12px;font-family:Arial,sans-serif;">
+                                <div style="font-size:12px;color:#666666;">Expirados</div>
+                                <div style="font-size:20px;font-weight:bold;color:#b00020;">{{ expired_sorted|length }}</div>
                               </td>
-                              <td width="20%" style="padding:6px;">
-                                <table role="presentation" width="100%" class="tbl" cellspacing="0" cellpadding="0" border="0" style="border-radius:12px; background:#fafafa;">
-                                  <tr><td style="border:none; padding:10px 12px;">
-                                    <div class="muted" style="font-size:12px;">Críticos (≤ {{ f5_critical_days }}d)</div>
-                                    <div style="font-size:20px; font-weight:900; color:#b00020;">{{ critical_sorted|length }}</div>
-                                  </td></tr>
-                                </table>
+                            </tr>
+                          </table>
+                        </td>
+                        <td width="20%" style="padding:6px;font-family:Arial,sans-serif;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fafafa" style="width:100%;background-color:#fafafa;border:1px solid #eeeeee;border-collapse:collapse;">
+                            <tr>
+                              <td bgcolor="#fafafa" style="background-color:#fafafa;padding:10px 12px;font-family:Arial,sans-serif;">
+                                <div style="font-size:12px;color:#666666;">Críticos (≤ {{ f5_critical_days }}d)</div>
+                                <div style="font-size:20px;font-weight:bold;color:#b00020;">{{ critical_sorted|length }}</div>
                               </td>
-                              <td width="20%" style="padding:6px;">
-                                <table role="presentation" width="100%" class="tbl" cellspacing="0" cellpadding="0" border="0" style="border-radius:12px; background:#fafafa;">
-                                  <tr><td style="border:none; padding:10px 12px;">
-                                    <div class="muted" style="font-size:12px;">Warning (≤ {{ f5_warning_days }}d)</div>
-                                    <div style="font-size:20px; font-weight:900; color:#b26a00;">{{ warning_sorted|length }}</div>
-                                  </td></tr>
-                                </table>
+                            </tr>
+                          </table>
+                        </td>
+                        <td width="20%" style="padding:6px;font-family:Arial,sans-serif;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fafafa" style="width:100%;background-color:#fafafa;border:1px solid #eeeeee;border-collapse:collapse;">
+                            <tr>
+                              <td bgcolor="#fafafa" style="background-color:#fafafa;padding:10px 12px;font-family:Arial,sans-serif;">
+                                <div style="font-size:12px;color:#666666;">Warning (≤ {{ f5_warning_days }}d)</div>
+                                <div style="font-size:20px;font-weight:bold;color:#b26a00;">{{ warning_sorted|length }}</div>
                               </td>
-                              <td width="20%" style="padding:6px;">
-                                <table role="presentation" width="100%" class="tbl" cellspacing="0" cellpadding="0" border="0" style="border-radius:12px; background:#fafafa;">
-                                  <tr><td style="border:none; padding:10px 12px;">
-                                    <div class="muted" style="font-size:12px;">OK</div>
-                                    <div style="font-size:20px; font-weight:900; color:#1b5e20;">{{ ok_sorted|length }}</div>
-                                  </td></tr>
-                                </table>
+                            </tr>
+                          </table>
+                        </td>
+                        <td width="20%" style="padding:6px;font-family:Arial,sans-serif;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fafafa" style="width:100%;background-color:#fafafa;border:1px solid #eeeeee;border-collapse:collapse;">
+                            <tr>
+                              <td bgcolor="#fafafa" style="background-color:#fafafa;padding:10px 12px;font-family:Arial,sans-serif;">
+                                <div style="font-size:12px;color:#666666;">OK</div>
+                                <div style="font-size:20px;font-weight:bold;color:#1b5e20;">{{ ok_sorted|length }}</div>
                               </td>
-                              <td width="20%" style="padding:6px;">
-                                <table role="presentation" width="100%" class="tbl" cellspacing="0" cellpadding="0" border="0" style="border-radius:12px; background:#fafafa;">
-                                  <tr><td style="border:none; padding:10px 12px;">
-                                    <div class="muted" style="font-size:12px;">Duplicados</div>
-                                    <div style="font-size:20px; font-weight:900;">{{ (s.duplicates | default([]) | length) }}</div>
-                                  </td></tr>
-                                </table>
+                            </tr>
+                          </table>
+                        </td>
+                        <td width="20%" style="padding:6px;font-family:Arial,sans-serif;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fafafa" style="width:100%;background-color:#fafafa;border:1px solid #eeeeee;border-collapse:collapse;">
+                            <tr>
+                              <td bgcolor="#fafafa" style="background-color:#fafafa;padding:10px 12px;font-family:Arial,sans-serif;">
+                                <div style="font-size:12px;color:#666666;">Duplicados</div>
+                                <div style="font-size:20px;font-weight:bold;color:#111111;">{{ (s.duplicates | default([]) | length) }}</div>
                               </td>
                             </tr>
                           </table>
@@ -343,42 +387,42 @@
                     {{ cert_table('OK', ok_sorted, 'ok') }}
                     {% endif %}
 
-                    <div class="section-title">Duplicidade (por SAN/Subject)</div>
+                    <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Duplicidade (por SAN/Subject)</div>
                     {% if (s.duplicates | default([]) | length) == 0 %}
-                      <div class="muted">Nenhum grupo duplicado identificado.</div>
+                      <div style="font-family:Arial,sans-serif;font-size:13px;color:#666666;">Nenhum grupo duplicado identificado.</div>
                     {% else %}
-                      <table class="tbl" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
                         <tr>
-                          <th>Chave (SAN/Subject)</th>
-                          <th>Qtd</th>
-                          <th>Mais antigo</th>
-                          <th>Status deleção</th>
-                          <th>Em uso?</th>
+                          {{ th('Chave (SAN/Subject)') }}
+                          {{ th('Qtd') }}
+                          {{ th('Mais antigo') }}
+                          {{ th('Status deleção') }}
+                          {{ th('Em uso?') }}
                         </tr>
                         {% for d in (s.duplicates | default([])) %}
                         <tr>
-                          <td><pre>{{ d.dup_key | default('') }}</pre></td>
-                          <td><span class="tag tag-gray">{{ d.count }}</span></td>
-                          <td>
-                            <span class="code">{{ d.oldest.full_path | default('—') }}</span><br/>
-                            <span class="muted">{{ fmt_f5_gmt(d.oldest.expirationString | default('')) }}</span>
+                          {{ td_open() }}<span style="font-family:Consolas,'Courier New',monospace;font-size:12px;color:#111111;">{{ d.dup_key | default('') }}</span></td>
+                          {{ td_open() }}{{ badge(d.count, 'gray') }}</td>
+                          {{ td_open() }}
+                            {{ code(d.oldest.full_path | default('—')) }}<br/>
+                            <span style="color:#666666;">{{ fmt_f5_gmt(d.oldest.expirationString | default('')) }}</span>
                           </td>
-                          <td>
+                          {{ td_open() }}
                             {% if d.delete_candidate %}
-                              <span class="tag tag-crit">CANDIDATO</span><br/>
-                              <span class="muted">Expirado há {{ d.days_since_expired_oldest }} {{ plural_dia(d.days_since_expired_oldest) }}</span>
+                              {{ badge('CANDIDATO', 'crit') }}<br/>
+                              <span style="font-family:Arial,sans-serif;font-size:12px;color:#666666;">Expirado há {{ d.days_since_expired_oldest }} {{ plural_dia(d.days_since_expired_oldest) }}</span>
                             {% elif (d.oldest.days_left | default(0) | int) < 0 %}
-                              <span class="tag tag-warn">AGUARDANDO DELETE</span><br/>
-                              <span class="muted">Falta(m) {{ d.delete_in_days }} {{ plural_dia(d.delete_in_days) }}</span>
+                              {{ badge('AGUARDANDO DELETE', 'warn') }}<br/>
+                              <span style="font-family:Arial,sans-serif;font-size:12px;color:#666666;">Falta(m) {{ d.delete_in_days }} {{ plural_dia(d.delete_in_days) }}</span>
                             {% else %}
-                              <span class="tag tag-ok">NÃO EXPIRADO</span>
+                              {{ badge('NÃO EXPIRADO', 'ok') }}
                             {% endif %}
                           </td>
-                          <td>
+                          {{ td_open() }}
                             {% if d.oldest_in_use %}
-                              <span class="tag tag-crit">SIM</span>
+                              {{ badge('SIM', 'crit') }}
                             {% else %}
-                              <span class="tag tag-ok">NÃO</span>
+                              {{ badge('NÃO', 'ok') }}
                             {% endif %}
                           </td>
                         </tr>
@@ -387,44 +431,46 @@
                     {% endif %}
 
                     {% if s.cleanup_results is defined and (s.cleanup_results | length) > 0 %}
-                      <div class="section-title">Limpeza de duplicados (executado)</div>
-                      <table class="tbl" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                      <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Limpeza de duplicados (executado)</div>
+                      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
                         <tr>
-                          <th>Cert</th>
-                          <th>Ação</th>
-                          <th>Motivo/Detalhe</th>
-                          <th>Certificado destino</th>
-                          <th>Profiles ajustados</th>
+                          {{ th('Cert') }}
+                          {{ th('Ação') }}
+                          {{ th('Motivo/Detalhe') }}
+                          {{ th('Certificado destino') }}
+                          {{ th('Profiles ajustados') }}
                         </tr>
                         {% for c in s.cleanup_results %}
                         <tr>
-                          <td><span class="code">{{ c.cert }}</span></td>
-                          <td>
+                          {{ td_open() }}{{ code(c.cert) }}</td>
+                          {{ td_open() }}
                             {% set act = (c.action | default('')) %}
                             {% if act in ['DELETADO', 'DELETED'] %}
-                              <span class="tag tag-crit">DELETADO</span>
+                              {{ badge('DELETADO', 'crit') }}
                             {% elif act in ['PULADO', 'SKIPPED'] %}
-                              <span class="tag tag-gray">PULADO</span>
+                              {{ badge('PULADO', 'gray') }}
                             {% else %}
-                              <span class="tag tag-gray">{{ act if (act | length) > 0 else '—' }}</span>
+                              {{ badge((act if (act | length) > 0 else '—'), 'gray') }}
                             {% endif %}
                           </td>
-                          <td class="muted">{{ c.reason | default('—') }}</td>
-                          <td>
+                          {{ td_open() }}<span style="color:#666666;">{{ c.reason | default('—') }}</span></td>
+                          {{ td_open() }}
                             {% set destino = (c.cert_destino | default(c.survivor | default(''))) %}
                             {% if (destino | default('') | length) > 0 %}
-                              <span class="code">{{ destino }}</span>
+                              {{ code(destino) }}
                             {% else %}
                               —
                             {% endif %}
                           </td>
-                          <td class="muted">
+                          {{ td_open() }}
                             {% set perfis = (c.profiles_ajustados | default(c.profiles_repointed | default([]))) %}
+                            <span style="color:#666666;">
                             {% if (perfis | length) > 0 %}
                               {{ perfis | join('<br/>') }}
                             {% else %}
                               —
                             {% endif %}
+                            </span>
                           </td>
                         </tr>
                         {% endfor %}
@@ -465,7 +511,6 @@
                         {% endfor %}
                       </table>
                     {% endif %}
-                    
                   {% endfor %}
 
                 </td>
