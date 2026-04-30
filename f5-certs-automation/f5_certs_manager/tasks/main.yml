@@ -8,12 +8,27 @@
       Parâmetros obrigatórios faltando.
       - f5_user / f5_password
 
+- name: Montar lista de sites válidos a partir de f5_sites
+  ansible.builtin.set_fact:
+    f5_valid_site_names: >-
+      {{
+        (f5_sites | default([]))
+        | map(attribute='name')
+        | map('string')
+        | map('trim')
+        | map('lower')
+        | reject('equalto', '')
+        | unique
+        | list
+      }}
+  changed_when: false
+
 - name: Normalizar f5_target_scope
   ansible.builtin.set_fact:
     f5_target_scope_norm: >-
-      {%- set raw = (f5_target_scope | default(['prd', 'dr'])) -%}
+      {%- set raw = (f5_target_scope | default('')) -%}
       {%- if raw is string -%}
-        {{
+        {%- set parsed = (
           raw
           | replace('\n', ',')
           | split(',')
@@ -22,9 +37,9 @@
           | map('lower')
           | unique
           | list
-        }}
+        ) -%}
       {%- else -%}
-        {{
+        {%- set parsed = (
           raw
           | map('string')
           | map('trim')
@@ -32,16 +47,21 @@
           | map('lower')
           | unique
           | list
-        }}
+        ) -%}
       {%- endif -%}
+      {{ parsed if (parsed | length) > 0 else (f5_valid_site_names | default([])) }}
   changed_when: false
 
 - name: Validar f5_target_scope
   ansible.builtin.assert:
     that:
+      - (f5_valid_site_names | default([]) | length) > 0
       - (f5_target_scope_norm | default([]) | length) > 0
-      - (f5_target_scope_norm | difference(['prd', 'dr']) | length) == 0
-    fail_msg: "f5_target_scope inválido. Valores aceitos: prd, dr"
+      - (f5_target_scope_norm | difference(f5_valid_site_names | default([])) | length) == 0
+    fail_msg: >-
+      f5_target_scope inválido.
+      Valores recebidos: {{ f5_target_scope_norm | default([]) }}.
+      Valores aceitos conforme f5_sites: {{ f5_valid_site_names | default([]) }}.
 
 - name: Normalizar sites efetivos (porta default 443) conforme escopo
   ansible.builtin.set_fact:
