@@ -1,3 +1,51 @@
+        - name: Cria Lista de itens com Scale Down/Up Sequencial
+          ansible.builtin.set_fact:
+            ns_sync: >-
+              {%- set result = [] -%}
+              {%- for grupo in ns_order_list -%}
+              {%- for obj in grupo.itens -%}
+                {%- set common_items = [] -%}
+                {%- set execution_mode = 'sequential' if obj.dc is defined else 'parallel' -%}
+
+                {%- if obj.dc is defined -%}
+                  {%- for item in obj.dc -%}
+                    {%- if item in ns.get(obj.namespace, []) -%}
+                      {%- set _ = common_items.append(item) -%}
+                    {%- endif -%}
+                  {%- endfor -%}
+                {%- else -%}
+                  {%- for item in ns.get(obj.namespace, []) -%}
+                    {%- set _ = common_items.append(item) -%}
+                  {%- endfor -%}
+                {%- endif -%}
+
+                {%- if common_items | length > 0 -%}
+                  {%- if result | selectattr('namespace', 'equalto', obj.namespace) | list | length > 0 -%}
+                    {%- for existing_obj in result | selectattr('namespace', 'equalto', obj.namespace) | list -%}
+                      {%- for item in common_items -%}
+                        {%- if item not in existing_obj['dc'] -%}
+                          {%- set _ = existing_obj['dc'].append(item) -%}
+                        {%- endif -%}
+                      {%- endfor -%}
+
+                      {%- if execution_mode == 'sequential' -%}
+                        {%- set _ = existing_obj.update({'dc_execution_mode': 'sequential'}) -%}
+                      {%- endif -%}
+                    {%- endfor -%}
+                  {%- else -%}
+                    {%- set _ = result.append({
+                      'namespace': obj.namespace,
+                      'condition': grupo.condition,
+                      'dc': common_items,
+                      'dc_execution_mode': execution_mode
+                    }) -%}
+                  {%- endif -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {%- endfor -%}
+              {{ result }}
+          when: labels_toquery is not defined
+
 - name: Migração de DeploymentConfig entre Clusters OpenShift
   hosts: localhost
   gather_facts: false
