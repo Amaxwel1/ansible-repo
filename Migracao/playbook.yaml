@@ -1,50 +1,532 @@
-        - name: Cria Lista de itens com Scale Down/Up Sequencial
+    final_pod_validation_enabled: "SIM"
+    final_pod_validation_retries: 2
+    final_pod_validation_delay: 5
+        
+        - name: Definir namespaces para validação final dos pods no destino
           ansible.builtin.set_fact:
-            ns_sync: >-
-              {%- set result = [] -%}
-              {%- for grupo in ns_order_list -%}
-              {%- for obj in grupo.itens -%}
-                {%- set common_items = [] -%}
-                {%- set execution_mode = 'sequential' if obj.dc is defined else 'parallel' -%}
+            final_validation_namespaces: "{{ ns.keys() | list | unique }}"
+          when: final_pod_validation_enabled == "SIM"
 
-                {%- if obj.dc is defined -%}
-                  {%- for item in obj.dc -%}
-                    {%- if item in ns.get(obj.namespace, []) -%}
-                      {%- set _ = common_items.append(item) -%}
-                    {%- endif -%}
-                  {%- endfor -%}
-                {%- else -%}
-                  {%- for item in ns.get(obj.namespace, []) -%}
-                    {%- set _ = common_items.append(item) -%}
-                  {%- endfor -%}
-                {%- endif -%}
+        - name: Aguardar estabilização final dos pods no destino
+          ansible.builtin.shell: |
+            oc get pods -n {{ item }} -o json --kubeconfig={{ tmp_path_local }}/ocp_destino | jq -r '
+              [
+                .items[]
+                | select(.status.phase != "Succeeded")
+                | ([.status.containerStatuses[]?] | length) as $total
+                | ([.status.containerStatuses[]? | select(.ready == true)] | length) as $ready
+                | (
+                    [
+                      .status.containerStatuses[]?.state.waiting?.reason // empty,
+                      .status.containerStatuses[]?.state.terminated?.reason // empty
+                    ]
+                    | map(select(. != "Completed"))
+                    | unique
+                    | join(", ")
+                  ) as $reasons
+                | select(
+                    .metadata.deletionTimestamp != null
+                    or (.status.phase == "Pending")
+                    or (.status.phase == "Failed")
+                    or (.status.phase == "Unknown")
+                    or (.status.phase == "Running" and $total > 0 and $ready < $total)
+                    or ($reasons != "")
+                  )
+              ] | length
+            '
+          register: final_pod_issue_count
+          loop: "{{ final_validation_namespaces }}"
+          changed_when: false
+          failed_when: false
+          until: final_pod_issue_count.stdout | int == 0
+          retries: "{{ final_pod_validation_retries }}"
+          delay: "{{ final_pod_validation_delay }}"
+          when: final_pod_validation_enabled == "SIM"
 
-                {%- if common_items | length > 0 -%}
-                  {%- if result | selectattr('namespace', 'equalto', obj.namespace) | list | length > 0 -%}
-                    {%- for existing_obj in result | selectattr('namespace', 'equalto', obj.namespace) | list -%}
-                      {%- for item in common_items -%}
-                        {%- if item not in existing_obj['dc'] -%}
-                          {%- set _ = existing_obj['dc'].append(item) -%}
-                        {%- endif -%}
-                      {%- endfor -%}
+        - name: Coletar detalhes dos pods com atenção no destino
+          ansible.builtin.shell: |
+            oc get pods -n {{ item }} -o json --kubeconfig={{ tmp_path_local }}/ocp_destino | jq -r '
+              .items[]
+              | select(.status.phase != "Succeeded")
+              | ([.status.containerStatuses[]?] | length) as $total
+              | ([.status.containerStatuses[]? | select(.ready == true)] | length) as $ready
+              | (
+                  [
+                    .status.containerStatuses[]?.state.waiting?.reason // empty,
+                    .status.containerStatuses[]?.state.terminated?.reason // empty
+                  ]
+                  | map(select(. != "Completed"))
+                  | unique
+                  | join(", ")
+                ) as $reasons
+              | select(
+                  .metadata.deletionTimestamp != null
+                  or (.status.phase == "Pending")
+                  or (.status.phase == "Failed")
+                  or (.status.phase == "Unknown")
+                  or (.status.phase == "Running" and $total > 0 and $ready < $total)
+                  or ($reasons != "")
+                )
+              | [
+                  .metadata.namespace,
+                  .metadata.name,
+                  (
+                    .metadata.labels.deploymentconfig //
+                    .metadata.labels.app //
+                    .metadata.labels."app.kubernetes.io/name" //
+                    "-"
+                  ),
+                  .status.phase,
+                  "\($ready)/\($total)",
+                  (
+                    if .metadata.deletionTimestamp != null then
+                      "Terminating"
+                    elif $reasons != "" then
+                      $reasons
+                    elif .status.phase == "Pending" then
+                      "Pending"
+                    elif .status.phase == "Failed" then
+                      "Failed"
+                    elif .status.phase == "Unknown" then
+                      "Unknown"
+                    elif (.status.phase == "Running" and $total > 0 and $ready < $total) then
+                      "ContainersNotReady"
+                    else
+                      "-"
+                    end
+                  ),
+                  (([.status.containerStatuses[]?.restartCount // 0] | add // 0) | tostring)
+                ]
+              | @tsv
+            '
+          register: final_pod_issues_raw
+          loop: "{{ final_validation_namespaces }}"
+          changed_when: false
+          failed_when: false
+          when: final_pod_validation_enabled == "SIM"
 
-                      {%- if execution_mode == 'sequential' -%}
-                        {%- set _ = existing_obj.update({'dc_execution_mode': 'sequential'}) -%}
-                      {%- endif -%}
-                    {%- endfor -%}
-                  {%- else -%}
-                    {%- set _ = result.append({
-                      'namespace': obj.namespace,
-                      'condition': grupo.condition,
-                      'dc': common_items,
-                      'dc_execution_mode': execution_mode
-                    }) -%}
-                  {%- endif -%}
-                {%- endif -%}
-              {%- endfor -%}
-              {%- endfor -%}
-              {{ result }}
-          when: labels_toquery is not defined
+        - name: Converter validação final dos pods para lista de objetos
+          ansible.builtin.set_fact:
+            final_pod_issues: >-
+              {{
+                final_pod_issues | default([]) + [{
+                  'namespace': linha[0] | default(''),
+                  'pod': linha[1] | default(''),
+                  'app': linha[2] | default('-'),
+                  'phase': linha[3] | default(''),
+                  'ready': linha[4] | default(''),
+                  'reason': linha[5] | default('-'),
+                  'restarts': linha[6] | default('0')
+                }]
+              }}
+          loop: "{{ final_pod_issues_raw.results | selectattr('stdout_lines', 'defined') | map(attribute='stdout_lines') | flatten }}"
+          vars:
+            linha: "{{ item.split('\t') }}"
+          when:
+            - final_pod_validation_enabled == "SIM"
+            - item | length > 0
+
+                {% set pod_attention_count = (final_pod_issues | default([]) | length) %}
+                {% set notfound_count = (lista_notfound | default([]) | length) %}
+                {% set currentzero_count = (lista_currentzero | default([]) | length) %}
+                {% set status_label = 'Concluído com atenção' if (pod_attention_count > 0 or notfound_count > 0 or currentzero_count > 0) else 'Concluído' %}
+                {% set status_bg = '#fff7ed' if (pod_attention_count > 0 or notfound_count > 0 or currentzero_count > 0) else '#ecfdf5' %}
+                {% set status_border = '#fed7aa' if (pod_attention_count > 0 or notfound_count > 0 or currentzero_count > 0) else '#bbf7d0' %}
+                {% set status_color = '#9a3412' if (pod_attention_count > 0 or notfound_count > 0 or currentzero_count > 0) else '#166534' %}
+
+                <div style="font-family:Arial, Helvetica, sans-serif; background:#f3f4f6; padding:24px; color:#111827;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:1180px; margin:0 auto; background:#ffffff; border-collapse:collapse; border:1px solid #e5e7eb;">
+                    <tr>
+                      <td style="background:#111827; color:#ffffff; padding:22px 26px;">
+                        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                          <tr>
+                            <td style="vertical-align:top;">
+                              <h1 style="margin:0; font-size:22px; line-height:28px; font-weight:bold;">
+                                Migração de aplicações - OpenShift
+                              </h1>
+                              <p style="margin:6px 0 0 0; color:#d1d5db; font-size:13px;">
+                                Relatório de execução da automação Ansible
+                              </p>
+                            </td>
+                            <td align="right" style="vertical-align:top;">
+                              <span style="display:inline-block; padding:8px 12px; border-radius:4px; background:{{ status_bg }}; color:{{ status_color }}; border:1px solid {{ status_border }}; font-size:12px; font-weight:bold;">
+                                {{ status_label }}
+                              </span>
+                            </td>
+                          </tr>
+                        </table>
+                      </td>
+                    </tr>
+
+                    <tr>
+                      <td style="padding:24px 26px;">
+
+                        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin-bottom:22px;">
+                          <tr>
+                            <td width="25%" style="padding:0 8px 0 0;">
+                              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                                <tr>
+                                  <td style="background:#eff6ff; border:1px solid #bfdbfe; padding:14px;">
+                                    <div style="font-size:11px; color:#1d4ed8; font-weight:bold; letter-spacing:.3px;">DURAÇÃO TOTAL</div>
+                                    <div style="font-size:20px; color:#111827; font-weight:bold; margin-top:4px;">{{ execution_time }}</div>
+                                  </td>
+                                </tr>
+                              </table>
+                            </td>
+
+                            <td width="25%" style="padding:0 8px;">
+                              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                                <tr>
+                                  <td style="background:#ecfdf5; border:1px solid #bbf7d0; padding:14px;">
+                                    <div style="font-size:11px; color:#166534; font-weight:bold; letter-spacing:.3px;">PODS COM ATENÇÃO</div>
+                                    <div style="font-size:20px; color:#111827; font-weight:bold; margin-top:4px;">{{ pod_attention_count }}</div>
+                                  </td>
+                                </tr>
+                              </table>
+                            </td>
+
+                            <td width="25%" style="padding:0 8px;">
+                              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                                <tr>
+                                  <td style="background:#fefce8; border:1px solid #fde68a; padding:14px;">
+                                    <div style="font-size:11px; color:#854d0e; font-weight:bold; letter-spacing:.3px;">NÃO ENCONTRADOS</div>
+                                    <div style="font-size:20px; color:#111827; font-weight:bold; margin-top:4px;">{{ notfound_count }}</div>
+                                  </td>
+                                </tr>
+                              </table>
+                            </td>
+
+                            <td width="25%" style="padding:0 0 0 8px;">
+                              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                                <tr>
+                                  <td style="background:#f9fafb; border:1px solid #e5e7eb; padding:14px;">
+                                    <div style="font-size:11px; color:#374151; font-weight:bold; letter-spacing:.3px;">CURRENT PODS ZERO</div>
+                                    <div style="font-size:20px; color:#111827; font-weight:bold; margin-top:4px;">{{ currentzero_count }}</div>
+                                  </td>
+                                </tr>
+                              </table>
+                            </td>
+                          </tr>
+                        </table>
+
+                        <h2 style="margin:0 0 12px 0; font-size:18px; color:#111827;">Parâmetros da execução</h2>
+
+                        <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin-bottom:24px; font-size:13px;">
+                          <tr>
+                            <th style="width:260px; background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Cluster origem</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ ocp_cluster_origem }}</td>
+                          </tr>
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Cluster destino</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ ocp_cluster_destino }}</td>
+                          </tr>
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Baixar aplicações na origem</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ perform_scale_down }}</td>
+                          </tr>
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Migrar páginas de manutenção</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ migrar_paginas_manutencao }}</td>
+                          </tr>
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Migrar SINV</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ migrar_sinv }}</td>
+                          </tr>
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Baixar DDS</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ baixar_dds }}</td>
+                          </tr>
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Namespaces paralelos por lote</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ async_batch }}</td>
+                          </tr>
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">DCs paralelos por namespace</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ async_dc_batch }}</td>
+                          </tr>
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Intervalo de polling</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ wait_poll_interval }}s</td>
+                          </tr>
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Condição a esperar</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">Pod {{ condicao_progresso }}</td>
+                          </tr>
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Usuário de autenticação</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ ocp_user }}</td>
+                          </tr>
+                        </table>
+
+                        <h2 style="margin:0 0 12px 0; font-size:18px; color:#111827;">Filtros aplicados</h2>
+
+                        <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin-bottom:24px; font-size:13px;">
+                          <tr>
+                            <th style="width:260px; background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Aplicações selecionadas</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ aplication_migration | join('<br />') }}</td>
+                          </tr>
+
+                          {% if 'PAGINAS DE MANUTENCAO' in aplication_migration %}
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Páginas de manutenção</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">Objetos especiais de páginas de manutenção considerados na execução.</td>
+                          </tr>
+                          {% endif %}
+
+                          {% if 'SINV' in aplication_migration %}
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">SINV</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">Objetos especiais do SINV considerados na execução.</td>
+                          </tr>
+                          {% endif %}
+
+                          {% if namespaces_prefix_toquery | length > 0 %}
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Namespaces com prefixo</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ namespaces_prefix_toquery | join('<br />') }}</td>
+                          </tr>
+                          {% endif %}
+
+                          {% if exclude_namespaces | length > 0 %}
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Namespaces desconsiderados</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ exclude_namespaces | replace(',', '<br />') }}</td>
+                          </tr>
+                          {% endif %}
+
+                          {% if deployments_toquery | length > 0 %}
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Somente DeploymentConfigs</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ deployments_toquery | replace(',', '<br />') }}</td>
+                          </tr>
+                          {% endif %}
+
+                          {% if exclude_deployments | length > 0 %}
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">DeploymentConfigs desconsiderados</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ exclude_deployments | replace(',', '<br />') }}</td>
+                          </tr>
+                          {% endif %}
+
+                          {% if labels is defined and labels | length > 0 %}
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Labels</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ labels | replace(',', '<br />') }}</td>
+                          </tr>
+                          {% endif %}
+                        </table>
+
+                        <h2 style="margin:0 0 12px 0; font-size:18px; color:#111827;">Resultado da execução</h2>
+
+                        <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin-bottom:24px; font-size:13px;">
+                          <tr>
+                            <th style="width:260px; background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Duração total</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ execution_time }}</td>
+                          </tr>
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Início</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ start_time.stdout }}</td>
+                          </tr>
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Término</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">{{ finish_time.stdout }}</td>
+                          </tr>
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Pods com atenção após validação final</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">
+                              {{ ('Sim, ' ~ pod_attention_count ~ ' ocorrência(s)') if pod_attention_count > 0 else 'Não' }}
+                            </td>
+                          </tr>
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Objetos não encontrados no destino</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">
+                              {{ ('Sim, ' ~ notfound_count ~ ' ocorrência(s)') if notfound_count > 0 else 'Não' }}
+                            </td>
+                          </tr>
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:9px; text-align:left;">Objetos com Current Pods zero</th>
+                            <td style="border:1px solid #d1d5db; padding:9px;">
+                              {{ ('Sim, ' ~ currentzero_count ~ ' ocorrência(s)') if currentzero_count > 0 else 'Não' }}
+                            </td>
+                          </tr>
+                        </table>
+
+                        <h2 style="margin:0 0 12px 0; font-size:18px; color:#111827;">Validação final dos pods no destino</h2>
+
+                        {% if pod_attention_count > 0 %}
+                        <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin-bottom:24px; font-size:13px;">
+                          <tr>
+                            <td colspan="7" style="background:#fff7ed; color:#9a3412; border:1px solid #fed7aa; padding:12px; font-weight:bold;">
+                              Foram encontrados pods que ainda não estão saudáveis no cluster de destino após a migração.
+                            </td>
+                          </tr>
+                          <tr>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:8px; text-align:left;">Namespace</th>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:8px; text-align:left;">Pod</th>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:8px; text-align:left;">App/DC</th>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:8px; text-align:left;">Phase</th>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:8px; text-align:left;">Ready</th>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:8px; text-align:left;">Motivo</th>
+                            <th style="background:#f3f4f6; border:1px solid #d1d5db; padding:8px; text-align:left;">Restarts</th>
+                          </tr>
+                          {% for pod in final_pod_issues %}
+                          <tr>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ pod.namespace }}</td>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ pod.pod }}</td>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ pod.app }}</td>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ pod.phase }}</td>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ pod.ready }}</td>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ pod.reason }}</td>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ pod.restarts }}</td>
+                          </tr>
+                          {% endfor %}
+                        </table>
+                        {% else %}
+                        <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin-bottom:24px; font-size:13px;">
+                          <tr>
+                            <td style="background:#ecfdf5; color:#166534; border:1px solid #bbf7d0; padding:12px; font-weight:bold;">
+                              Nenhum pod com erro foi identificado no cluster de destino ao final da migração.
+                            </td>
+                          </tr>
+                        </table>
+                        {% endif %}
+
+                        {% if sequencial_list is defined and sequencial_list | length > 0 %}
+                        <h2 style="margin:0 0 12px 0; font-size:18px; color:#111827;">Migração sequencial</h2>
+
+                        <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin-bottom:24px; font-size:13px;">
+                          <tr>
+                            <th style="background:#111827; color:#ffffff; border:1px solid #374151; padding:8px; text-align:left;">Namespace</th>
+                            <th style="background:#111827; color:#ffffff; border:1px solid #374151; padding:8px; text-align:left;">Início</th>
+                            <th style="background:#111827; color:#ffffff; border:1px solid #374151; padding:8px; text-align:left;">Término</th>
+                            <th style="background:#111827; color:#ffffff; border:1px solid #374151; padding:8px; text-align:left;">Duração</th>
+                          </tr>
+                          {% for item in grupo_ns_sequencial %}
+                          {% if item.namespaces | length > 0 %}
+                          <tr>
+                            <td colspan="4" style="background:#e5e7eb; color:#111827; border:1px solid #d1d5db; padding:8px; font-weight:bold;">
+                              Grupo {{ item.grupo | upper }}
+                            </td>
+                          </tr>
+                          {% for ns in item.namespaces %}
+                          <tr>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ ns.namespace }}</td>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ ns.inicio }}</td>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ ns.termino }}</td>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ ns.duracao }}</td>
+                          </tr>
+                          {% endfor %}
+                          {% endif %}
+                          {% endfor %}
+                        </table>
+                        {% endif %}
+
+                        {% if paralel_list is defined and paralel_list | length > 0 %}
+                        <h2 style="margin:0 0 12px 0; font-size:18px; color:#111827;">Migração paralelizada</h2>
+
+                        <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin-bottom:24px; font-size:13px;">
+                          <tr>
+                            <th style="background:#111827; color:#ffffff; border:1px solid #374151; padding:8px; text-align:left;">Namespace</th>
+                            <th style="background:#111827; color:#ffffff; border:1px solid #374151; padding:8px; text-align:left;">Início</th>
+                            <th style="background:#111827; color:#ffffff; border:1px solid #374151; padding:8px; text-align:left;">Término</th>
+                            <th style="background:#111827; color:#ffffff; border:1px solid #374151; padding:8px; text-align:left;">Duração</th>
+                          </tr>
+                          {% for item in grupo_ns_paralelos %}
+                          {% if item.namespaces | length > 0 %}
+                          <tr>
+                            <td colspan="4" style="background:#e5e7eb; color:#111827; border:1px solid #d1d5db; padding:8px; font-weight:bold;">
+                              Grupo {{ item.grupo | upper }}
+                            </td>
+                          </tr>
+                          {% for ns in item.namespaces %}
+                          <tr>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ ns.namespace }}</td>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ ns.inicio }}</td>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ ns.termino }}</td>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ ns.duracao }}</td>
+                          </tr>
+                          {% endfor %}
+                          {% endif %}
+                          {% endfor %}
+                        </table>
+                        {% endif %}
+
+                        {% if lista_notfound is defined and lista_notfound | length > 0 %}
+                        <h2 style="margin:0 0 12px 0; font-size:18px; color:#111827;">DeploymentConfigs não encontrados no cluster de destino</h2>
+
+                        <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin-bottom:24px; font-size:13px;">
+                          <tr>
+                            <th style="background:#111827; color:#ffffff; border:1px solid #374151; padding:8px; text-align:left;">Namespace</th>
+                            <th style="background:#111827; color:#ffffff; border:1px solid #374151; padding:8px; text-align:left;">DeploymentConfig</th>
+                            <th style="background:#111827; color:#ffffff; border:1px solid #374151; padding:8px; text-align:left;">Horário</th>
+                            <th style="background:#111827; color:#ffffff; border:1px solid #374151; padding:8px; text-align:left;">Mensagem</th>
+                          </tr>
+                          {% for item in grupo_notfound %}
+                          {% if item.ocorrencias | length > 0 %}
+                          <tr>
+                            <td colspan="4" style="background:#e5e7eb; color:#111827; border:1px solid #d1d5db; padding:8px; font-weight:bold;">
+                              Grupo {{ item.grupo | upper }}
+                            </td>
+                          </tr>
+                          {% for ns in item.ocorrencias %}
+                          <tr>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ ns.namespace }}</td>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ ns.dc }}</td>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ ns.hora }}</td>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ ns.mensagem }}</td>
+                          </tr>
+                          {% endfor %}
+                          {% endif %}
+                          {% endfor %}
+                        </table>
+                        {% endif %}
+
+                        {% if lista_currentzero is defined and lista_currentzero | length > 0 %}
+                        <h2 style="margin:0 0 12px 0; font-size:18px; color:#111827;">Objetos desconsiderados por não terem pods ativos na origem</h2>
+
+                        <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin-bottom:24px; font-size:13px;">
+                          <tr>
+                            <th style="background:#111827; color:#ffffff; border:1px solid #374151; padding:8px; text-align:left;">Namespace</th>
+                            <th style="background:#111827; color:#ffffff; border:1px solid #374151; padding:8px; text-align:left;">DeploymentConfig</th>
+                            <th style="background:#111827; color:#ffffff; border:1px solid #374151; padding:8px; text-align:left;">Horário</th>
+                            <th style="background:#111827; color:#ffffff; border:1px solid #374151; padding:8px; text-align:left;">Mensagem</th>
+                          </tr>
+                          {% for item in grupo_currentzero %}
+                          {% if item.ocorrencias | length > 0 %}
+                          <tr>
+                            <td colspan="4" style="background:#e5e7eb; color:#111827; border:1px solid #d1d5db; padding:8px; font-weight:bold;">
+                              Grupo {{ item.grupo | upper }}
+                            </td>
+                          </tr>
+                          {% for ns in item.ocorrencias %}
+                          <tr>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ ns.namespace }}</td>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ ns.dc }}</td>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ ns.hora }}</td>
+                            <td style="border:1px solid #d1d5db; padding:8px;">{{ ns.mensagem }}</td>
+                          </tr>
+                          {% endfor %}
+                          {% endif %}
+                          {% endfor %}
+                        </table>
+                        {% endif %}
+
+                        <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin-top:18px;">
+                          <tr>
+                            <td style="background:#f9fafb; border:1px solid #e5e7eb; color:#374151; padding:12px; font-size:13px;">
+                              Log completo da execução anexado ao e-mail.
+                            </td>
+                          </tr>
+                        </table>
+
+                      </td>
+                    </tr>
+                  </table>
+                </div>
+
+
+
+
 
 - name: Migração de DeploymentConfig entre Clusters OpenShift
   hosts: localhost
