@@ -1,3 +1,20 @@
+sync
+
+if ! oc get deploymentconfig "$dc" -n "$namespace" --kubeconfig="$kube_destino" >/dev/null 2>&1; then
+  echo -e "\t {{ objeto.namespace }} $dc\t $(date '+%d/%m/%Y %H:%M:%S')\t Scale up falhou. Objeto não encontrado no cluster de destino." | tee -a deployments_sequencial.txt
+  return 0
+fi
+
+async
+
+if ! oc get deploymentconfig "$dc" -n "$namespace" --kubeconfig="$kube_destino" >/dev/null 2>&1; then
+  echo -e "\t {{ namespace }} $dc\t $(date '+%d/%m/%Y %H:%M:%S')\t Scale up falhou. Objeto não encontrado no cluster de destino." | tee -a deployments_async_{{ namespace }}.txt
+  return 0
+fi
+
+
+
+
 {% set pod_attention_count = (final_pod_issues | default([]) | length) %}
 {% set notfound_count = (lista_notfound | default([]) | length) %}
 {% set currentzero_count = (lista_currentzero | default([]) | length) %}
