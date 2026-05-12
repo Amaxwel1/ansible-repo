@@ -40,11 +40,86 @@
   when:
     - (_prof_raw.json.certKeyChain | default([])) | length > 1
 
-- name: Definir nomes padrão dos objetos no F5
+- name: Definir base dos nomes de objetos no F5
   ansible.builtin.set_fact:
-    _cert_obj: "{{ (_folder_full | regex_replace('[^A-Za-z0-9._-]', '_')) ~ '.crt' }}"
-    _key_obj: "{{ (_folder_full | regex_replace('[^A-Za-z0-9._-]', '_')) ~ '.key' }}"
-    _chain_obj: "{{ (_folder_full | regex_replace('[^A-Za-z0-9._-]', '_')) ~ '-chain.crt' }}"
+    _f5_import_base_name: "{{ _folder_full | regex_replace('[^A-Za-z0-9._-]', '_') }}"
+    _f5_import_suffix: "{{ f5_import_name_suffix_eff | default('') | trim }}"
+  changed_when: false
+
+- name: Definir nome desejado dos objetos no F5
+  ansible.builtin.set_fact:
+    _f5_import_desired_base: >-
+      {{
+        _f5_import_base_name ~ '-' ~ _f5_import_suffix
+        if (
+          (f5_import_name_suffix_enabled | default(true) | bool)
+          and (_f5_import_suffix | length > 0)
+        )
+        else _f5_import_base_name
+      }}
+  changed_when: false
+
+- name: Montar lista de certificados já existentes no site
+  ansible.builtin.set_fact:
+    _site_existing_cert_obj_names: >-
+      {{
+        (_site_installed_certs | default([]))
+        | map(attribute='name')
+        | map('string')
+        | list
+      }}
+  changed_when: false
+
+- name: Validar colisão de nome quando strategy=fail
+  ansible.builtin.assert:
+    that:
+      - ((_f5_import_desired_base ~ '.crt') not in (_site_existing_cert_obj_names | default([])))
+    fail_msg: >-
+      O objeto /{{ _profile_partition }}/{{ _f5_import_desired_base }}.crt já existe no F5 {{ site.name }}.
+      Como f5_import_name_collision_strategy=fail, a automação não vai sobrescrever.
+      Altere o sufixo, remova o objeto antigo ou use f5_import_name_collision_strategy=increment.
+  when:
+    - f5_import_name_suffix_enabled | default(true) | bool
+    - (f5_import_name_collision_strategy | default('increment')) == 'fail'
+
+- name: Escolher base final dos objetos no F5 com incremento automático
+  ansible.builtin.set_fact:
+    _f5_import_final_base: >-
+      {%- set out = [] -%}
+      {%- set max_try = (f5_import_name_collision_max_attempts | default(20) | int) -%}
+      {%- for i in range(1, max_try + 1) -%}
+      {%- set candidate_base = _f5_import_desired_base if i == 1 else (_f5_import_desired_base ~ '-' ~ i) -%}
+      {%- set candidate_cert = candidate_base ~ '.crt' -%}
+      {%- if (candidate_cert not in (_site_existing_cert_obj_names | default([]))) and (out | length == 0) -%}
+      {%- set _ = out.append(candidate_base) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out[0] | default('') }}
+  when:
+    - (f5_import_name_collision_strategy | default('increment')) == 'increment'
+  changed_when: false
+
+- name: Definir base final dos objetos no F5 sem incremento
+  ansible.builtin.set_fact:
+    _f5_import_final_base: "{{ _f5_import_desired_base }}"
+  when:
+    - (f5_import_name_collision_strategy | default('increment')) != 'increment'
+  changed_when: false
+
+- name: Falhar se não foi possível encontrar nome livre para importação
+  ansible.builtin.assert:
+    that:
+      - (_f5_import_final_base | default('') | trim | length) > 0
+    fail_msg: >-
+      Não foi possível encontrar nome livre para importar {{ _f5_import_desired_base }} no F5 {{ site.name }}.
+      Tentativas: {{ f5_import_name_collision_max_attempts | default(20) }}.
+      Ajuste f5_import_name_collision_max_attempts, use outro sufixo ou limpe objetos antigos.
+
+- name: Definir nomes finais dos objetos no F5
+  ansible.builtin.set_fact:
+    _cert_obj: "{{ _f5_import_final_base }}.crt"
+    _key_obj: "{{ _f5_import_final_base }}.key"
+    _chain_obj: "{{ _f5_import_final_base }}-chain.crt"
   changed_when: false
 
 - name: Ler certificado do CIFS
@@ -108,6 +183,7 @@
     cert_key_chain:
       - cert: "{{ _cert_obj }}"
         key: "{{ _key_obj }}"
+        true_names: true
         chain: >-
           {{
             _chain_obj
