@@ -83,6 +83,260 @@
           ansible.builtin.set_fact:
             _fail_failed_results: "{{ _fail_failed_results if (_fail_failed_results | length > 0) else [_fail_raw_result] }}"
 
+        - name: Normalizar texto da falha para classificação
+          ansible.builtin.set_fact:
+            _fail_raw_lower: >-
+              {{
+                (
+                  (_fail_raw_result | default({}) | to_json)
+                  ~ ' '
+                  ~ (_fail_main_msg | default(''))
+                  ~ ' '
+                  ~ (_fail_task | default(''))
+                  ~ ' '
+                  ~ (_fail_action | default(''))
+                ) | lower
+              }}
+
+        - name: Classificar falha para e-mail
+          ansible.builtin.set_fact:
+            _fail_category: >-
+              {% if
+                'esperado exatamente 1 arquivo de certificado' in _fail_raw_lower
+                or 'certificado folha' in _fail_raw_lower
+                or 'candidatos folha' in _fail_raw_lower
+              %}
+              Arquivo de certificado não encontrado ou ambíguo
+              {% elif
+                'esperado exatamente 1 arquivo de key' in _fail_raw_lower
+                or 'arquivo de key' in _fail_raw_lower
+                or 'arquivo .key' in _fail_raw_lower
+                or 'nenhum arquivo .key' in _fail_raw_lower
+              %}
+              Arquivo de key não encontrado ou ambíguo
+              {% elif
+                'cert_key_match=false' in _fail_raw_lower
+                or 'cert_key_match' in _fail_raw_lower and 'false' in _fail_raw_lower
+                or 'modulus' in _fail_raw_lower
+              %}
+              Certificado e key não correspondem
+              {% elif
+                'dns_sans=[]' in _fail_raw_lower
+                or 'sans=[]' in _fail_raw_lower
+                or 'subject alternative name' in _fail_raw_lower
+              %}
+              Certificado sem SAN/DNS válido
+              {% elif
+                'precheck_min_valid_ok=false' in _fail_raw_lower
+                or 'checkend' in _fail_raw_lower
+                or 'certificado fonte não possui validade mínima' in _fail_raw_lower
+              %}
+              Certificado fonte sem validade mínima
+              {% elif
+                'nenhuma pasta' in _fail_raw_lower
+                or 'certificate_prefix' in _fail_raw_lower and 'não encontrado' in _fail_raw_lower
+                or 'não foi possível coletar certificados-fonte' in _fail_raw_lower
+              %}
+              Pasta do certificado não encontrada no CIFS
+              {% elif
+                'mount' in _fail_raw_lower
+                or 'cifs' in _fail_raw_lower
+                or 'mount error' in _fail_raw_lower
+              %}
+              Falha no CIFS/certificado fonte
+              {% elif
+                'cadeia' in _fail_raw_lower
+                or 'openssl verify' in _fail_raw_lower
+                or 'unarchive' in _fail_raw_lower
+                or 'nenhum arquivo .crt/.cer/.pem/.txt' in _fail_raw_lower
+              %}
+              Falha ao processar cadeia do certificado
+              {% elif
+                'f5_target_scope inválido' in _fail_raw_lower
+                or 'nenhum site efetivo' in _fail_raw_lower
+              %}
+              Escopo/site F5 inválido
+              {% elif
+                'unauthorized' in _fail_raw_lower
+                or '401' in _fail_raw_lower
+                or 'authentication failed' in _fail_raw_lower
+              %}
+              Falha de autenticação no F5
+              {% elif
+                'forbidden' in _fail_raw_lower
+                or '403' in _fail_raw_lower
+                or 'permission' in _fail_raw_lower
+                or 'denied' in _fail_raw_lower
+              %}
+              Permissão insuficiente
+              {% elif
+                'timed out' in _fail_raw_lower
+                or 'timeout' in _fail_raw_lower
+              %}
+              Timeout
+              {% elif
+                'connection' in _fail_raw_lower
+                or 'unreachable' in _fail_raw_lower
+                or 'name or service not known' in _fail_raw_lower
+                or 'no route to host' in _fail_raw_lower
+              %}
+              Falha de conectividade
+              {% elif
+                'certificate key file' in _fail_raw_lower
+                or 'requested key' in _fail_raw_lower
+                or 'ssl-key' in _fail_raw_lower
+              %}
+              Key/certificado não encontrado no F5
+              {% elif
+                'certkeychain' in _fail_raw_lower
+                or 'client-ssl' in _fail_raw_lower
+                or 'profile' in _fail_raw_lower
+              %}
+              Falha ao alterar profile Client SSL
+              {% elif
+                'config-sync' in _fail_raw_lower
+                or 'config sync' in _fail_raw_lower
+                or 'sync-status' in _fail_raw_lower
+                or 'device group' in _fail_raw_lower
+              %}
+              Falha no Config Sync HA
+              {% elif
+                'curl' in _fail_raw_lower
+                or 'openssl s_client' in _fail_raw_lower
+                or 'handshake' in _fail_raw_lower
+                or 'http_code' in _fail_raw_lower
+              %}
+              Falha na validação TLS/HTTP
+              {% else %}
+              Erro não classificado automaticamente
+              {% endif %}
+
+            _fail_guidance: >-
+              {% if
+                'esperado exatamente 1 arquivo de certificado' in _fail_raw_lower
+                or 'certificado folha' in _fail_raw_lower
+                or 'candidatos folha' in _fail_raw_lower
+              %}
+              Validar se a pasta do certificate_prefix contém exatamente 1 certificado folha com extensão .cer, .crt ou .pem. Se houver arquivos de cadeia na mesma pasta, eles devem seguir padrão CADEIA.TXT, CADEIA*.zip ou *chain* para não serem confundidos com o certificado principal.
+              {% elif
+                'esperado exatamente 1 arquivo de key' in _fail_raw_lower
+                or 'arquivo de key' in _fail_raw_lower
+                or 'arquivo .key' in _fail_raw_lower
+                or 'nenhum arquivo .key' in _fail_raw_lower
+              %}
+              Validar se a pasta do certificate_prefix contém exatamente 1 arquivo .key/.KEY correspondente ao certificado.
+              {% elif
+                'cert_key_match=false' in _fail_raw_lower
+                or 'cert_key_match' in _fail_raw_lower and 'false' in _fail_raw_lower
+                or 'modulus' in _fail_raw_lower
+              %}
+              Validar se a key privada pertence ao certificado informado. O modulus/hash do certificado e da key precisa ser igual.
+              {% elif
+                'dns_sans=[]' in _fail_raw_lower
+                or 'sans=[]' in _fail_raw_lower
+                or 'subject alternative name' in _fail_raw_lower
+              %}
+              Validar se o certificado possui SAN DNS. A automação usa as SANs para descoberta automática de profile, SNI e validação.
+              {% elif
+                'precheck_min_valid_ok=false' in _fail_raw_lower
+                or 'checkend' in _fail_raw_lower
+                or 'certificado fonte não possui validade mínima' in _fail_raw_lower
+              %}
+              Validar a validade do certificado fonte. Ele não atende ao mínimo configurado em f5_min_valid_days_after_install.
+              {% elif
+                'nenhuma pasta' in _fail_raw_lower
+                or 'certificate_prefix' in _fail_raw_lower and 'não encontrado' in _fail_raw_lower
+                or 'não foi possível coletar certificados-fonte' in _fail_raw_lower
+              %}
+              Validar o certificate_prefix informado no survey e confirmar se existe uma pasta com esse nome no caminho CIFS configurado.
+              {% elif
+                'mount' in _fail_raw_lower
+                or 'cifs' in _fail_raw_lower
+                or 'mount error' in _fail_raw_lower
+              %}
+              Validar montagem CIFS, credenciais, caminho do share, permissões de leitura e se o Execution Environment consegue acessar o destino.
+              {% elif
+                'cadeia' in _fail_raw_lower
+                or 'openssl verify' in _fail_raw_lower
+                or 'unarchive' in _fail_raw_lower
+                or 'nenhum arquivo .crt/.cer/.pem/.txt' in _fail_raw_lower
+              %}
+              Validar se a cadeia veio como CADEIA.TXT ou CADEIA*.zip. Se vier zip, ele precisa conter arquivos .crt/.cer/.pem/.txt com certificados de CA/intermediárias.
+              {% elif
+                'f5_target_scope inválido' in _fail_raw_lower
+                or 'nenhum site efetivo' in _fail_raw_lower
+              %}
+              Validar se f5_target_scope bate com os nomes configurados em f5_sites. Exemplo: prd-interno,dr-interno ou hml.
+              {% elif
+                'unauthorized' in _fail_raw_lower
+                or '401' in _fail_raw_lower
+                or 'authentication failed' in _fail_raw_lower
+              %}
+              Validar usuário, senha, permissão REST e acesso ao BIG-IP.
+              {% elif
+                'forbidden' in _fail_raw_lower
+                or '403' in _fail_raw_lower
+                or 'permission' in _fail_raw_lower
+                or 'denied' in _fail_raw_lower
+              %}
+              Validar se a conta possui permissão para importar certificado/key, alterar Client SSL Profile, salvar configuração, deletar objetos e executar Config Sync.
+              {% elif
+                'timed out' in _fail_raw_lower
+                or 'timeout' in _fail_raw_lower
+              %}
+              Validar conectividade, tempo de resposta do BIG-IP e aumentar retries/delay se necessário.
+              {% elif
+                'connection' in _fail_raw_lower
+                or 'unreachable' in _fail_raw_lower
+                or 'name or service not known' in _fail_raw_lower
+                or 'no route to host' in _fail_raw_lower
+              %}
+              Validar rota, DNS, firewall, porta 443 e conectividade do AAP/Execution Environment até o BIG-IP.
+              {% elif
+                'certificate key file' in _fail_raw_lower
+                or 'requested key' in _fail_raw_lower
+                or 'ssl-key' in _fail_raw_lower
+              %}
+              Validar nome real da key/certificado no F5, partition e uso de true_names.
+              {% elif
+                'certkeychain' in _fail_raw_lower
+                or 'client-ssl' in _fail_raw_lower
+                or 'profile' in _fail_raw_lower
+              %}
+              Validar se o profile existe, se possui certKeyChain compatível e se os objetos cert/key/chain existem na mesma partition.
+              {% elif
+                'config-sync' in _fail_raw_lower
+                or 'config sync' in _fail_raw_lower
+                or 'sync-status' in _fail_raw_lower
+                or 'device group' in _fail_raw_lower
+              %}
+              Validar device group, status de HA, horário/NTP dos membros e se o sync está sendo feito a partir do device alterado.
+              {% elif
+                'curl' in _fail_raw_lower
+                or 'openssl s_client' in _fail_raw_lower
+                or 'handshake' in _fail_raw_lower
+                or 'http_code' in _fail_raw_lower
+              %}
+              Validar VIP, porta, SNI, path, retorno HTTP esperado e conectividade TLS a partir do ambiente de execução.
+              {% else %}
+              Usar a seção "Detalhes técnicos da falha" para identificar a task, módulo e mensagem retornada.
+              {% endif %}
+
+            _fail_badge_kind: >-
+              {% if
+                'timeout' in _fail_raw_lower
+                or 'cadeia' in _fail_raw_lower
+                or 'openssl verify' in _fail_raw_lower
+                or 'curl' in _fail_raw_lower
+                or 'http_code' in _fail_raw_lower
+              %}
+              warn
+              {% elif 'erro não classificado automaticamente' in _fail_raw_lower %}
+              warn
+              {% else %}
+              crit
+              {% endif %}
+
         - name: Montar HTML de falha F5
           ansible.builtin.set_fact:
             f5_failure_report_html: |
@@ -173,34 +427,10 @@
                             <tr>
                               {{ td_open() }}<b>Diagnóstico provável</b></td>
                               {{ td_open() }}
-                                {% if 'unauthorized' in raw_lower or '401' in raw_lower or 'authentication' in raw_lower or 'auth' in raw_lower %}
-                                  {{ badge('Falha de autenticação no F5', 'crit') }}
-                                  <div style="font-family:Arial,sans-serif;font-size:12px;color:#666666;margin-top:6px;">Valide usuário, senha, permissão REST e acesso ao BIG-IP.</div>
-                                {% elif 'forbidden' in raw_lower or '403' in raw_lower or 'permission' in raw_lower or 'denied' in raw_lower %}
-                                  {{ badge('Permissão insuficiente no F5', 'crit') }}
-                                  <div style="font-family:Arial,sans-serif;font-size:12px;color:#666666;margin-top:6px;">A credencial autenticou, mas pode não ter permissão para alterar certificado, key, profile, save config ou config-sync.</div>
-                                {% elif 'timed out' in raw_lower or 'timeout' in raw_lower %}
-                                  {{ badge('Timeout', 'warn') }}
-                                  <div style="font-family:Arial,sans-serif;font-size:12px;color:#666666;margin-top:6px;">Valide conectividade com o BIG-IP, tempo de resposta da API REST e retries/timeouts configurados.</div>
-                                {% elif 'connection' in raw_lower or 'unreachable' in raw_lower or 'name or service not known' in raw_lower %}
-                                  {{ badge('Falha de conectividade', 'crit') }}
-                                  <div style="font-family:Arial,sans-serif;font-size:12px;color:#666666;margin-top:6px;">Valide rota, DNS, firewall, porta 443 e conectividade do AAP/Execution Environment até o BIG-IP.</div>
-                                {% elif 'certificate key file' in raw_lower or 'requested key' in raw_lower or 'ssl-key' in raw_lower %}
-                                  {{ badge('Key/certificado não encontrado no F5', 'crit') }}
-                                  <div style="font-family:Arial,sans-serif;font-size:12px;color:#666666;margin-top:6px;">A automação tentou referenciar uma key ou certificado inexistente no BIG-IP. Verifique o nome real do objeto, partition e se true_names está coerente.</div>
-                                {% elif 'certkeychain' in raw_lower or 'client-ssl' in raw_lower or 'profile' in raw_lower %}
-                                  {{ badge('Falha ao alterar profile Client SSL', 'crit') }}
-                                  <div style="font-family:Arial,sans-serif;font-size:12px;color:#666666;margin-top:6px;">Valide se o profile existe, se possui somente uma entrada em certKeyChain e se os objetos cert/key/chain existem na partition.</div>
-                                {% elif 'config-sync' in raw_lower or 'sync' in raw_lower or 'device group' in raw_lower %}
-                                  {{ badge('Falha no Config Sync HA', 'crit') }}
-                                  <div style="font-family:Arial,sans-serif;font-size:12px;color:#666666;margin-top:6px;">Valide o device group, status de HA, NTP/horário dos membros e se o sync deve ser feito do device alterado para o grupo.</div>
-                                {% elif 'mount' in raw_lower or 'cifs' in raw_lower or 'permission denied' in raw_lower %}
-                                  {{ badge('Falha no CIFS/certificado fonte', 'crit') }}
-                                  <div style="font-family:Arial,sans-serif;font-size:12px;color:#666666;margin-top:6px;">Valide share CIFS, usuário/senha, caminho do certificado, prefixo informado e permissões de leitura.</div>
-                                {% else %}
-                                  {{ badge('Erro não classificado automaticamente', 'warn') }}
-                                  <div style="font-family:Arial,sans-serif;font-size:12px;color:#666666;margin-top:6px;">Consulte os detalhes técnicos abaixo para identificar a origem exata.</div>
-                                {% endif %}
+                                {{ badge(_fail_category | default('Erro não classificado automaticamente') | trim, _fail_badge_kind | default('warn') | trim) }}
+                                <div style="font-family:Arial,sans-serif;font-size:12px;color:#666666;margin-top:6px;">
+                                  {{ _fail_guidance | default('Consulte os detalhes técnicos abaixo para identificar a origem exata.') | trim }}
+                                </div>
                               </td>
                             </tr>
                           </table>
@@ -359,40 +589,10 @@
                               {{ th('Ação recomendada') }}
                             </tr>
                             <tr>
-                              {{ td_open() }}
-                                {% if 'unauthorized' in raw_lower or '401' in raw_lower or 'authentication' in raw_lower or 'auth' in raw_lower %}
-                                  Autenticação
-                                {% elif 'permission' in raw_lower or 'forbidden' in raw_lower or '403' in raw_lower or 'denied' in raw_lower %}
-                                  Permissão
-                                {% elif 'timeout' in raw_lower %}
-                                  Timeout
-                                {% elif 'config-sync' in raw_lower or 'sync' in raw_lower or 'device group' in raw_lower %}
-                                  Config Sync
-                                {% elif 'mount' in raw_lower or 'cifs' in raw_lower %}
-                                  CIFS
-                                {% elif 'requested key' in raw_lower or 'ssl-key' in raw_lower %}
-                                  Key/certificado
-                                {% else %}
-                                  Falha genérica
-                                {% endif %}
-                              </td>
+                              {{ td_open() }}{{ _fail_category | default('Falha genérica') | trim }}</td>
                               {{ td_open() }}
                                 <span style="color:#666666;">
-                                {% if 'unauthorized' in raw_lower or '401' in raw_lower or 'authentication' in raw_lower or 'auth' in raw_lower %}
-                                  Validar usuário, senha, permissão REST e acesso ao BIG-IP.
-                                {% elif 'permission' in raw_lower or 'forbidden' in raw_lower or '403' in raw_lower or 'denied' in raw_lower %}
-                                  Validar se a conta possui permissão para importar certificado/key, alterar Client SSL Profile, salvar configuração e executar Config Sync.
-                                {% elif 'timeout' in raw_lower %}
-                                  Validar conectividade, tempo de resposta do BIG-IP e aumentar retries/delay se necessário.
-                                {% elif 'config-sync' in raw_lower or 'sync' in raw_lower or 'device group' in raw_lower %}
-                                  Validar device group, estado do HA, horário/NTP dos membros e se o sync está sendo feito a partir do device alterado.
-                                {% elif 'mount' in raw_lower or 'cifs' in raw_lower %}
-                                  Validar montagem CIFS, credenciais, caminho do certificado e prefixo informado.
-                                {% elif 'requested key' in raw_lower or 'ssl-key' in raw_lower %}
-                                  Validar nome real da key/certificado no F5, partition e uso de true_names.
-                                {% else %}
-                                  Usar a seção "Detalhes técnicos da falha" para identificar a task, módulo e mensagem retornada.
-                                {% endif %}
+                                  {{ _fail_guidance | default('Usar a seção "Detalhes técnicos da falha" para identificar a task, módulo e mensagem retornada.') | trim }}
                                 </span>
                               </td>
                             </tr>
@@ -446,3 +646,16 @@
             - f5_certs_mode | default('') == 'apply'
             - _cred_file is defined
             - (_cred_file | trim | length) > 0
+
+        - name: Remover diretório temporário de cadeias após falha
+          become: true
+          become_user: root
+          ansible.builtin.file:
+            path: "{{ f5_source_chain_work_dir }}"
+            state: absent
+          failed_when: false
+          changed_when: false
+          when:
+            - _f5_flow_failed | default(false) | bool
+            - f5_source_chain_work_dir is defined
+            - (f5_source_chain_work_dir | trim | length) > 0
