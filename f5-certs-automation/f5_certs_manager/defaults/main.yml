@@ -31,13 +31,12 @@ f5_include_server_ssl_profiles: false
 f5_warning_days: 30
 f5_critical_days: 7
 
-# Duplicados: se expirou há >= grace_days, vira candidato a cleanup
-f5_duplicate_delete_grace_days: 10
-
 # ====== Cleanup de duplicados ======
 f5_enable_duplicate_cleanup: true
-f5_duplicate_cleanup_only_if_not_in_use: false
+f5_duplicate_cleanup_only_if_not_in_use: true
 f5_cleanup_delete_key: true
+# Duplicados: se expirou há >= grace_days, vira candidato a cleanup
+f5_duplicate_delete_grace_days: 10
 
 # ====== CIFS (fonte dos certificados novos) ======
 # Survey simples: 1 ou mais prefixes separados por vírgula
@@ -65,17 +64,32 @@ f5_enable_post_http_validation: true
 f5_validate_path_default: "/"
 f5_validate_ok_codes_default: [200]
 
+# CADEIA
 # ====== Import de chain ======
-f5_enable_chain_import: false
-f5_enable_chain_on_profile: false
+f5_enable_chain_import: true
+f5_enable_chain_on_profile: true
+# Se true, quando não existir CADEIA.TXT, tenta montar a cadeia a partir de CADEIA*.zip.
+f5_source_chain_from_zip_enabled: true
+
+# Se true, falha quando não existir CADEIA.TXT nem CADEIA*.zip.
+f5_source_chain_required: false
+
+# Valida a cadeia gerada com openssl verify.
+f5_source_chain_verify: true
+
+# Se true, falha quando openssl verify não retornar OK.
+f5_source_chain_verify_strict: true
+
+# Diretório temporário para extrair zips de cadeia.
+f5_source_chain_work_dir: "/tmp/f5-certs-chain-{{ awx_job_id | default('local') }}"
 
 # ====== LAB / simulação ======
 # Deixar 0 normalmente
 f5_timewarp_days: 20
 
-# Config Sync HA
+# ======== Config Sync HA =========
 # Habilita execução de Config Sync após alterações no F5.
-f5_enable_configsync: true
+f5_enable_configsync: false
 f5_configsync_run_on_apply: true
 # Executa config-sync após CHECK quando o cleanup deletou/reapontou certificados.
 f5_configsync_run_on_cleanup: true
@@ -98,3 +112,52 @@ f5_configsync_delay: 15
 #   dr: "grp_sync"
 f5_configsync_device_group_by_site:
   hml: "grp_sync"
+
+# ======== Cleanup de certificados expirados sem uso =========
+
+# Habilita limpeza de certificados expirados sem uso no modo check.
+f5_enable_expired_unused_cleanup: true
+
+# Só apaga certificados expirados há pelo menos N dias.
+f5_expired_unused_delete_grace_days: 30
+
+# Se true, só remove certificados expirados que NÃO fazem parte de grupo duplicado.
+f5_expired_unused_only_non_duplicated: true
+
+# Se true, também tenta apagar a key com o mesmo nome.
+f5_expired_unused_delete_key: true
+
+# Lista de certificados protegidos contra deleção automática.
+# Regex aplicado contra full_path.
+f5_expired_unused_protected_patterns:
+  - "^/Common/default$"
+  - "^/Common/ca-bundle$"
+  - "^/Common/f5-ca-bundle$"
+  - "^/Common/f5-irule$"
+
+# ==== Nome dos objetos importados no F5 =====
+
+# Quando true, adiciona sufixo no nome do cert/key/chain importado no F5.
+# Exemplo: troca-modelo-webapp -> troca-modelo-webapp-05-2026
+f5_import_name_suffix_enabled: true
+
+# Formato do sufixo usando date/strftime.
+# %m-%Y = 05-2026
+# %Y-%m = 2026-05
+f5_import_name_suffix_format: "%m-%Y"
+
+# Timezone usado para montar o sufixo.
+f5_import_name_timezone: "{{ f5_report_timezone | default('America/Sao_Paulo') }}"
+
+# Estratégia quando o nome com mês/ano já existir no F5.
+# increment = tenta -2, -3, -4...
+# fail = falha e pede limpeza/ajuste manual.
+f5_import_name_collision_strategy: "increment"
+
+# Se preenchido, força um sufixo específico e ignora a data.
+# Útil para teste/lab.
+# Exemplo: "05-2026"
+f5_import_name_suffix_override: ""
+
+# Limite de tentativas para encontrar nome livre.
+f5_import_name_collision_max_attempts: 20
