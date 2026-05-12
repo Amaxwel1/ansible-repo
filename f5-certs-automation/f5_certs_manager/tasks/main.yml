@@ -1,13 +1,4 @@
 ---
-- name: Validar credenciais
-  ansible.builtin.assert:
-    that:
-      - (f5_user | default('') | trim | length) > 0
-      - (f5_password | default('') | trim | length) > 0
-    fail_msg: |
-      Parâmetros obrigatórios faltando.
-      - f5_user / f5_password
-
 - name: Montar lista de sites válidos a partir de f5_sites
   ansible.builtin.set_fact:
     f5_valid_site_names: >-
@@ -107,6 +98,7 @@
       transport: "rest"
       no_f5_teem: true
   changed_when: false
+  no_log: true
 
 - name: Validar CIFS no modo APPLY
   ansible.builtin.assert:
@@ -161,3 +153,15 @@
   when:
     - f5_certs_mode == 'apply'
     - _cred_file is defined
+
+- name: Remover diretório temporário de cadeias
+  become: true
+  become_user: root
+  ansible.builtin.file:
+    path: "{{ f5_source_chain_work_dir }}"
+    state: absent
+  failed_when: false
+  changed_when: false
+  when:
+    - f5_source_chain_work_dir is defined
+    - (f5_source_chain_work_dir | trim | length) > 0
