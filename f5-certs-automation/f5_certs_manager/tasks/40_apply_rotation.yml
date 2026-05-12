@@ -23,6 +23,40 @@
     f5_installed_certs_by_site: {}
   changed_when: false
 
+- name: Gerar sufixo de importação dos objetos F5
+  ansible.builtin.command: >
+    date '+{{ f5_import_name_suffix_format | default("%m-%Y") }}'
+  environment:
+    TZ: "{{ f5_import_name_timezone | default(f5_report_timezone | default('America/Sao_Paulo')) }}"
+  register: _f5_import_name_suffix_cmd
+  changed_when: false
+  when:
+    - f5_import_name_suffix_enabled | default(true) | bool
+    - (f5_import_name_suffix_override | default('') | trim | length) == 0
+
+- name: Definir sufixo efetivo de importação dos objetos F5
+  ansible.builtin.set_fact:
+    f5_import_name_suffix_eff: >-
+      {{
+        (
+          f5_import_name_suffix_override
+          if ((f5_import_name_suffix_override | default('') | trim | length) > 0)
+          else (_f5_import_name_suffix_cmd.stdout | default(''))
+        )
+        | trim
+        | regex_replace('[^A-Za-z0-9._-]', '-')
+      }}
+  when:
+    - f5_import_name_suffix_enabled | default(true) | bool
+  changed_when: false
+
+- name: Definir sufixo vazio quando sufixo de importação estiver desabilitado
+  ansible.builtin.set_fact:
+    f5_import_name_suffix_eff: ""
+  when:
+    - not (f5_import_name_suffix_enabled | default(true) | bool)
+  changed_when: false
+
 - name: Construir cache de Virtual Servers por profile (1x por site)
   ansible.builtin.include_tasks: 13_build_virtual_cache_for_site.yml
   loop: "{{ f5_sites_eff }}"
