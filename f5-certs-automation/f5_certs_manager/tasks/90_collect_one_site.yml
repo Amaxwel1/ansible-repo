@@ -6,6 +6,7 @@
     f5_server_port_eff: "{{ site.port | default(443) | int }}"
     f5_provider_eff: "{{ f5_provider_base | combine({'server': site.server, 'server_port': (site.port | default(443) | int)}) }}"
     f5_cleanup_results: []
+    f5_expired_unused_cleanup_results: []
   changed_when: false
 
 - name: Coletar certificados instalados (site)
@@ -17,7 +18,7 @@
 - name: Processar findings (site)
   ansible.builtin.include_tasks: 20_process_findings.yml
 
-- name: Guardar coleções antes do cleanup
+- name: Guardar coleções antes dos cleanups
   ansible.builtin.set_fact:
     f5_duplicates_before_cleanup: "{{ f5_duplicates | default([]) }}"
     f5_expired_before_cleanup: "{{ f5_expired | default([]) }}"
@@ -26,16 +27,19 @@
     f5_ok_before_cleanup: "{{ f5_ok | default([]) }}"
   when:
     - f5_certs_mode == 'check'
-    - f5_enable_duplicate_cleanup | bool
+    - >
+      (f5_enable_duplicate_cleanup | default(false) | bool)
+      or
+      (f5_enable_expired_unused_cleanup | default(false) | bool)
   changed_when: false
 
 - name: Cleanup de duplicados (site)
   ansible.builtin.include_tasks: 50_cleanup_duplicates.yml
   when:
     - f5_certs_mode == 'check'
-    - f5_enable_duplicate_cleanup | bool
+    - f5_enable_duplicate_cleanup | default(false) | bool
 
-- name: Extrair certs deletados no cleanup
+- name: Extrair certs deletados no cleanup de duplicados
   ansible.builtin.set_fact:
     _deleted_certs_now: >-
       {{
@@ -47,60 +51,98 @@
       }}
   when:
     - f5_certs_mode == 'check'
-    - f5_enable_duplicate_cleanup | bool
+    - f5_enable_duplicate_cleanup | default(false) | bool
+  changed_when: false
+
+- name: Garantir lista de deletados por duplicidade definida
+  ansible.builtin.set_fact:
+    _deleted_certs_now: "{{ _deleted_certs_now | default([]) }}"
+  changed_when: false
+
+- name: Cleanup de expirados sem uso (site)
+  ansible.builtin.include_tasks: 52_cleanup_expired_unused.yml
+  when:
+    - f5_certs_mode == 'check'
+    - f5_enable_expired_unused_cleanup | default(false) | bool
+
+- name: Extrair certs deletados no cleanup de expirados sem uso
+  ansible.builtin.set_fact:
+    _expired_unused_deleted_certs_now: >-
+      {{
+        (f5_expired_unused_cleanup_results | default([]))
+        | selectattr('action', 'defined')
+        | selectattr('action', 'in', ['DELETED', 'DELETADO'])
+        | map(attribute='cert')
+        | list
+      }}
+  when:
+    - f5_certs_mode == 'check'
+    - f5_enable_expired_unused_cleanup | default(false) | bool
+  changed_when: false
+
+- name: Consolidar certs deletados nos cleanups
+  ansible.builtin.set_fact:
+    _all_deleted_certs_now: >-
+      {{
+        (
+          (_deleted_certs_now | default([]))
+          +
+          (_expired_unused_deleted_certs_now | default([]))
+        )
+        | unique
+        | list
+      }}
   changed_when: false
 
 - name: Config Sync após cleanup quando houve alteração no site
   ansible.builtin.include_tasks: 70_configsync_site.yml
   vars:
-    f5_configsync_reason: "cleanup de certificados duplicados"
+    f5_configsync_reason: "cleanup de certificados duplicados/expirados sem uso"
   when:
     - f5_certs_mode == 'check'
-    - f5_enable_duplicate_cleanup | bool
-    - f5_enable_configsync | bool
-    - f5_configsync_run_on_cleanup | bool
-    - (_deleted_certs_now | default([]) | length) > 0
+    - f5_enable_configsync | default(false) | bool
+    - f5_configsync_run_on_cleanup | default(true) | bool
+    - (_all_deleted_certs_now | default([]) | length) > 0
 
 - name: Remover certs deletados das listas de severidade
   ansible.builtin.set_fact:
     f5_expired: >-
       {{
-        (f5_expired_before_cleanup | default([]))
-        | rejectattr('full_path', 'in', (_deleted_certs_now | default([])))
+        (f5_expired_before_cleanup | default(f5_expired | default([])))
+        | rejectattr('full_path', 'in', (_all_deleted_certs_now | default([])))
         | list
       }}
     f5_critical: >-
       {{
-        (f5_critical_before_cleanup | default([]))
-        | rejectattr('full_path', 'in', (_deleted_certs_now | default([])))
+        (f5_critical_before_cleanup | default(f5_critical | default([])))
+        | rejectattr('full_path', 'in', (_all_deleted_certs_now | default([])))
         | list
       }}
     f5_warning: >-
       {{
-        (f5_warning_before_cleanup | default([]))
-        | rejectattr('full_path', 'in', (_deleted_certs_now | default([])))
+        (f5_warning_before_cleanup | default(f5_warning | default([])))
+        | rejectattr('full_path', 'in', (_all_deleted_certs_now | default([])))
         | list
       }}
     f5_ok: >-
       {{
-        (f5_ok_before_cleanup | default([]))
-        | rejectattr('full_path', 'in', (_deleted_certs_now | default([])))
+        (f5_ok_before_cleanup | default(f5_ok | default([])))
+        | rejectattr('full_path', 'in', (_all_deleted_certs_now | default([])))
         | list
       }}
   when:
     - f5_certs_mode == 'check'
-    - f5_enable_duplicate_cleanup | bool
-    - (_deleted_certs_now | default([]) | length) > 0
+    - (_all_deleted_certs_now | default([]) | length) > 0
   changed_when: false
 
 - name: Recalcular duplicados após cleanup para o report
   ansible.builtin.set_fact:
     f5_duplicates: >-
       {%- set out = [] -%}
-      {%- for dg in (f5_duplicates_before_cleanup | default([])) -%}
+      {%- for dg in (f5_duplicates_before_cleanup | default(f5_duplicates | default([]))) -%}
       {%- set kept = [] -%}
       {%- for it in (dg['items'] | default([])) -%}
-      {%- if (it.full_path | default('')) not in (_deleted_certs_now | default([])) -%}
+      {%- if (it.full_path | default('')) not in (_all_deleted_certs_now | default([])) -%}
       {%- set _ = kept.append(it) -%}
       {%- endif -%}
       {%- endfor -%}
@@ -128,8 +170,7 @@
       {{ out }}
   when:
     - f5_certs_mode == 'check'
-    - f5_enable_duplicate_cleanup | bool
-    - (_deleted_certs_now | default([]) | length) > 0
+    - (_all_deleted_certs_now | default([]) | length) > 0
   changed_when: false
 
 - name: Garantir listas definidas após cleanup
@@ -139,6 +180,8 @@
     f5_warning: "{{ f5_warning | default(f5_warning_before_cleanup | default([])) }}"
     f5_ok: "{{ f5_ok | default(f5_ok_before_cleanup | default([])) }}"
     f5_duplicates: "{{ f5_duplicates | default(f5_duplicates_before_cleanup | default([])) }}"
+    f5_cleanup_results: "{{ f5_cleanup_results | default([]) }}"
+    f5_expired_unused_cleanup_results: "{{ f5_expired_unused_cleanup_results | default([]) }}"
   changed_when: false
 
 - name: Persistir findings do site
@@ -157,6 +200,7 @@
               'ok': (f5_ok | default([])),
               'duplicates': (f5_duplicates | default([])),
               'cleanup_results': (f5_cleanup_results | default([])),
+              'expired_unused_cleanup_results': (f5_expired_unused_cleanup_results | default([])),
               'configsync_results': (
                 (f5_configsync_results | default([]))
                 | selectattr('site', 'equalto', site.name)
