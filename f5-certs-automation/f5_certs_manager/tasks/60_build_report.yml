@@ -1,7 +1,16 @@
 ---
-- name: Formatar data do report (pt-BR)
+- name: Formatar data do report no timezone configurado
+  ansible.builtin.command: >
+    date -d @{{ _now_epoch | int }} '+%d/%m/%Y %H:%M:%S'
+  environment:
+    TZ: "{{ f5_report_timezone | default('America/Sao_Paulo') }}"
+  register: _report_date_cmd
+  changed_when: false
+  failed_when: false
+
+- name: Definir data do report
   ansible.builtin.set_fact:
-    report_date_br: "{{ '%d/%m/%Y %H:%M:%S' | strftime(_now_epoch | int) }}"
+    report_date_br: "{{ _report_date_cmd.stdout | default('%d/%m/%Y %H:%M:%S' | strftime(_now_epoch | int)) }}"
   changed_when: false
 
 - name: Montar HTML do report
@@ -476,7 +485,50 @@
                         {% endfor %}
                       </table>
                     {% endif %}
-                    
+
+                    {% if s.expired_unused_cleanup_results is defined and (s.expired_unused_cleanup_results | length) > 0 %}
+                      <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Limpeza de expirados sem uso (executado)</div>
+                      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
+                        <tr>
+                          {{ th('Cert') }}
+                          {{ th('Ação') }}
+                          {{ th('Motivo/Detalhe') }}
+                          {{ th('Expirado há') }}
+                          {{ th('Key apagada?') }}
+                        </tr>
+                        {% for c in s.expired_unused_cleanup_results %}
+                        <tr>
+                          {{ td_open() }}{{ code(c.cert | default('—')) }}</td>
+                          {{ td_open() }}
+                            {% set act = (c.action | default('')) %}
+                            {% if act in ['DELETADO', 'DELETED'] %}
+                              {{ badge('DELETADO', 'crit') }}
+                            {% elif act in ['PULADO', 'SKIPPED'] %}
+                              {{ badge('PULADO', 'gray') }}
+                            {% else %}
+                              {{ badge((act if (act | length) > 0 else '—'), 'gray') }}
+                            {% endif %}
+                          </td>
+                          {{ td_open() }}<span style="color:#666666;">{{ c.reason | default('—') }}</span></td>
+                          {{ td_open() }}
+                            {% if c.days_since_expired is defined %}
+                              {{ c.days_since_expired }} dias
+                            {% else %}
+                              —
+                            {% endif %}
+                          </td>
+                          {{ td_open() }}
+                            {% if c.key_deleted | default(false) | bool %}
+                              {{ badge('SIM', 'ok') }}
+                            {% else %}
+                              {{ badge('NÃO', 'gray') }}
+                            {% endif %}
+                          </td>
+                        </tr>
+                        {% endfor %}
+                      </table>
+                    {% endif %}
+
                     {% if s.configsync_results is defined and (s.configsync_results | length) > 0 %}
                       <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Config Sync HA</div>
                       <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
@@ -511,6 +563,7 @@
                         {% endfor %}
                       </table>
                     {% endif %}
+
                   {% endfor %}
 
                 </td>
