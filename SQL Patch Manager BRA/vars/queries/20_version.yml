@@ -1,3 +1,0 @@
-
----
-sql_query_version: "SELECT @@VERSION AS SqlVersion;"
