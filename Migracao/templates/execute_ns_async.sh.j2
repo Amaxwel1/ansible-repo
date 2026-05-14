@@ -7,8 +7,16 @@ kube_origem="{{ tmp_path_local }}/ocp_origem"
 kube_destino="{{ tmp_path_local }}/ocp_destino"
 
 scale_down_default="{{ perform_scale_down }}"
-scale_down_dds_cfg="{{ baixar_dds }}"
-dds_pattern='^({{ dds_namespaces_pattern }})'
+
+scale_down_dds_cfg="{{ baixar_dds | default('SIM') }}"
+scale_down_paginas_cfg="{{ baixar_paginas_manutencao | default('SIM') }}"
+scale_down_sinv_cfg="{{ baixar_sinv | default('SIM') }}"
+
+dds_pattern='^({{ dds_namespaces_pattern | default("__NO_MATCH__") }})'
+paginas_ns_pattern='^({{ paginas_manutencao_namespaces_pattern | default("__NO_MATCH__") }})$'
+sinv_ns_pattern='^({{ sinv_namespaces_pattern | default("__NO_MATCH__") }})$'
+paginas_dc_pattern='^({{ paginas_manutencao_dcs_pattern | default("__NO_MATCH__") }})$'
+sinv_dc_pattern='^({{ sinv_dcs_pattern | default("__NO_MATCH__") }})$'
 
 scale_down_timeout_seconds="{{ scale_down_timeout.seconds }}"
 scale_down_timeout_action="{{ scale_down_timeout.action }}"
@@ -25,6 +33,7 @@ wait_for_scale_down() {
   local output
 
   start_ts=$(date +%s)
+
   while true; do
     output=$(oc get pods -n "$namespace" \
       --selector=app="$dc" \
@@ -52,6 +61,7 @@ wait_for_progress() {
   local pod_json
 
   start_ts=$(date +%s)
+
   while true; do
     pod_json=$(oc get pods -n "$namespace" \
       --selector=app="$dc" \
@@ -83,10 +93,28 @@ wait_for_progress() {
 
 process_dc() {
   local dc="$1"
+  local should_scale_down_dc="SIM"
+
+  if echo "$namespace" | grep -Eq "$dds_pattern" && [ "$scale_down_dds_cfg" = "NAO" ]; then
+    should_scale_down_dc="NAO"
+  fi
+
+  if echo "$namespace" | grep -Eq "$paginas_ns_pattern" && echo "$dc" | grep -Eq "$paginas_dc_pattern" && [ "$scale_down_paginas_cfg" = "NAO" ]; then
+    should_scale_down_dc="NAO"
+  fi
+
+  if echo "$namespace" | grep -Eq "$sinv_ns_pattern" && echo "$dc" | grep -Eq "$sinv_dc_pattern" && [ "$scale_down_sinv_cfg" = "NAO" ]; then
+    should_scale_down_dc="NAO"
+  fi
 
   if echo "$current_dcs" | grep -qx "$dc"; then
 
-    if [ "$scale_down_default" = "SIM" ] && [ "$should_scale_down_namespace" = "SIM" ]; then
+    if ! oc get deploymentconfig "$dc" -n "$namespace" --kubeconfig="$kube_destino" >/dev/null 2>&1; then
+      echo -e "\t {{ namespace }} $dc\t $(date '+%d/%m/%Y %H:%M:%S')\t Scale up falhou. Objeto não encontrado no cluster de destino." | tee -a deployments_async_{{ namespace }}.txt
+      return 0
+    fi
+
+    if [ "$scale_down_default" = "SIM" ] && [ "$should_scale_down_dc" = "SIM" ]; then
       oc scale deploymentconfig "$dc" --replicas=0 -n "$namespace" --kubeconfig="$kube_origem" >/dev/null 2>&1
 
       wait_for_scale_down "$namespace" "$dc" "$scale_down_timeout_seconds"
@@ -149,6 +177,7 @@ run_batch() {
   for pid in "${pids[@]}"; do
     wait "$pid"
     pid_rc=$?
+
     if [ "$pid_rc" -eq 10 ]; then
       rc=10
     elif [ "$pid_rc" -ne 0 ] && [ "$rc" -eq 0 ]; then
@@ -160,11 +189,6 @@ run_batch() {
 }
 
 echo -e "----- {{ namespace }}\t $start_time\t Paralelizado Iniciado" | tee -a deployments_async_{{ namespace }}.txt
-
-should_scale_down_namespace="SIM"
-if echo "$namespace" | grep -Eq "$dds_pattern" && [ "$scale_down_dds_cfg" = "NAO" ]; then
-  should_scale_down_namespace="NAO"
-fi
 
 current_dcs=$(oc get deploymentconfig -n "$namespace" \
   -o custom-columns=NAME:.metadata.name,CURRENT:.status.replicas \
