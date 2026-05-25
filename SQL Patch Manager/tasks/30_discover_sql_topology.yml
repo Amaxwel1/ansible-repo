@@ -254,8 +254,6 @@
   ansible.windows.win_powershell:
     script: |
       try {
-        Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
-
         $serverInstance = "{{ ag_probe_target.connection_target }}"
         $queryB64 = "{{ sql_query_local_discovery | b64encode }}"
         $query = [System.Text.Encoding]::UTF8.GetString(
@@ -265,7 +263,6 @@
         $rows = @(
           Invoke-Sqlcmd `
             -ServerInstance $serverInstance `
-            -TrustServerCertificate `
             -QueryTimeout {{ sql_query_timeout_seconds }} `
             -Query $query `
             -ErrorAction Stop
@@ -464,9 +461,35 @@
 
 - name: Definir host e connection target do seed do AG
   ansible.builtin.set_fact:
-    ag_seed_host: "{{ ag_seed_probe_row.MachineName | default('') }}"
+    ag_seed_inventory_host: "{{ ag_seed_probe_row.ProbeHost | default(ag_seed_probe_row.MachineName | default('')) }}"
+    ag_seed_machine_name: "{{ ag_seed_probe_row.MachineName | default(ag_seed_probe_row.ProbeHost | default('')) }}"
+    ag_seed_host: "{{ ag_seed_probe_row.ProbeHost | default(ag_seed_probe_row.MachineName | default('')) }}"
     ag_seed_connection_target: "{{ ag_seed_probe_row.ConnectionTarget | default('') }}"
   when: execution_topology == 'ag_cluster'
+  run_once: true
+
+- name: Registrar aliases do seed do AG para delegação WinRM
+  ansible.builtin.add_host:
+    name: "{{ ag_seed_alias }}"
+    groups: sql_patch_targets
+    ansible_host: "{{ ag_seed_alias }}"
+    ansible_user: "{{ ansible_user }}"
+    ansible_password: "{{ ansible_password }}"
+    ansible_connection: winrm
+    ansible_port: "{{ winrm_port }}"
+    ansible_winrm_transport: "{{ winrm_transport }}"
+    ansible_winrm_scheme: "{{ winrm_scheme }}"
+    ansible_winrm_server_cert_validation: "{{ winrm_server_cert_validation }}"
+  loop:
+    - "{{ ag_seed_inventory_host }}"
+    - "{{ ag_seed_machine_name }}"
+  loop_control:
+    loop_var: ag_seed_alias
+    label: "{{ ag_seed_alias }}"
+  when:
+    - execution_topology == 'ag_cluster'
+    - ag_seed_alias is defined
+    - ag_seed_alias | trim | length > 0
   run_once: true
 
 - name: Validar que pelo menos um seed do AG foi encontrado
@@ -483,8 +506,6 @@
 - name: Descobrir AG e PRIMARY atual
   ansible.windows.win_powershell:
     script: |
-      Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
-
       $serverInstance = "{{ ag_seed_connection_target }}"
       $queryB64 = "{{ sql_query_ag_group_state | b64encode }}"
       $query = [System.Text.Encoding]::UTF8.GetString(
@@ -494,7 +515,6 @@
       $rows = @(
         Invoke-Sqlcmd `
           -ServerInstance $serverInstance `
-          -TrustServerCertificate `
           -QueryTimeout {{ sql_query_timeout_seconds }} `
           -Query $query `
           -ErrorAction Stop
@@ -554,7 +574,7 @@
   ansible.builtin.add_host:
     name: "{{ ag_primary_host }}"
     groups: sql_patch_targets
-    ansible_host: "{{ hostvars[ag_primary_host].ansible_host | default(ag_primary_host) }}"
+    ansible_host: "{{ ag_primary_host }}"
     ansible_user: "{{ ansible_user }}"
     ansible_password: "{{ ansible_password }}"
     ansible_connection: winrm
@@ -570,8 +590,6 @@
 - name: Descobrir topologia completa do AG na PRIMARY
   ansible.windows.win_powershell:
     script: |
-      Import-Module "{{ sql_powershell_module_name }}" -ErrorAction Stop
-
       $serverInstance = "{{ ag_primary_connection_target }}"
       $queryB64 = "{{ sql_query_ag_topology | b64encode }}"
       $query = [System.Text.Encoding]::UTF8.GetString(
@@ -581,7 +599,6 @@
       $rows = @(
         Invoke-Sqlcmd `
           -ServerInstance $serverInstance `
-          -TrustServerCertificate `
           -QueryTimeout {{ sql_query_timeout_seconds }} `
           -Query $query `
           -ErrorAction Stop
@@ -672,10 +689,15 @@
 - name: Validar que os hosts selecionados pertencem ao AG
   ansible.builtin.assert:
     that:
-      - (execution_hosts | difference(ag_discovery.all_hosts)) | length == 0
+      - (execution_hosts_normalized_for_ag | difference(ag_hosts_normalized_for_validation)) | length == 0
     fail_msg: >-
       Há host(s) selecionados que não pertencem ao AG descoberto:
-      {{ execution_hosts | difference(ag_discovery.all_hosts) | join(', ') }}
+      {{ execution_hosts | join(', ') }}.
+      Hosts descobertos no AG:
+      {{ ag_discovery.all_hosts | join(', ') }}
+  vars:
+    execution_hosts_normalized_for_ag: "{{ execution_hosts | map('lower') | list }}"
+    ag_hosts_normalized_for_validation: "{{ ag_discovery.all_hosts | map('lower') | list }}"
   when: execution_topology == 'ag_cluster'
   run_once: true
 
