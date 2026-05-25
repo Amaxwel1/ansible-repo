@@ -52,6 +52,12 @@ patch_reboot_timeout_seconds: 3600
 patch_reboot_connect_timeout_seconds: 30
 patch_reboot_post_delay_seconds: 60
 
+# Espera explícita para WinRM/NTLM estabilizar após reboot
+patch_winrm_ready_timeout_seconds: 1800
+patch_winrm_ready_connect_timeout_seconds: 30
+patch_winrm_ready_sleep_seconds: 30
+patch_winrm_ready_delay_seconds: 60
+
 # Patch no CIFS
 patch_cifs_share: ""
 patch_cifs_mount_path: "/opt/ansiblefiles/files/sql-patches"
