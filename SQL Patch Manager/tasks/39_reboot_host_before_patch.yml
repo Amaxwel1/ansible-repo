@@ -353,12 +353,12 @@
   run_once: true
 
 - name: Aguardar WinRM autenticado no host rebootado antes de refazer discovery
-  ansible.windows.win_ping:
+  ansible.builtin.wait_for_connection:
+    timeout: "{{ patch_winrm_ready_timeout_seconds | default(1800) }}"
+    connect_timeout: "{{ patch_winrm_ready_connect_timeout_seconds | default(30) }}"
+    sleep: "{{ patch_winrm_ready_sleep_seconds | default(30) }}"
+    delay: "{{ patch_winrm_ready_delay_seconds | default(60) }}"
   delegate_to: "{{ pre_patch_reboot_target_host }}"
-  register: _winrm_ready_after_pre_patch_reboot
-  retries: 20
-  delay: 30
-  until: _winrm_ready_after_pre_patch_reboot is succeeded
   when:
     - execution_topology == 'ag_cluster'
     - pre_patch_reboot_should_run | bool
