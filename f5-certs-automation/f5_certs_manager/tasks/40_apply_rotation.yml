@@ -16,11 +16,13 @@
 
 - name: Inicializar coleções do apply
   ansible.builtin.set_fact:
-    f5_rotation_results: []
-    f5_handshake_results: []
-    f5_virtuals_index_by_site: {}
-    f5_clientssl_profiles_by_site: {}
-    f5_installed_certs_by_site: {}
+    f5_rotation_results: "{{ f5_rotation_results | default([]) }}"
+    f5_handshake_results: "{{ f5_handshake_results | default([]) }}"
+    f5_serverssl_config_validation_results: "{{ f5_serverssl_config_validation_results | default([]) }}"
+    f5_clientssl_profiles_by_site: "{{ f5_clientssl_profiles_by_site | default({}) }}"
+    f5_serverssl_profiles_by_site: "{{ f5_serverssl_profiles_by_site | default({}) }}"
+    f5_installed_certs_by_site: "{{ f5_installed_certs_by_site | default({}) }}"
+    f5_virtuals_index_by_site: "{{ f5_virtuals_index_by_site | default({}) }}"
   changed_when: false
 
 - name: Gerar sufixo de importação dos objetos F5
@@ -70,6 +72,14 @@
   loop_control:
     loop_var: site
     label: "{{ site.name }}:{{ site.server }}"
+
+- name: Construir cache de Server SSL Profiles (1x por site)
+  ansible.builtin.include_tasks: 14_build_serverssl_cache_for_site.yml
+  loop: "{{ f5_sites_eff }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.name }}:{{ site.server }}"
+  when: "'server' in (f5_ssl_profile_types_for_action | default(['client']))"
 
 - name: Construir cache de certificados instalados (1x por site)
   ansible.builtin.include_tasks: 15_build_cert_cache_for_site.yml
