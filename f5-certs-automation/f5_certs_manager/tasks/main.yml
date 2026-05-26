@@ -54,6 +54,56 @@
       Valores recebidos: {{ f5_target_scope_norm | default([]) }}.
       Valores aceitos conforme f5_sites: {{ f5_valid_site_names | default([]) }}.
 
+- name: Validar escopo de SSL Profiles
+  ansible.builtin.assert:
+    that:
+      - (f5_ssl_profile_scope | default('client') | string | trim | lower) in ['client', 'server', 'all']
+    fail_msg: >-
+      f5_ssl_profile_scope inválido: {{ f5_ssl_profile_scope | default('') }}.
+      Valores aceitos: client, server, all.
+  changed_when: false
+
+- name: Normalizar escopo de SSL Profiles
+  ansible.builtin.set_fact:
+    f5_ssl_profile_scope_eff: "{{ f5_ssl_profile_scope | default('client') | string | trim | lower }}"
+    f5_ssl_profile_types_for_action: >-
+      {{
+        ['client', 'server']
+        if (f5_ssl_profile_scope | default('client') | string | trim | lower) == 'all'
+        else [f5_ssl_profile_scope | default('client') | string | trim | lower]
+      }}
+  changed_when: false
+
+- name: Bloquear apply com escopo all sem confirmação explícita
+  ansible.builtin.assert:
+    that:
+      - f5_ssl_profile_scope_eff != 'all' or (f5_apply_allow_all_profile_types | default(false) | bool)
+    fail_msg: >-
+      f5_certs_mode=apply com f5_ssl_profile_scope=all está bloqueado por segurança.
+      Use f5_ssl_profile_scope=client ou server, ou habilite f5_apply_allow_all_profile_types=true no lab.
+  when: f5_certs_mode == 'apply'
+  changed_when: false
+
+- name: Definir coleta efetiva de Client/Server SSL
+  ansible.builtin.set_fact:
+    f5_collect_client_ssl_eff: >-
+      {{
+        f5_ssl_profile_scope_eff in ['client', 'all']
+        or (
+          (f5_collect_server_ssl_for_safety | default(true) | bool)
+          and (f5_certs_mode | default('check')) in ['check', 'list', 'compare']
+        )
+      }}
+    f5_collect_server_ssl_eff: >-
+      {{
+        f5_ssl_profile_scope_eff in ['server', 'all']
+        or (
+          (f5_collect_server_ssl_for_safety | default(true) | bool)
+          and (f5_certs_mode | default('check')) in ['check', 'list', 'compare']
+        )
+      }}
+  changed_when: false
+
 - name: Normalizar sites efetivos (porta default 443) conforme escopo
   ansible.builtin.set_fact:
     f5_sites_eff: >-
@@ -129,6 +179,10 @@
   loop_control:
     loop_var: site
     label: "{{ site.name }}:{{ site.server }}"
+
+- name: Comparar certificados entre sites
+  ansible.builtin.include_tasks: 55_compare_sites.yml
+  when: f5_certs_mode == 'compare'
 
 - name: Montar report (HTML)
   ansible.builtin.include_tasks: 60_build_report.yml
