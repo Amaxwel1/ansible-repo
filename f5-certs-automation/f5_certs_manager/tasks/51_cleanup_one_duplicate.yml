@@ -10,6 +10,24 @@
     _profiles_using_oldest_as_chain: "{{ dg.oldest.used_as_chain_by_profiles | default([]) }}"
   changed_when: false
 
+- name: Classificar profiles que usam o certificado antigo por tipo
+  ansible.builtin.set_fact:
+    _profiles_using_oldest_client: >-
+      {{
+        _profiles_using_oldest
+        | default([])
+        | select('in', (f5_profile_type_by_path | default({}) | dict2items | selectattr('value', 'equalto', 'client') | map(attribute='key') | list))
+        | list
+      }}
+    _profiles_using_oldest_server: >-
+      {{
+        _profiles_using_oldest
+        | default([])
+        | select('in', (f5_profile_type_by_path | default({}) | dict2items | selectattr('value', 'equalto', 'server') | map(attribute='key') | list))
+        | list
+      }}
+  changed_when: false
+
 - name: Pular - oldest em uso e modo seguro ligado
   ansible.builtin.set_fact:
     f5_cleanup_results: >-
@@ -42,6 +60,24 @@
     - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
     - _dc_in_use | bool
     - (_profiles_using_oldest_as_chain | default([]) | length) > 0
+
+- name: Pular - oldest em uso por Server SSL no cleanup agressivo
+  ansible.builtin.set_fact:
+    f5_cleanup_results: >-
+      {{
+        f5_cleanup_results + [{
+          'cert': (_dc_full_path | default('—')),
+          'action': 'PULADO',
+          'reason': 'Em uso por Server SSL Profile; ajuste automático de Server SSL será tratado na etapa de rotação/cleanup server',
+          'cert_destino': '',
+          'profiles_ajustados': (_profiles_using_oldest_server | default([]))
+        }]
+      }}
+  when:
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - _dc_in_use | bool
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (_profiles_using_oldest_server | default([]) | length) > 0
 
 - name: Deletar certificado (ssl-cert) no F5 - delete direto
   f5networks.f5_modules.bigip_ssl_certificate:
@@ -95,6 +131,7 @@
     - _dc_in_use | bool
     - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
     - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
   changed_when: false
 
 - name: Falhar se não houver certificado destino para ajuste
@@ -107,6 +144,7 @@
     - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
     - (_profiles_using_oldest_as_chain | default([]) | length) == 0
     - (_replacement_candidates_all | default([]) | length) == 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
 
 - name: Selecionar candidatos destino válidos
   ansible.builtin.set_fact:
@@ -120,6 +158,7 @@
     - _dc_in_use | bool
     - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
     - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
   changed_when: false
 
 - name: Escolher certificado destino preferencial
@@ -136,6 +175,7 @@
     - _dc_in_use | bool
     - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
     - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
   changed_when: false
 
 - name: Definir metadados do certificado destino
@@ -149,6 +189,7 @@
     - _dc_in_use | bool
     - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
     - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
   changed_when: false
 
 - name: Parse donor profile full path
@@ -160,6 +201,7 @@
     - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
     - (_profiles_using_oldest_as_chain | default([]) | length) == 0
     - (_donor_profile_full | default('') | length) > 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
   changed_when: false
 
 - name: Buscar donor profile no F5
@@ -180,6 +222,7 @@
     - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
     - (_profiles_using_oldest_as_chain | default([]) | length) == 0
     - (_donor_profile_full | default('') | length) > 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
   changed_when: false
 
 - name: Definir se donor é utilizável
@@ -193,6 +236,7 @@
     - _dc_in_use | bool
     - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
     - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
   changed_when: false
 
 - name: Definir trio via donor
@@ -206,6 +250,7 @@
     - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
     - (_profiles_using_oldest_as_chain | default([]) | length) == 0
     - _donor_available | default(false) | bool
+    - (_profiles_using_oldest_server | default([]) | length) == 0
   changed_when: false
 
 - name: Definir trio via busca da key existente
@@ -232,6 +277,7 @@
     - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
     - (_profiles_using_oldest_as_chain | default([]) | length) == 0
     - not (_donor_available | default(false) | bool)
+    - (_profiles_using_oldest_server | default([]) | length) == 0
   changed_when: false
 
 - name: Montar nomes candidatos de key
@@ -256,6 +302,7 @@
     - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
     - (_profiles_using_oldest_as_chain | default([]) | length) == 0
     - not (_donor_available | default(false) | bool)
+    - (_profiles_using_oldest_server | default([]) | length) == 0
   changed_when: false
 
 - name: Probar cada key candidata no F5
@@ -279,6 +326,7 @@
     - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
     - (_profiles_using_oldest_as_chain | default([]) | length) == 0
     - not (_donor_available | default(false) | bool)
+    - (_profiles_using_oldest_server | default([]) | length) == 0
   changed_when: false
 
 - name: Escolher key destino encontrada de forma exata
@@ -298,6 +346,7 @@
     - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
     - (_profiles_using_oldest_as_chain | default([]) | length) == 0
     - not (_donor_available | default(false) | bool)
+    - (_profiles_using_oldest_server | default([]) | length) == 0
   changed_when: false
 
 - name: Debug - valores escolhidos para ajuste do cleanup
@@ -315,6 +364,7 @@
     - _dc_in_use | bool
     - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
     - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
 
 - name: Pular - key do certificado destino não encontrada
   ansible.builtin.set_fact:
@@ -334,6 +384,7 @@
     - (_profiles_using_oldest_as_chain | default([]) | length) == 0
     - not (_donor_available | default(false) | bool)
     - (_repoint_key_name | default('') | length) == 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
 
 - name: Parse profiles que usam o certificado antigo
   ansible.builtin.set_fact:
@@ -360,6 +411,7 @@
       (_donor_available | default(false) | bool)
       or ((_repoint_key_name | default('') | length) > 0)
       )
+    - (_profiles_using_oldest_server | default([]) | length) == 0
   changed_when: false
 
 - name: Garantir que há profiles a ajustar
@@ -376,6 +428,7 @@
       (_donor_available | default(false) | bool)
       or ((_repoint_key_name | default('') | length) > 0)
       )
+    - (_profiles_using_oldest_server | default([]) | length) == 0
 
 - name: Ajustar profiles do certificado antigo para o certificado destino
   f5networks.f5_modules.bigip_profile_client_ssl:
@@ -409,6 +462,7 @@
       (_donor_available | default(false) | bool)
       or ((_repoint_key_name | default('') | length) > 0)
       )
+    - (_profiles_using_oldest_server | default([]) | length) == 0
 
 - name: Salvar running-config após ajuste dos profiles
   f5networks.f5_modules.bigip_config:
@@ -424,6 +478,7 @@
       (_donor_available | default(false) | bool)
       or ((_repoint_key_name | default('') | length) > 0)
       )
+    - (_profiles_using_oldest_server | default([]) | length) == 0
 
 - name: Deletar certificado antigo após ajuste dos profiles
   f5networks.f5_modules.bigip_ssl_certificate:
@@ -441,6 +496,7 @@
       (_donor_available | default(false) | bool)
       or ((_repoint_key_name | default('') | length) > 0)
       )
+    - (_profiles_using_oldest_server | default([]) | length) == 0
 
 - name: Deletar key antiga após ajuste dos profiles
   f5networks.f5_modules.bigip_ssl_key:
@@ -459,6 +515,7 @@
       (_donor_available | default(false) | bool)
       or ((_repoint_key_name | default('') | length) > 0)
       )
+    - (_profiles_using_oldest_server | default([]) | length) == 0
 
 - name: Registrar resultado DELETADO após ajuste dos profiles
   ansible.builtin.set_fact:
@@ -480,3 +537,4 @@
       (_donor_available | default(false) | bool)
       or ((_repoint_key_name | default('') | length) > 0)
       )
+    - (_profiles_using_oldest_server | default([]) | length) == 0
