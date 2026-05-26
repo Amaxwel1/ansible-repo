@@ -1,7 +1,0 @@
-- name: Normalizar escolha de FEED-C DR
-  ansible.builtin.set_fact:
-    enable_feed_c_dr: >-
-      {{
-        (feed_c_dr_choice | default('Não') | string | trim | lower)
-        in ['sim', 's', 'yes', 'y', 'true', '1']
-      }}
