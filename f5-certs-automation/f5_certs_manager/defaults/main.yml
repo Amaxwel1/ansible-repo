@@ -3,6 +3,7 @@
 # list: apenas exibição/listagem de todos os certificados
 # check: inventário + report + cleanup opcional de duplicados
 # apply: rotação automática a partir do prefixo no CIFS + validação + report
+# compare: auditoria read-only de divergências entre sites
 f5_certs_mode: "check"
 
 # ====== Escopo / Sites ======
@@ -18,6 +19,18 @@ f5_sites:
     server: "192.168.150.10"
     port: 443
 
+# ====== Comparação entre sites ======
+# Site base da comparação. Se vazio, usa o primeiro site informado em f5_target_scope.
+f5_compare_baseline_site: ""
+# true = compara somente certificados em uso por Client SSL/Server SSL profiles mapeados.
+# false = compara todo o inventário instalado no F5.
+f5_compare_only_in_use: true
+# Tolerância em dias para diferença de vencimento. 0 = qualquer diferença conta como drift.
+f5_compare_expiration_tolerance_days: 0
+# Se true, falha a job quando encontrar divergência.
+# Se false, apenas reporta no HTML/e-mail.
+f5_compare_fail_on_drift: false
+
 # ====== F5 conexão ======
 f5_user: "admin"
 f5_password: "ans2025"
@@ -25,14 +38,25 @@ f5_validate_certs: false
 
 # ====== Escopo do inventário ======
 f5_partitions: []
-f5_include_server_ssl_profiles: false
+
+# ====== Escopo de SSL Profiles ======
+
+# Define quais profiles a automação deve considerar para ação/report principal.
+# client: comportamento atual, focado em Client SSL Profile
+# server: considera Server SSL Profile
+# all: considera Client SSL + Server SSL
+f5_ssl_profile_scope: "client"
+# Mesmo quando o escopo for client, coletar Server SSL para segurança.
+# Isso evita cleanup incorreto de certificados que parecem "sem uso",
+# mas na verdade estão em uso por Server SSL Profile.
+f5_collect_server_ssl_for_safety: true
 
 # ====== Regras de vencimento ======
 f5_warning_days: 30
 f5_critical_days: 7
 
 # ====== Cleanup de duplicados ======
-f5_enable_duplicate_cleanup: true
+f5_enable_duplicate_cleanup: false
 f5_duplicate_cleanup_only_if_not_in_use: true
 f5_cleanup_delete_key: true
 # Duplicados: se expirou há >= grace_days, vira candidato a cleanup
@@ -161,3 +185,13 @@ f5_import_name_suffix_override: ""
 
 # Limite de tentativas para encontrar nome livre.
 f5_import_name_collision_max_attempts: 20
+
+# ====== Apply Server SSL ======
+# Validação pós-rotação para Server SSL.
+# config_only: relê o Server SSL Profile e valida se cert/key/chain foram aplicados
+# disabled: não valida após aplicar
+f5_server_ssl_validation_mode: "config_only"
+
+# Por segurança, não permite apply com client+server ao mesmo tempo,
+# a menos que seja explicitamente habilitado.
+f5_apply_allow_all_profile_types: false
