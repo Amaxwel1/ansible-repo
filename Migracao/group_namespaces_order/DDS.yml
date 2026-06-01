@@ -1,5 +1,0 @@
-- namespace: ag-bkg-teste-ansible-valemobi-dds-1
-  dc:
-    - webserver-ag-bkg-teste-ansible-valemobi-dds-1
-    - application-ag-bkg-teste-ansible-valemobi-dds-1
-    - database-ag-bkg-teste-ansible-valemobi-dds-1
