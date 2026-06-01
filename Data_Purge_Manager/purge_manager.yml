@@ -1,0 +1,33 @@
+---
+- name: Data Purge Manager | Planejamento e inventário dinâmico
+  hosts: localhost
+  gather_facts: false
+  vars:
+    data_purge_phase: controller
+  roles:
+    - role: data_purge_manager
+
+- name: Data Purge Manager | Expurgo Linux
+  hosts: linux_targets
+  gather_facts: false
+  become: "{{ purge_linux_become | default(true) }}"
+  vars:
+    data_purge_phase: linux_purge
+  roles:
+    - role: data_purge_manager
+
+- name: Data Purge Manager | Expurgo Windows
+  hosts: windows_targets
+  gather_facts: false
+  vars:
+    data_purge_phase: windows_purge
+  roles:
+    - role: data_purge_manager
+
+- name: Data Purge Manager | Relatório consolidado
+  hosts: localhost
+  gather_facts: true
+  vars:
+    data_purge_phase: report
+  roles:
+    - role: data_purge_manager

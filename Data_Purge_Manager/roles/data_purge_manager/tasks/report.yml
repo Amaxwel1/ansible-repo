@@ -1,0 +1,118 @@
+---
+- name: Report | Consolidar relatórios dos hosts executados
+  ansible.builtin.set_fact:
+    _purge_reports_json: >-
+      {%- set out=[] -%}
+      {%- for h in (groups['purge_targets'] | default([])) -%}
+        {%- set rep = hostvars[h].purge_host_report | default(None) -%}
+        {%- if rep is not none -%}
+          {%- set _ = out.append(rep) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+    purge_unknown_hosts: "{{ hostvars['localhost'].purge_unreachable_or_unknown_hosts | default([]) }}"
+    purge_hosts_without_rules: "{{ hostvars['localhost'].purge_hosts_without_rules | default([]) }}"
+    purge_target_hosts: "{{ hostvars['localhost'].target_hosts | default([]) }}"
+    purge_apply_enabled: "{{ hostvars['localhost'].purge_apply_enabled | default(false) }}"
+
+- name: Report | Publicar relatórios consolidados
+  ansible.builtin.set_fact:
+    purge_reports: "{{ _purge_reports_json | from_json }}"
+
+- name: Report | Calcular métricas consolidadas
+  ansible.builtin.set_fact:
+    _purge_report_metrics_json: >-
+      {%- set ns = namespace(
+            total_hosts=(purge_reports | length),
+            total_rules=0,
+            total_matched=0,
+            total_deleted=0,
+            total_failed_files=0,
+            total_removed_empty_dirs=0,
+            total_failed_empty_dirs=0,
+            total_blocked_paths=0,
+            total_missing_paths=0,
+            total_failed_rules=0,
+            total_warning_rules=0,
+            total_blocked_rules=0
+          ) -%}
+      {%- for rep in purge_reports -%}
+        {%- for row in rep.rows | default([]) -%}
+          {%- set ns.total_rules = ns.total_rules + 1 -%}
+          {%- set ns.total_matched = ns.total_matched + (row.matched_files | default(0) | int) -%}
+          {%- set ns.total_deleted = ns.total_deleted + (row.deleted_files | default(0) | int) -%}
+          {%- set ns.total_failed_files = ns.total_failed_files + (row.failed_files | default(0) | int) -%}
+          {%- set ns.total_removed_empty_dirs = ns.total_removed_empty_dirs + (row.removed_empty_dirs | default(0) | int) -%}
+          {%- set ns.total_failed_empty_dirs = ns.total_failed_empty_dirs + (row.failed_empty_dirs | default(0) | int) -%}
+          {%- set ns.total_blocked_paths = ns.total_blocked_paths + (row.blocked_paths | default([]) | length) -%}
+          {%- set ns.total_missing_paths = ns.total_missing_paths + (row.missing_paths | default([]) | length) -%}
+          {%- if row.status | default('') == 'failed' -%}{%- set ns.total_failed_rules = ns.total_failed_rules + 1 -%}{%- endif -%}
+          {%- if row.status | default('') == 'warning' -%}{%- set ns.total_warning_rules = ns.total_warning_rules + 1 -%}{%- endif -%}
+          {%- if row.status | default('') == 'blocked' -%}{%- set ns.total_blocked_rules = ns.total_blocked_rules + 1 -%}{%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ {
+        'total_hosts': ns.total_hosts,
+        'total_rules': ns.total_rules,
+        'total_matched': ns.total_matched,
+        'total_deleted': ns.total_deleted,
+        'total_failed_files': ns.total_failed_files,
+        'total_removed_empty_dirs': ns.total_removed_empty_dirs,
+        'total_failed_empty_dirs': ns.total_failed_empty_dirs,
+        'total_blocked_paths': ns.total_blocked_paths,
+        'total_missing_paths': ns.total_missing_paths,
+        'total_failed_rules': ns.total_failed_rules,
+        'total_warning_rules': ns.total_warning_rules,
+        'total_blocked_rules': ns.total_blocked_rules
+      } | to_json }}
+
+- name: Report | Publicar métricas como facts
+  ansible.builtin.set_fact:
+    purge_total_hosts: "{{ (_purge_report_metrics_json | from_json).total_hosts }}"
+    purge_total_rules: "{{ (_purge_report_metrics_json | from_json).total_rules }}"
+    purge_total_matched: "{{ (_purge_report_metrics_json | from_json).total_matched }}"
+    purge_total_deleted: "{{ (_purge_report_metrics_json | from_json).total_deleted }}"
+    purge_total_failed_files: "{{ (_purge_report_metrics_json | from_json).total_failed_files }}"
+    purge_total_removed_empty_dirs: "{{ (_purge_report_metrics_json | from_json).total_removed_empty_dirs }}"
+    purge_total_failed_empty_dirs: "{{ (_purge_report_metrics_json | from_json).total_failed_empty_dirs }}"
+    purge_total_blocked_paths: "{{ (_purge_report_metrics_json | from_json).total_blocked_paths }}"
+    purge_total_missing_paths: "{{ (_purge_report_metrics_json | from_json).total_missing_paths }}"
+    purge_total_failed_rules: "{{ (_purge_report_metrics_json | from_json).total_failed_rules }}"
+    purge_total_warning_rules: "{{ (_purge_report_metrics_json | from_json).total_warning_rules }}"
+    purge_total_blocked_rules: "{{ (_purge_report_metrics_json | from_json).total_blocked_rules }}"
+
+- name: Report | Definir severidade do relatório
+  ansible.builtin.set_fact:
+    purge_report_level: >-
+      {%- if (purge_total_failed_files | int) > 0 or (purge_total_failed_empty_dirs | int) > 0 or (purge_total_failed_rules | int) > 0 -%}crit
+      {%- elif (purge_unknown_hosts | length) > 0 or (purge_hosts_without_rules | length) > 0 or (purge_total_blocked_paths | int) > 0 or (purge_total_missing_paths | int) > 0 or (purge_total_warning_rules | int) > 0 or (purge_total_blocked_rules | int) > 0 -%}warn
+      {%- else -%}ok{%- endif -%}
+    purge_report_date_br: "{{ '%d/%m/%Y %H:%M:%S' | strftime(ansible_date_time.epoch | int) }}"
+    purge_effective_mode_label: "{{ 'APPLY / REMOÇÃO REAL' if (purge_apply_enabled | bool) else 'CHECK / SIMULAÇÃO' }}"
+
+- name: Report | Definir labels do relatório
+  ansible.builtin.set_fact:
+    purge_report_mode_label: "{{ 'Apply' if (purge_apply_enabled | default(false) | bool) else 'Check' }}"
+    purge_report_level_label: >-
+      {%- set level = purge_report_level | default('ok') | trim -%}
+      {%- if level == 'crit' -%}
+      Crítico
+      {%- elif level == 'warn' -%}
+      Alerta
+      {%- else -%}
+      OK
+      {%- endif -%}
+
+- name: Report | Montar assunto e HTML
+  ansible.builtin.set_fact:
+    send_mail_subject: >-
+      {{ purge_report_subject_prefix }} ({{ purge_report_level_label | trim }}) -
+      {{ purge_report_title }} - {{ purge_report_mode_label }} -
+      Job #{{ tower_job_id | default(awx_job_id | default('local')) }}
+    send_mail_body: "{{ lookup('ansible.builtin.template', 'report_success.html.j2') }}"
+
+- name: Report | Publicar set_stats para envio externo de email
+  ansible.builtin.set_stats:
+    data:
+      send_mail_subject: "{{ send_mail_subject }}"
+      send_mail_body: "{{ send_mail_body }}"
