@@ -24,7 +24,8 @@ purge_allow_survey_hosts_outside_matrix: false
 purge_global_rules_apply_to_adhoc_hosts: true
 
 # Estratégia padrão de execução.
-# modules: usa ansible.builtin.find/file e ansible.windows.win_find/win_file.
+# modules: usa módulos Ansible. Mais rastreável, porém pode ser mais lento em alto volume.
+# shell: usa shell no Linux e PowerShell no Windows. Mais performático para grandes volumes.
 purge_engine_default: "modules"
 
 # Detecção de SO por porta.
