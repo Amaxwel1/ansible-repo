@@ -39,7 +39,15 @@
     label: "{{ purge_rule.name | default('regra_sem_nome') }}"
   when: (purge_rule.engine | default(purge_engine_default)) == 'modules'
 
-- name: Windows | Registrar regras com engine não suportada nesta versão
+- name: Windows | Executar regras por PowerShell
+  ansible.builtin.include_tasks: 62_windows_rule_shell.yml
+  loop: "{{ _windows_rules_enabled }}"
+  loop_control:
+    loop_var: purge_rule
+    label: "{{ purge_rule.name | default('regra_sem_nome') }}"
+  when: (purge_rule.engine | default(purge_engine_default)) == 'shell'
+
+- name: Windows | Registrar regras com engine não suportada
   ansible.builtin.set_fact:
     purge_host_report: >-
       {{
@@ -47,13 +55,14 @@
         | combine({'rows': (purge_host_report.rows | default([])) + [
           {
             'rule': item.name | default('regra_sem_nome'),
+            'description': item.description | default(''),
             'application': item.application | default('—'),
             'environment': item.environment | default('—'),
             'os': 'windows',
             'engine': item.engine | default(purge_engine_default),
             'source': item.source | default('—'),
             'status': 'blocked',
-            'status_detail': 'Engine não suportada nesta versão. Use engine=modules.',
+            'status_detail': 'Engine não suportada. Use engine=modules ou engine=shell.',
             'matched_files': 0,
             'deleted_files': 0,
             'failed_files': 0,
@@ -64,4 +73,4 @@
         ]}, recursive=True)
       }}
   loop: "{{ _windows_rules_enabled }}"
-  when: (item.engine | default(purge_engine_default)) != 'modules'
+  when: (item.engine | default(purge_engine_default)) not in ['modules', 'shell']
