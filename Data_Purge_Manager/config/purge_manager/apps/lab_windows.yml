@@ -2,93 +2,250 @@
 cm:
   purge_manager:
     applications:
-      lab_windows:
-        description: "Aplicação de teste Windows para Data Purge Manager"
+      inoa:
+        description: Expurgo de logs INOA - HML
+
         allowed_prefixes:
-          windows:
-            - "C:\\PURGE_LAB"
           linux: []
+          windows:
+            - D:\inoa
+            - E:\inoa
+            - F:\inoa
 
         windows:
           rules:
-            - name: "lab_windows_logs_30d"
-              description: "Teste Windows não recursivo com logs antigos"
+            - name: inoa_ag_ah_vv_ap_013_logs_30d
+              description: Expurgo de logs INOA HML no host AG-AH-VV-AP-013
+              hosts:
+                - AG-AH-VV-AP-013
               paths:
-                - "C:\\PURGE_LAB\\app_windows_a\\logs"
+                - E:\INOA\_log\agent
+                - E:\INOA\_log\commissions
+                - E:\INOA\_log\confirmation-reports
+                - E:\INOA\_log\extranet-gateway
+                - E:\INOA\_log\fund-distributor
+                - E:\INOA\_log\otc-brasil
+                - E:\INOA\_log\registrar
+                - E:\INOA\_log\scheduler
               patterns:
-                - "*.log"
-                - "*.txt"
+                - "*"
               exclude_patterns:
-                - "keep-*"
+                - keep-*
+                - .keep
               age_days: 30
               recursive: false
               delete_empty_dirs: false
               enabled: true
-              engine: "modules"
+              engine: shell
 
-            - name: "lab_windows_tmp_30d_non_recursive"
-              description: "Teste Windows não recursivo em tmp"
+            - name: inoa_ag_ah_vv_ap_002_logs_30d
+              description: Expurgo de logs INOA HML no host AG-AH-VV-AP-002
+              hosts:
+                - AG-AH-VV-AP-002
               paths:
-                - "C:\\PURGE_LAB\\app_windows_a\\tmp"
+                - D:\inoa\_log\audit
+                - D:\inoa\_log\auth2
+                - D:\inoa\_log\position-keeper
+                - D:\inoa\_log\web-interface
+                - D:\inoa\_log\akinori
+                - D:\inoa\_log\agent
+                - D:\inoa\_log\instrument-manager
+                - D:\inoa\Modules\PositionKeeper\log\SMP.fix
               patterns:
-                - "*.tmp"
-              age_days: 30
-              recursive: false
-              delete_empty_dirs: false
-              enabled: true
-              engine: "modules"
-
-            - name: "lab_windows_recursive_30d"
-              description: "Teste Windows recursivo com remoção de diretórios vazios"
-              paths:
-                - "C:\\PURGE_LAB\\app_windows_b\\logs"
-              patterns:
-                - "*.log"
-                - "*.txt"
+                - "*"
               exclude_patterns:
-                - "keep-*"
-              age_days: 30
-              recursive: true
-              delete_empty_dirs: true
-              enabled: true
-              engine: "modules"
-
-            - name: "lab_windows_exports_30d"
-              description: "Teste Windows exports CSV/ZIP antigos"
-              paths:
-                - "C:\\PURGE_LAB\\app_windows_b\\exports"
-              patterns:
-                - "*.csv"
-                - "*.zip"
+                - keep-*
+                - .keep
               age_days: 30
               recursive: false
               delete_empty_dirs: false
               enabled: true
-              engine: "modules"
+              engine: shell
 
-            - name: "lab_windows_missing_path"
-              description: "Teste Windows com path inexistente para validar warning"
+            - name: inoa_ag_ah_vv_ap_005_logs_30d
+              description: Expurgo de logs INOA HML no host AG-AH-VV-AP-005 - Fix HUB
+              hosts:
+                - AG-AH-VV-AP-005
               paths:
-                - "C:\\PURGE_LAB\\path_que_nao_existe"
+                - F:\Inoa\_log\bt-agent
+                - F:\Inoa\_log\fix-hub-alocacao
+                - F:\Inoa\_log\fix-hub-aluguel
+                - F:\Inoa\_log\fix-hub-captura
+                - F:\Inoa\_log\fix-hub-FixHub_Depositaria
+                - F:\Inoa\_log\fix-hub-FixHub_Inoa_Hub
+                - F:\Inoa\_log\fix-hub-imercadooutros
+                - F:\Inoa\_log\fix-hub-outros
+                - F:\Inoa\_log\fix-hub-outros_sec
+                - F:\Inoa\FixHub_Alocacao\log\FH-Acceptor.fix
+                - F:\Inoa\FixHub_Alocacao\log\FH-Initiator.fix
+                - F:\Inoa\FixHub_Aluguel\log\FH-Acceptor.fix
+                - F:\Inoa\FixHub_Aluguel\log\FH-Initiator.fix
+                - F:\Inoa\FixHub_Captura\log\FH-Acceptor.fix
+                - F:\Inoa\FixHub_Captura\log\FH-Initiator.fix
+                - F:\Inoa\FixHub_DC901\log\FH-Acceptor.fix
+                - F:\Inoa\FixHub_DC901\log\FH-Initiator.fix
+                - F:\Inoa\FixHub_DC902\log\FH-Acceptor.fix
+                - F:\Inoa\FixHub_DC902\log\FH-Initiator.fix
+                - F:\Inoa\FixHub_DC1301\log\FH-Acceptor.fix
+                - F:\Inoa\FixHub_DC1301\log\FH-Initiator.fix
+                - F:\Inoa\FixHub_DC1302\log\FH-Acceptor.fix
+                - F:\Inoa\FixHub_DC1302\log\FH-Initiator.fix
+                - F:\Inoa\FixHub_Depositaria\log\FH-Acceptor.fix
+                - F:\Inoa\FixHub_Depositaria\log\FH-Initiator.fix
+                - F:\Inoa\FixHub_IMercado_Outros\log\FH-Acceptor.fix
+                - F:\Inoa\FixHub_IMercado_Outros\log\FH-Initiator.fix
+                - F:\Inoa\FixHub_Outros\log\FH-Acceptor.fix
+                - F:\Inoa\FixHub_Outros\log\FH-Initiator.fix
+                - F:\Inoa\FixHub_Outros_Sec\log\FH-Acceptor.fix
+                - F:\Inoa\FixHub_Outros_Sec\log\FH-Initiator.fix
+                - F:\Inoa\_log\agent
               patterns:
-                - "*.log"
+                - "*"
+              exclude_patterns:
+                - keep-*
+                - .keep
               age_days: 30
               recursive: false
               delete_empty_dirs: false
               enabled: true
-              engine: "modules"
+              engine: shell
 
-            - name: "lab_windows_blocked_by_allowed_prefix"
-              description: "Teste Windows bloqueado por allowed_prefixes"
+            - name: inoa_ag_ah_vv_ap_007_logs_30d
+              description: Expurgo de logs INOA HML no host AG-AH-VV-AP-007
+              hosts:
+                - AG-AH-VV-AP-007
               paths:
-                - "C:\\PURGE_LAB_BLOCKED"
+                - E:\Inoa\_log\custodian-adapter
+                - E:\Inoa\_log\bt-agent
+                - E:\Inoa\_log\external-data-proxy
+                - E:\Inoa\_log\file-repository
+                - E:\Inoa\_log\position-courier
+                - E:\Inoa\_log\strategy-builder
+                - E:\Inoa\_log\external-relay
+                - E:\Inoa\_log\help-desk
+                - E:\Inoa\_log\notification
+                - E:\Inoa\Modules\PositionCourier\log\iMercado.fix
               patterns:
-                - "*.log"
+                - "*"
+              exclude_patterns:
+                - keep-*
+                - .keep
               age_days: 30
               recursive: false
               delete_empty_dirs: false
               enabled: true
-              engine: "modules"
+              engine: shell
+
+            - name: inoa_co_ah_vv_ap_39a_logs_30d
+              description: Expurgo de logs INOA HML no host CO-AH-VV-AP-39A
+              hosts:
+                - CO-AH-VV-AP-39A
+              paths:
+                - D:\inoa\log\average-price-solver
+                - D:\inoa\log\post-trade-router
+                - D:\inoa\log\agent
+                - D:\inoa\log\indexer
+                - D:\inoa\Modules\PostTradeRouter\log\iMercado.fix
+                - D:\inoa\Modules\PostTradeRouter\log\PTR-DC.fix
+                - D:\inoa\Modules\PostTradeRouter\log\PTR-Server.fix
+                - D:\inoa\Modules\PostTradeRouter\log\PTR-SMP.fix
+              patterns:
+                - "*"
+              exclude_patterns:
+                - keep-*
+                - .keep
+              age_days: 30
+              recursive: false
+              delete_empty_dirs: false
+              enabled: true
+              engine: shell
+
+            - name: inoa_ag_ah_vv_ap_021_logs_30d
+              description: Expurgo de logs INOA HML no host AG-AH-VV-AP-021
+              hosts:
+                - AG-AH-VV-AP-021
+              paths:
+                - E:\INOA\_log\bond-broker
+                - E:\INOA\_log\bt-agent
+                - E:\INOA\_log\cashier
+                - E:\INOA\_log\concierge
+                - E:\INOA\_log\file-interface
+                - E:\INOA\_log\lending-hub
+                - E:\INOA\Modulos\Cashier\log\iMercado.fix
+                - E:\INOA\Modulos\Concierge\log\Acceptor.fix
+                - E:\INOA\Modulos\Concierge\log\iMercado.fix
+                - E:\INOA\Modulos\Concierge\log\Initiator.fix
+                - E:\INOA\Modulos\LendingHub\log\HUB-Initiator.fix
+                - E:\INOA\Modulos\LendingHub\log\iMercado.fix
+                - E:\INOA\Modulos\LendingHub\log\SMP.fix
+              patterns:
+                - "*"
+              exclude_patterns:
+                - keep-*
+                - .keep
+              age_days: 30
+              recursive: false
+              delete_empty_dirs: false
+              enabled: true
+              engine: shell
+
+            - name: inoa_ag_ah_vv_ap_022_logs_30d
+              description: Expurgo de logs INOA HML no host AG-AH-VV-AP-022
+              hosts:
+                - AG-AH-VV-AP-022
+              paths:
+                - E:\Inoa\_log\accounting-hub
+                - E:\Inoa\_log\agent
+                - E:\Inoa\_log\bt-agent
+                - E:\Inoa\_log\position-repository
+              patterns:
+                - "*"
+              exclude_patterns:
+                - keep-*
+                - .keep
+              age_days: 30
+              recursive: false
+              delete_empty_dirs: false
+              enabled: true
+              engine: shell
+
+            - name: inoa_ag_ah_vv_ap_023_logs_30d
+              description: Expurgo de logs INOA HML no host AG-AH-VV-AP-023
+              hosts:
+                - AG-AH-VV-AP-023
+              paths:
+                - E:\Inoa\_log\onboarder
+                - E:\Inoa\_log\agent
+                - E:\Inoa\_log\bt-agent
+              patterns:
+                - "*"
+              exclude_patterns:
+                - keep-*
+                - .keep
+              age_days: 30
+              recursive: false
+              delete_empty_dirs: false
+              enabled: true
+              engine: shell
+
+            - name: inoa_ag_ah_vv_ap_024_logs_30d
+              description: Expurgo de logs INOA HML no host AG-AH-VV-AP-024
+              hosts:
+                - AG-AH-VV-AP-024
+              paths:
+                - E:\Inoa\_log\regulatory-reports
+                - E:\Inoa\_log\agent
+                - E:\Inoa\_log\bt-agent
+              patterns:
+                - "*"
+              exclude_patterns:
+                - keep-*
+                - .keep
+              age_days: 30
+              recursive: false
+              delete_empty_dirs: false
+              enabled: true
+              engine: shell
 
         linux:
           rules: []
