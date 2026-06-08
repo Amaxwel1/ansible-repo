@@ -68,24 +68,36 @@
       {%- set envs = purge_manager_cfg.envs | default({}) -%}
       {%- set apps_cfg = purge_manager_cfg.applications | default({}) -%}
       {%- set global_rules = purge_manager_cfg.global_rules | default({}) -%}
+
       {%- for host in target_hosts -%}
+        {%- set host_l = host | string | lower | trim -%}
         {%- set hplan = {'applications': [], 'envs': [], 'windows': {'rules': []}, 'linux': {'rules': []}} -%}
 
-        {# Regras globais #}
+        {# Regras globais com suporte opcional a hosts/exclude_hosts #}
         {%- if purge_global_rules_enabled | bool -%}
           {%- for os_name in ['windows', 'linux'] -%}
             {%- set def_allowed = purge_default_allowed_prefixes_windows if os_name == 'windows' else purge_default_allowed_prefixes_linux -%}
             {%- for rule in (global_rules.get(os_name, {}).get('rules', [])) -%}
-              {%- set allowed = rule.get('allowed_prefixes', def_allowed) -%}
-              {%- set rr = rule | combine({
-                    'application': '_global',
-                    'environment': 'global',
-                    'os': os_name,
-                    'source': 'global',
-                    'engine': rule.get('engine', purge_engine_default),
-                    'allowed_prefixes': allowed
-                  }, recursive=True) -%}
-              {%- set _ = hplan[os_name]['rules'].append(rr) -%}
+              {%- set raw_rule_hosts = rule.get('hosts', rule.get('include_hosts', rule.get('target_hosts', []))) -%}
+              {%- set raw_exclude_hosts = rule.get('exclude_hosts', []) -%}
+              {%- set rule_hosts = raw_rule_hosts if (raw_rule_hosts is sequence and raw_rule_hosts is not string) else (raw_rule_hosts | default('') | string | regex_replace('\s+', '') | split(',')) -%}
+              {%- set exclude_hosts = raw_exclude_hosts if (raw_exclude_hosts is sequence and raw_exclude_hosts is not string) else (raw_exclude_hosts | default('') | string | regex_replace('\s+', '') | split(',')) -%}
+              {%- set rule_hosts_l = rule_hosts | map('string') | map('lower') | map('trim') | reject('equalto', '') | list -%}
+              {%- set exclude_hosts_l = exclude_hosts | map('string') | map('lower') | map('trim') | reject('equalto', '') | list -%}
+              {%- set rule_applies_to_host = ((rule_hosts_l | length == 0) or (host_l in rule_hosts_l)) and (host_l not in exclude_hosts_l) -%}
+
+              {%- if rule_applies_to_host -%}
+                {%- set allowed = rule.get('allowed_prefixes', def_allowed) -%}
+                {%- set rr = rule | combine({
+                      'application': '_global',
+                      'environment': 'global',
+                      'os': os_name,
+                      'source': 'global',
+                      'engine': rule.get('engine', purge_engine_default),
+                      'allowed_prefixes': allowed
+                    }, recursive=True) -%}
+                {%- set _ = hplan[os_name]['rules'].append(rr) -%}
+              {%- endif -%}
             {%- endfor -%}
           {%- endfor -%}
         {%- endif -%}
@@ -99,7 +111,9 @@
               {%- if app_l in selected_purge_applications_effective -%}
                 {%- set raw = app_env.get('members', app_env.get('hosts', app_env.get('maquinas', []))) -%}
                 {%- set members = raw if (raw is sequence and raw is not string) else (raw | default('') | string | regex_replace('\s+', '') | split(',')) -%}
-                {%- if host in members -%}
+                {%- set members_l = members | map('string') | map('lower') | map('trim') | reject('equalto', '') | list -%}
+
+                {%- if host_l in members_l -%}
                   {%- if app_l not in hplan.applications -%}{%- set _ = hplan.applications.append(app_l) -%}{%- endif -%}
                   {%- if env_l not in hplan.envs -%}{%- set _ = hplan.envs.append(env_l) -%}{%- endif -%}
                   {%- set app_cfg = apps_cfg.get(app_l, {}) -%}
@@ -114,27 +128,47 @@
                     {%- set env_rules = app_env.get(os_name, {}).get('rules', []) -%}
 
                     {%- for rule in base_rules -%}
-                      {%- set rr = rule | combine({
-                            'application': app_l,
-                            'environment': env_l,
-                            'os': os_name,
-                            'source': 'application',
-                            'engine': rule.get('engine', purge_engine_default),
-                            'allowed_prefixes': allowed
-                          }, recursive=True) -%}
-                      {%- set _ = hplan[os_name]['rules'].append(rr) -%}
+                      {%- set raw_rule_hosts = rule.get('hosts', rule.get('include_hosts', rule.get('target_hosts', []))) -%}
+                      {%- set raw_exclude_hosts = rule.get('exclude_hosts', []) -%}
+                      {%- set rule_hosts = raw_rule_hosts if (raw_rule_hosts is sequence and raw_rule_hosts is not string) else (raw_rule_hosts | default('') | string | regex_replace('\s+', '') | split(',')) -%}
+                      {%- set exclude_hosts = raw_exclude_hosts if (raw_exclude_hosts is sequence and raw_exclude_hosts is not string) else (raw_exclude_hosts | default('') | string | regex_replace('\s+', '') | split(',')) -%}
+                      {%- set rule_hosts_l = rule_hosts | map('string') | map('lower') | map('trim') | reject('equalto', '') | list -%}
+                      {%- set exclude_hosts_l = exclude_hosts | map('string') | map('lower') | map('trim') | reject('equalto', '') | list -%}
+                      {%- set rule_applies_to_host = ((rule_hosts_l | length == 0) or (host_l in rule_hosts_l)) and (host_l not in exclude_hosts_l) -%}
+
+                      {%- if rule_applies_to_host -%}
+                        {%- set rr = rule | combine({
+                              'application': app_l,
+                              'environment': env_l,
+                              'os': os_name,
+                              'source': 'application',
+                              'engine': rule.get('engine', purge_engine_default),
+                              'allowed_prefixes': allowed
+                            }, recursive=True) -%}
+                        {%- set _ = hplan[os_name]['rules'].append(rr) -%}
+                      {%- endif -%}
                     {%- endfor -%}
 
                     {%- for rule in env_rules -%}
-                      {%- set rr = rule | combine({
-                            'application': app_l,
-                            'environment': env_l,
-                            'os': os_name,
-                            'source': 'environment_overlay',
-                            'engine': rule.get('engine', purge_engine_default),
-                            'allowed_prefixes': allowed
-                          }, recursive=True) -%}
-                      {%- set _ = hplan[os_name]['rules'].append(rr) -%}
+                      {%- set raw_rule_hosts = rule.get('hosts', rule.get('include_hosts', rule.get('target_hosts', []))) -%}
+                      {%- set raw_exclude_hosts = rule.get('exclude_hosts', []) -%}
+                      {%- set rule_hosts = raw_rule_hosts if (raw_rule_hosts is sequence and raw_rule_hosts is not string) else (raw_rule_hosts | default('') | string | regex_replace('\s+', '') | split(',')) -%}
+                      {%- set exclude_hosts = raw_exclude_hosts if (raw_exclude_hosts is sequence and raw_exclude_hosts is not string) else (raw_exclude_hosts | default('') | string | regex_replace('\s+', '') | split(',')) -%}
+                      {%- set rule_hosts_l = rule_hosts | map('string') | map('lower') | map('trim') | reject('equalto', '') | list -%}
+                      {%- set exclude_hosts_l = exclude_hosts | map('string') | map('lower') | map('trim') | reject('equalto', '') | list -%}
+                      {%- set rule_applies_to_host = ((rule_hosts_l | length == 0) or (host_l in rule_hosts_l)) and (host_l not in exclude_hosts_l) -%}
+
+                      {%- if rule_applies_to_host -%}
+                        {%- set rr = rule | combine({
+                              'application': app_l,
+                              'environment': env_l,
+                              'os': os_name,
+                              'source': 'environment_overlay',
+                              'engine': rule.get('engine', purge_engine_default),
+                              'allowed_prefixes': allowed
+                            }, recursive=True) -%}
+                        {%- set _ = hplan[os_name]['rules'].append(rr) -%}
+                      {%- endif -%}
                     {%- endfor -%}
                   {%- endfor -%}
                 {%- endif -%}
@@ -153,15 +187,25 @@
               {%- set def_allowed = purge_default_allowed_prefixes_windows if os_name == 'windows' else purge_default_allowed_prefixes_linux -%}
               {%- set allowed = app_cfg.get('allowed_prefixes', {}).get(os_name, def_allowed) -%}
               {%- for rule in app_cfg.get(os_name, {}).get('rules', []) -%}
-                {%- set rr = rule | combine({
-                      'application': app_l,
-                      'environment': 'adhoc',
-                      'os': os_name,
-                      'source': 'application_adhoc',
-                      'engine': rule.get('engine', purge_engine_default),
-                      'allowed_prefixes': allowed
-                    }, recursive=True) -%}
-                {%- set _ = hplan[os_name]['rules'].append(rr) -%}
+                {%- set raw_rule_hosts = rule.get('hosts', rule.get('include_hosts', rule.get('target_hosts', []))) -%}
+                {%- set raw_exclude_hosts = rule.get('exclude_hosts', []) -%}
+                {%- set rule_hosts = raw_rule_hosts if (raw_rule_hosts is sequence and raw_rule_hosts is not string) else (raw_rule_hosts | default('') | string | regex_replace('\s+', '') | split(',')) -%}
+                {%- set exclude_hosts = raw_exclude_hosts if (raw_exclude_hosts is sequence and raw_exclude_hosts is not string) else (raw_exclude_hosts | default('') | string | regex_replace('\s+', '') | split(',')) -%}
+                {%- set rule_hosts_l = rule_hosts | map('string') | map('lower') | map('trim') | reject('equalto', '') | list -%}
+                {%- set exclude_hosts_l = exclude_hosts | map('string') | map('lower') | map('trim') | reject('equalto', '') | list -%}
+                {%- set rule_applies_to_host = ((rule_hosts_l | length == 0) or (host_l in rule_hosts_l)) and (host_l not in exclude_hosts_l) -%}
+
+                {%- if rule_applies_to_host -%}
+                  {%- set rr = rule | combine({
+                        'application': app_l,
+                        'environment': 'adhoc',
+                        'os': os_name,
+                        'source': 'application_adhoc',
+                        'engine': rule.get('engine', purge_engine_default),
+                        'allowed_prefixes': allowed
+                      }, recursive=True) -%}
+                  {%- set _ = hplan[os_name]['rules'].append(rr) -%}
+                {%- endif -%}
               {%- endfor -%}
             {%- endfor -%}
           {%- endfor -%}
