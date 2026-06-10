@@ -190,7 +190,9 @@
         _rule_apply_enabled: "{{ purge_apply_enabled | default(false) | bool }}"
         _linux_shell_candidate_file: ""
         _linux_shell_matched_files: 0
+        _linux_shell_matched_bytes: 0
         _linux_shell_deleted_files: 0
+        _linux_shell_deleted_bytes: 0
         _linux_shell_failed_files: 0
         _linux_shell_removed_empty_dirs: 0
         _linux_shell_failed_empty_dirs: 0
@@ -221,6 +223,7 @@
           : > "$candidate_file"
 
           matched=0
+          matched_bytes=0
           sample_count=0
 
           DPM_CUTOFF="$(date -d "${DPM_AGE_DAYS} days ago" '+%Y-%m-%d %H:%M:%S')"
@@ -263,6 +266,12 @@
                 DPM_SEEN["$file"]=1
                 matched=$((matched + 1))
 
+                file_size="$(stat -c '%s' -- "$file" 2>/dev/null || echo 0)"
+                case "$file_size" in
+                  ''|*[!0-9]*) file_size=0 ;;
+                esac
+                matched_bytes=$((matched_bytes + file_size))
+
                 printf '%s\n' "$file" >> "$candidate_file"
 
                 if [ "$sample_count" -lt "$DPM_SAMPLE_LIMIT" ]; then
@@ -275,6 +284,7 @@
 
           echo "DPM_CANDIDATE_FILE=$candidate_file"
           echo "DPM_MATCHED=$matched"
+          echo "DPM_MATCHED_BYTES=$matched_bytes"
 
           if [ -s "$errors_file" ]; then
             while IFS= read -r err; do
@@ -294,6 +304,7 @@
       ansible.builtin.set_fact:
         _linux_shell_candidate_file: "{{ (((_linux_shell_scan_result | default({})).stdout | default('') | regex_search('(?m)^DPM_CANDIDATE_FILE=(.+)$', '\\1')) | default([''], true) | first) }}"
         _linux_shell_matched_files: "{{ (((_linux_shell_scan_result | default({})).stdout | default('') | regex_search('(?m)^DPM_MATCHED=([0-9]+)$', '\\1')) | default(['0'], true) | first) | int }}"
+        _linux_shell_matched_bytes: "{{ (((_linux_shell_scan_result | default({})).stdout | default('') | regex_search('(?m)^DPM_MATCHED_BYTES=([0-9]+)$', '\\1')) | default(['0'], true) | first) | int }}"
         _linux_shell_samples: "{{ (_linux_shell_scan_result | default({})).stdout_lines | default([]) | select('match', '^DPM_SAMPLE=') | map('regex_replace', '^DPM_SAMPLE=', '') | list }}"
         _linux_shell_scan_errors: "{{ (_linux_shell_scan_result | default({})).stdout_lines | default([]) | select('match', '^DPM_ERROR=') | map('regex_replace', '^DPM_ERROR=', '') | list }}"
 
@@ -304,8 +315,13 @@
           set -o pipefail
 
           DPM_CANDIDATE_FILE="{{ _linux_shell_candidate_file }}"
+          DPM_AUDIT_FILE={{ _purge_audit_remote_file | default('') | quote }}
+          DPM_AUDIT_ENABLED="{{ 'true' if (purge_deleted_files_audit_enabled | default(true) | bool and _rule_apply_enabled | bool and (_purge_audit_remote_file is defined)) else 'false' }}"
+          DPM_AUDIT_HOST={{ inventory_hostname | quote }}
+          DPM_AUDIT_RULE={{ _rule_name | quote }}
 
           deleted=0
+          deleted_bytes=0
           failed=0
           errors_file="$(mktemp /tmp/dpm_delete_errors_XXXXXX.log)"
           trap 'rm -f "$errors_file"' EXIT
@@ -331,8 +347,19 @@
               continue
             fi
 
+            file_size="$(stat -c '%s' -- "$file" 2>/dev/null || echo 0)"
+            case "$file_size" in
+              ''|*[!0-9]*) file_size=0 ;;
+            esac
+
             if rm -f -- "$file" 2>>"$errors_file"; then
               deleted=$((deleted + 1))
+              deleted_bytes=$((deleted_bytes + file_size))
+
+              if [ "$DPM_AUDIT_ENABLED" = "true" ] && [ -n "$DPM_AUDIT_FILE" ]; then
+                DPM_NOW="$(TZ='America/Sao_Paulo' date '+%d/%m/%Y %H:%M:%S America/Sao_Paulo')"
+                printf '%s | host=%s | sistema=linux | regra=%s | bytes=%s | arquivo=%s\n' "$DPM_NOW" "$DPM_AUDIT_HOST" "$DPM_AUDIT_RULE" "$file_size" "$file" >> "$DPM_AUDIT_FILE" || true
+              fi
             else
               failed=$((failed + 1))
               printf 'DPM_ERROR=%s|falha ao remover arquivo\n' "$file"
@@ -340,6 +367,7 @@
           done < "$DPM_CANDIDATE_FILE"
 
           echo "DPM_DELETED=$deleted"
+          echo "DPM_DELETED_BYTES=$deleted_bytes"
           echo "DPM_FAILED=$failed"
 
           if [ -s "$errors_file" ]; then
@@ -361,6 +389,7 @@
     - name: Linux shell rule | Interpretar resultado da remoção
       ansible.builtin.set_fact:
         _linux_shell_deleted_files: "{{ (((_linux_shell_delete_result | default({})).stdout | default('') | regex_search('(?m)^DPM_DELETED=([0-9]+)$', '\\1')) | default(['0'], true) | first) | int }}"
+        _linux_shell_deleted_bytes: "{{ (((_linux_shell_delete_result | default({})).stdout | default('') | regex_search('(?m)^DPM_DELETED_BYTES=([0-9]+)$', '\\1')) | default(['0'], true) | first) | int }}"
         _linux_shell_failed_files: "{{ (((_linux_shell_delete_result | default({})).stdout | default('') | regex_search('(?m)^DPM_FAILED=([0-9]+)$', '\\1')) | default(['0'], true) | first) | int }}"
         _linux_shell_delete_errors: "{{ (_linux_shell_delete_result | default({})).stdout_lines | default([]) | select('match', '^DPM_ERROR=') | map('regex_replace', '^DPM_ERROR=', '') | list }}"
 
@@ -494,6 +523,8 @@
                 'matched_files': _linux_shell_matched_files | default(0) | int,
                 'deleted_files': _linux_shell_deleted_files | default(0) | int,
                 'failed_files': _linux_shell_failed_files | default(0) | int,
+                'matched_bytes': _linux_shell_matched_bytes | default(0) | int,
+                'deleted_bytes': _linux_shell_deleted_bytes | default(0) | int,
                 'removed_empty_dirs': _linux_shell_removed_empty_dirs | default(0) | int,
                 'failed_empty_dirs': _linux_shell_failed_empty_dirs | default(0) | int,
                 'fatal_errors': (_rule_fatal_errors | default([])) + (_linux_shell_errors | default([])),
@@ -533,6 +564,8 @@
                 'matched_files': 0,
                 'deleted_files': 0,
                 'failed_files': 1,
+                'matched_bytes': 0,
+                'deleted_bytes': 0,
                 'removed_empty_dirs': 0,
                 'failed_empty_dirs': 0,
                 'fatal_errors': [ansible_failed_result.msg | default('Falha técnica não classificada')],
