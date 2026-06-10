@@ -13,8 +13,48 @@
       applications: "{{ purge_plan.applications | default([]) }}"
       envs: "{{ purge_plan.envs | default([]) }}"
       mode: "{{ 'apply' if (purge_apply_enabled | bool) else 'check' }}"
+      disk_usage_before: []
+      disk_usage_after: []
       rows: []
       errors: []
+
+- name: Linux | Definir caminhos de auditoria de arquivos removidos
+  ansible.builtin.set_fact:
+    _purge_audit_controller_dir: "{{ purge_audit_controller_dir }}"
+    _purge_audit_file_name: "data_purge_deleted_{{ tower_job_id | default(awx_job_id | default('local')) }}_{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}.txt"
+    _purge_audit_remote_file: >-
+      {{ purge_linux_audit_tmpdir | default('/tmp') }}/data_purge_deleted_{{ tower_job_id | default(awx_job_id | default('local')) }}_{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}.txt
+  when:
+    - purge_deleted_files_audit_enabled | default(true) | bool
+    - purge_apply_enabled | bool
+
+- name: Linux | Garantir diretório local de auditoria no controller
+  ansible.builtin.file:
+    path: "{{ _purge_audit_controller_dir }}"
+    state: directory
+    mode: "0750"
+  become: false
+  delegate_to: localhost
+  when:
+    - purge_deleted_files_audit_enabled | default(true) | bool
+    - purge_apply_enabled | bool
+
+- name: Linux | Inicializar arquivo remoto de auditoria de removidos
+  ansible.builtin.copy:
+    dest: "{{ _purge_audit_remote_file }}"
+    mode: "0600"
+    content: |
+      Data Purge Manager - Auditoria de arquivos removidos
+      Job: {{ tower_job_id | default(awx_job_id | default('local')) }}
+      Host: {{ inventory_hostname }}
+      Sistema operacional: linux
+      Modo: {{ 'apply' if (purge_apply_enabled | bool) else 'check' }}
+      Gerado em: {{ lookup('ansible.builtin.pipe', "TZ='America/Sao_Paulo' date '+%d/%m/%Y %H:%M:%S America/Sao_Paulo'") }}
+
+      Arquivos removidos:
+  when:
+    - purge_deleted_files_audit_enabled | default(true) | bool
+    - purge_apply_enabled | bool
 
 - name: Linux | Normalizar regras habilitadas
   ansible.builtin.set_fact:
@@ -30,6 +70,85 @@
 - name: Linux | Publicar regras habilitadas
   ansible.builtin.set_fact:
     _linux_rules_enabled: "{{ _linux_rules_enabled_json | from_json }}"
+
+- name: Linux | Montar lista de paths para coleta de disco
+  ansible.builtin.set_fact:
+    _linux_disk_paths_json: >-
+      {%- set out = [] -%}
+      {%- for r in _linux_rules_enabled | default([]) -%}
+        {%- set raw = r.get('paths', []) -%}
+        {%- set paths = raw if (raw is sequence and raw is not string) else [raw] -%}
+        {%- for p in paths -%}
+          {%- set pp = p | string | trim -%}
+          {%- if pp | length > 0 and pp not in out -%}
+            {%- set _ = out.append(pp) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Linux | Publicar paths para coleta de disco
+  ansible.builtin.set_fact:
+    _linux_disk_paths: "{{ _linux_disk_paths_json | from_json }}"
+
+- name: Linux | Coletar uso de disco antes da execução
+  ansible.builtin.shell:
+    cmd: |
+      set -u
+      set -o pipefail
+
+      readarray -t DPM_DISK_PATHS < <(printf '%s\n' {{ _linux_disk_paths | default([]) | map('quote') | join(' ') }})
+      declare -A DPM_SEEN
+
+      for p in "${DPM_DISK_PATHS[@]}"; do
+        [ -n "$p" ] || continue
+        [ -e "$p" ] || continue
+
+        line="$(df -P "$p" 2>/dev/null | awk 'NR==2 {gsub("%", "", $5); print $1"|"$6"|"$2"|"$3"|"$4"|"$5}')"
+        [ -n "$line" ] || continue
+
+        mount_point="$(printf '%s' "$line" | awk -F'|' '{print $2}')"
+        [ -n "$mount_point" ] || continue
+
+        if [ "${DPM_SEEN[$mount_point]+_}" = "_" ]; then
+          continue
+        fi
+
+        DPM_SEEN["$mount_point"]=1
+        echo "DPM_DISK=$line"
+      done
+    executable: /bin/bash
+  register: _linux_disk_before_result
+  changed_when: false
+  failed_when: false
+  when:
+    - purge_disk_usage_enabled | default(true) | bool
+    - _linux_disk_paths | length > 0
+
+- name: Linux | Interpretar uso de disco antes da execução
+  ansible.builtin.set_fact:
+    _linux_disk_usage_before_json: >-
+      {%- set out = [] -%}
+      {%- for line in (_linux_disk_before_result.stdout_lines | default([])) -%}
+        {%- if line.startswith('DPM_DISK=') -%}
+          {%- set parts = (line | regex_replace('^DPM_DISK=', '')).split('|') -%}
+          {%- if parts | length >= 6 -%}
+            {%- set _ = out.append({
+              'filesystem': parts[0],
+              'mount': parts[1],
+              'size_bytes': (parts[2] | int) * 1024,
+              'used_bytes': (parts[3] | int) * 1024,
+              'free_bytes': (parts[4] | int) * 1024,
+              'used_pct': parts[5] | int
+            }) -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Linux | Publicar uso de disco antes da execução
+  ansible.builtin.set_fact:
+    _linux_disk_usage_before: "{{ _linux_disk_usage_before_json | from_json }}"
 
 - name: Linux | Executar regras por módulos Ansible
   ansible.builtin.include_tasks: 51_linux_rule_modules.yml
@@ -66,6 +185,8 @@
             'matched_files': 0,
             'deleted_files': 0,
             'failed_files': 0,
+            'matched_bytes': 0,
+            'deleted_bytes': 0,
             'blocked_paths': [],
             'missing_paths': [],
             'samples': []
@@ -74,3 +195,131 @@
       }}
   loop: "{{ _linux_rules_enabled }}"
   when: (item.engine | default(purge_engine_default)) not in ['modules', 'shell']
+
+- name: Linux | Coletar uso de disco depois da execução
+  ansible.builtin.shell:
+    cmd: |
+      set -u
+      set -o pipefail
+
+      readarray -t DPM_DISK_PATHS < <(printf '%s\n' {{ _linux_disk_paths | default([]) | map('quote') | join(' ') }})
+      declare -A DPM_SEEN
+
+      for p in "${DPM_DISK_PATHS[@]}"; do
+        [ -n "$p" ] || continue
+        [ -e "$p" ] || continue
+
+        line="$(df -P "$p" 2>/dev/null | awk 'NR==2 {gsub("%", "", $5); print $1"|"$6"|"$2"|"$3"|"$4"|"$5}')"
+        [ -n "$line" ] || continue
+
+        mount_point="$(printf '%s' "$line" | awk -F'|' '{print $2}')"
+        [ -n "$mount_point" ] || continue
+
+        if [ "${DPM_SEEN[$mount_point]+_}" = "_" ]; then
+          continue
+        fi
+
+        DPM_SEEN["$mount_point"]=1
+        echo "DPM_DISK=$line"
+      done
+    executable: /bin/bash
+  register: _linux_disk_after_result
+  changed_when: false
+  failed_when: false
+  when:
+    - purge_disk_usage_enabled | default(true) | bool
+    - purge_apply_enabled | bool
+    - _linux_disk_paths | length > 0
+
+- name: Linux | Interpretar uso de disco depois da execução
+  ansible.builtin.set_fact:
+    _linux_disk_usage_after_json: >-
+      {%- set out = [] -%}
+      {%- for line in (_linux_disk_after_result.stdout_lines | default([])) -%}
+        {%- if line.startswith('DPM_DISK=') -%}
+          {%- set parts = (line | regex_replace('^DPM_DISK=', '')).split('|') -%}
+          {%- if parts | length >= 6 -%}
+            {%- set _ = out.append({
+              'filesystem': parts[0],
+              'mount': parts[1],
+              'size_bytes': (parts[2] | int) * 1024,
+              'used_bytes': (parts[3] | int) * 1024,
+              'free_bytes': (parts[4] | int) * 1024,
+              'used_pct': parts[5] | int
+            }) -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Linux | Publicar uso de disco depois da execução
+  ansible.builtin.set_fact:
+    _linux_disk_usage_after: "{{ _linux_disk_usage_after_json | from_json }}"
+
+- name: Linux | Atualizar relatório do host com uso de disco
+  ansible.builtin.set_fact:
+    purge_host_report: >-
+      {{
+        purge_host_report
+        | combine({
+            'disk_usage_before': _linux_disk_usage_before | default([]),
+            'disk_usage_after': _linux_disk_usage_after | default([])
+          }, recursive=True)
+      }}
+
+- name: Linux | Calcular total de arquivos removidos no host
+  ansible.builtin.set_fact:
+    _purge_host_deleted_files_count: >-
+      {{
+        purge_host_report.rows | default([])
+        | map(attribute='deleted_files')
+        | map('default', 0)
+        | map('int')
+        | sum
+      }}
+  when:
+    - purge_deleted_files_audit_enabled | default(true) | bool
+    - purge_apply_enabled | bool
+
+- name: Linux | Verificar arquivo remoto de auditoria
+  ansible.builtin.stat:
+    path: "{{ _purge_audit_remote_file }}"
+  register: _purge_audit_remote_stat
+  changed_when: false
+  failed_when: false
+  when:
+    - purge_deleted_files_audit_enabled | default(true) | bool
+    - purge_apply_enabled | bool
+    - _purge_audit_remote_file is defined
+
+- name: Linux | Buscar arquivo de auditoria para o controller
+  ansible.builtin.fetch:
+    src: "{{ _purge_audit_remote_file }}"
+    dest: "{{ _purge_audit_controller_dir }}/{{ _purge_audit_file_name }}"
+    flat: true
+  register: _purge_audit_fetch_result
+  when:
+    - purge_deleted_files_audit_enabled | default(true) | bool
+    - purge_apply_enabled | bool
+    - (_purge_host_deleted_files_count | default(0) | int) > 0
+    - _purge_audit_remote_stat.stat.exists | default(false)
+
+- name: Linux | Registrar anexo local de auditoria
+  ansible.builtin.set_fact:
+    purge_deleted_files_attachments:
+      - "{{ _purge_audit_controller_dir }}/{{ _purge_audit_file_name }}"
+  when:
+    - purge_deleted_files_audit_enabled | default(true) | bool
+    - purge_apply_enabled | bool
+    - (_purge_host_deleted_files_count | default(0) | int) > 0
+    - _purge_audit_remote_stat.stat.exists | default(false)
+
+- name: Linux | Remover arquivo remoto temporário de auditoria
+  ansible.builtin.file:
+    path: "{{ _purge_audit_remote_file }}"
+    state: absent
+  failed_when: false
+  when:
+    - purge_deleted_files_audit_enabled | default(true) | bool
+    - purge_apply_enabled | bool
+    - _purge_audit_remote_file is defined
