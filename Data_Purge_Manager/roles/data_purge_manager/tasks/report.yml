@@ -27,6 +27,8 @@
             total_rules=0,
             total_matched=0,
             total_deleted=0,
+            total_matched_bytes=0,
+            total_deleted_bytes=0,
             total_failed_files=0,
             total_removed_empty_dirs=0,
             total_failed_empty_dirs=0,
@@ -41,6 +43,8 @@
           {%- set ns.total_rules = ns.total_rules + 1 -%}
           {%- set ns.total_matched = ns.total_matched + (row.matched_files | default(0) | int) -%}
           {%- set ns.total_deleted = ns.total_deleted + (row.deleted_files | default(0) | int) -%}
+          {%- set ns.total_matched_bytes = ns.total_matched_bytes + (row.matched_bytes | default(0) | int) -%}
+          {%- set ns.total_deleted_bytes = ns.total_deleted_bytes + (row.deleted_bytes | default(0) | int) -%}
           {%- set ns.total_failed_files = ns.total_failed_files + (row.failed_files | default(0) | int) -%}
           {%- set ns.total_removed_empty_dirs = ns.total_removed_empty_dirs + (row.removed_empty_dirs | default(0) | int) -%}
           {%- set ns.total_failed_empty_dirs = ns.total_failed_empty_dirs + (row.failed_empty_dirs | default(0) | int) -%}
@@ -56,6 +60,8 @@
         'total_rules': ns.total_rules,
         'total_matched': ns.total_matched,
         'total_deleted': ns.total_deleted,
+        'total_matched_bytes': ns.total_matched_bytes,
+        'total_deleted_bytes': ns.total_deleted_bytes,
         'total_failed_files': ns.total_failed_files,
         'total_removed_empty_dirs': ns.total_removed_empty_dirs,
         'total_failed_empty_dirs': ns.total_failed_empty_dirs,
@@ -72,6 +78,8 @@
     purge_total_rules: "{{ (_purge_report_metrics_json | from_json).total_rules }}"
     purge_total_matched: "{{ (_purge_report_metrics_json | from_json).total_matched }}"
     purge_total_deleted: "{{ (_purge_report_metrics_json | from_json).total_deleted }}"
+    purge_total_matched_bytes: "{{ (_purge_report_metrics_json | from_json).total_matched_bytes }}"
+    purge_total_deleted_bytes: "{{ (_purge_report_metrics_json | from_json).total_deleted_bytes }}"
     purge_total_failed_files: "{{ (_purge_report_metrics_json | from_json).total_failed_files }}"
     purge_total_removed_empty_dirs: "{{ (_purge_report_metrics_json | from_json).total_removed_empty_dirs }}"
     purge_total_failed_empty_dirs: "{{ (_purge_report_metrics_json | from_json).total_failed_empty_dirs }}"
@@ -87,7 +95,15 @@
       {%- if (purge_total_failed_files | int) > 0 or (purge_total_failed_empty_dirs | int) > 0 or (purge_total_failed_rules | int) > 0 -%}crit
       {%- elif (purge_unknown_hosts | length) > 0 or (purge_hosts_without_rules | length) > 0 or (purge_total_blocked_paths | int) > 0 or (purge_total_missing_paths | int) > 0 or (purge_total_warning_rules | int) > 0 or (purge_total_blocked_rules | int) > 0 -%}warn
       {%- else -%}ok{%- endif -%}
-    purge_report_date_br: "{{ '%d/%m/%Y %H:%M:%S' | strftime(ansible_date_time.epoch | int) }}"
+    purge_report_effective_timezone: "{{ purge_report_timezone | default('America/Sao_Paulo') }}"
+    purge_report_date_br: >-
+      {{
+        lookup(
+          'ansible.builtin.pipe',
+          "TZ='" ~ (purge_report_timezone | default('America/Sao_Paulo')) ~ "' date '+%d/%m/%Y %H:%M:%S " ~ (purge_report_timezone | default('America/Sao_Paulo')) ~ "'"
+        )
+      }}
+    purge_report_sample_limit_effective: "{{ purge_report_sample_limit | default(50) | int }}"
     purge_effective_mode_label: "{{ 'APPLY / REMOÇÃO REAL' if (purge_apply_enabled | bool) else 'CHECK / SIMULAÇÃO' }}"
 
 - name: Report | Definir labels do relatório
@@ -111,8 +127,164 @@
       Job #{{ tower_job_id | default(awx_job_id | default('local')) }}
     send_mail_body: "{{ lookup('ansible.builtin.template', 'report_success.html.j2') }}"
 
+- name: Report | Coletar anexos locais de auditoria por host
+  ansible.builtin.set_fact:
+    _audit_files_raw: >-
+      {{
+        (groups['purge_targets'] | default([])
+          | map('extract', hostvars, 'purge_deleted_files_attachments')
+          | select('defined')
+          | sum(start=[]))
+        | map('string')
+        | map('trim')
+        | reject('equalto', '')
+        | unique
+        | list
+      }}
+
+- name: Report | Verificar anexos locais de auditoria
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: _audit_file_stats
+  changed_when: false
+  failed_when: false
+  loop: "{{ _audit_files_raw | default([]) }}"
+  when: (_audit_files_raw | default([]) | length) > 0
+
+- name: Report | Filtrar anexos válidos de auditoria
+  ansible.builtin.set_fact:
+    _audit_attachments_local: >-
+      {{
+        (_audit_file_stats.results | default([]))
+        | selectattr('stat.exists', 'defined')
+        | selectattr('stat.exists')
+        | selectattr('stat.size', 'defined')
+        | selectattr('stat.size', '>', 0)
+        | map(attribute='stat.path')
+        | list
+      }}
+
+- name: Report | Inicializar lista de anexos remotos no CIFS
+  ansible.builtin.set_fact:
+    send_mail_cifs_remote_files: []
+
+- name: Report | Publicar arquivos de auditoria no CIFS
+  when:
+    - purge_audit_cifs_upload_enabled | default(true) | bool
+    - (_audit_attachments_local | default([]) | length) > 0
+  block:
+    - name: Report | Normalizar configuração CIFS
+      ansible.builtin.set_fact:
+        _cifs_server: "{{ (send_mail_cifs_address | default({}))[send_mail_cifs | lower] | default('') }}"
+        _cifs_dir: "{{ send_mail_cifs_path | default('/Ansible/mail_attachments') }}"
+        _cifs_user: "{{ ansible_user | default('') }}"
+        _cifs_pass: "{{ ansible_password | default('') }}"
+        _cifs_workgroup: "{{ cifs_workgroup | default('agorasenior.corp') }}"
+        _cifs_delegate: >-
+          {{
+            purge_audit_cifs_delegate
+            if (purge_audit_cifs_delegate | default('') | string | trim | length > 0)
+            else 'localhost'
+          }}
+        _cifs_stage_dir: "{{ purge_audit_cifs_stage_dir | default('/tmp/data-purge-audit-cifs-' ~ (tower_job_id | default(awx_job_id | default('local')))) }}"
+        _cifs_password_file: "{{ purge_audit_cifs_stage_dir | default('/tmp/data-purge-audit-cifs-' ~ (tower_job_id | default(awx_job_id | default('local')))) }}/.cifs-pass"
+      no_log: true
+
+    - name: Report | Falhar se CIFS não estiver mapeado
+      ansible.builtin.fail:
+        msg: >-
+          CIFS não mapeado para upload dos anexos de auditoria:
+          send_mail_cifs='{{ send_mail_cifs | default('') }}' não existe em send_mail_cifs_address.
+      when: _cifs_server | length == 0
+
+    - name: Report | Garantir diretório temporário no host do smbclient
+      ansible.builtin.file:
+        path: "{{ _cifs_stage_dir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: "{{ _cifs_delegate }}"
+      become: false
+
+    - name: Report | Copiar anexos de auditoria para o host do smbclient
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ _cifs_stage_dir }}/{{ item | basename }}"
+        mode: "0640"
+      loop: "{{ _audit_attachments_local | default([]) }}"
+      delegate_to: "{{ _cifs_delegate }}"
+      become: false
+
+    - name: Report | Criar arquivo temporário de senha do CIFS no host do smbclient
+      ansible.builtin.copy:
+        dest: "{{ _cifs_password_file }}"
+        content: "{{ _cifs_pass }}"
+        mode: "0600"
+      delegate_to: "{{ _cifs_delegate }}"
+      become: false
+      no_log: true
+
+    - name: Report | Testar acesso ao CIFS
+      ansible.builtin.shell: >
+        smbclient "{{ _cifs_server }}"
+        -U "{{ _cifs_user }}%$(cat {{ _cifs_password_file }})"
+        -W "{{ _cifs_workgroup }}"
+        -c "ls {{ _cifs_dir }}"
+      register: _cifs_probe
+      retries: 5
+      delay: 10
+      until: _cifs_probe.rc == 0
+      changed_when: false
+      delegate_to: "{{ _cifs_delegate }}"
+      become: false
+
+    - name: Report | Subir anexos de auditoria para CIFS
+      ansible.builtin.shell: >
+        smbclient "{{ _cifs_server }}"
+        -U "{{ _cifs_user }}%$(cat {{ _cifs_password_file }})"
+        -W "{{ _cifs_workgroup }}"
+        -c 'cd {{ _cifs_dir }} ; put {{ _cifs_stage_dir }}/{{ item | basename }} {{ item | basename }}'
+      loop: "{{ _audit_attachments_local | default([]) }}"
+      register: _cifs_put_audit
+      changed_when: true
+      delegate_to: "{{ _cifs_delegate }}"
+      become: false
+
+    - name: Report | Montar lista de anexos remotos para o job de e-mail
+      ansible.builtin.set_fact:
+        send_mail_cifs_remote_files: >-
+          {{
+            (_audit_attachments_local | default([]))
+            | map('basename')
+            | list
+          }}
+
+  always:
+    - name: Report | Remover arquivo temporário de senha do CIFS
+      ansible.builtin.file:
+        path: "{{ _cifs_password_file | default('/tmp/.cifs-pass') }}"
+        state: absent
+      failed_when: false
+      no_log: true
+      delegate_to: "{{ _cifs_delegate | default('localhost') }}"
+      become: false
+
+    - name: Report | Remover anexos temporários do host do smbclient
+      ansible.builtin.file:
+        path: "{{ _cifs_stage_dir }}/{{ item | basename }}"
+        state: absent
+      loop: "{{ _audit_attachments_local | default([]) }}"
+      failed_when: false
+      delegate_to: "{{ _cifs_delegate | default('localhost') }}"
+      become: false
+
 - name: Report | Publicar set_stats para envio externo de email
   ansible.builtin.set_stats:
     data:
       send_mail_subject: "{{ send_mail_subject }}"
       send_mail_body: "{{ send_mail_body }}"
+      send_mail_cifs: "{{ send_mail_cifs | default('') }}"
+      send_mail_cifs_path: "{{ send_mail_cifs_path | default('') }}"
+      send_mail_cifs_address: "{{ send_mail_cifs_address | default({}) }}"
+      cifs_workgroup: "{{ cifs_workgroup | default('agorasenior.corp') }}"
+      send_mail_cifs_remote_files: "{{ send_mail_cifs_remote_files | default([]) }}"
+      send_mail_attachments: "{{ send_mail_cifs_remote_files  | default([]) }}"
