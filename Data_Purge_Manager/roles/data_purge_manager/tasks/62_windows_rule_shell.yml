@@ -188,6 +188,8 @@
         _windows_shell_matched_files: 0
         _windows_shell_deleted_files: 0
         _windows_shell_failed_files: 0
+        _windows_shell_matched_bytes: 0
+        _windows_shell_deleted_bytes: 0
         _windows_shell_removed_empty_dirs: 0
         _windows_shell_failed_empty_dirs: 0
         _windows_shell_samples: []
@@ -241,6 +243,7 @@
         $Writer = New-Object System.IO.StreamWriter($CandidateFile, $false, [System.Text.Encoding]::UTF8)
 
         $Matched = 0
+        $MatchedBytes = [int64]0
         $Samples = New-Object System.Collections.ArrayList
         $Errors = New-Object System.Collections.ArrayList
 
@@ -302,6 +305,7 @@
               }
 
               $Matched++
+              $MatchedBytes += [int64]$File.Length
               $Writer.WriteLine($File.FullName)
 
               if ($Samples.Count -lt $SampleLimit) {
@@ -315,6 +319,7 @@
 
         Write-Output "DPM_CANDIDATE_FILE=$CandidateFile"
         Write-Output "DPM_MATCHED=$Matched"
+        Write-Output "DPM_MATCHED_BYTES=$MatchedBytes"
 
         foreach ($Sample in $Samples) {
           Write-Output "DPM_SAMPLE=$Sample"
@@ -354,6 +359,17 @@
               | first
             ) | int
           }}
+        _windows_shell_matched_bytes: >-
+          {{
+            (
+              (_windows_shell_scan_result | default({})).stdout_lines | default([])
+              | select('match', '^DPM_MATCHED_BYTES=')
+              | map('regex_replace', '^DPM_MATCHED_BYTES=', '')
+              | list
+              | default(['0'], true)
+              | first
+            ) | int
+          }}
         _windows_shell_samples: >-
           {{
             (_windows_shell_scan_result | default({})).stdout_lines | default([])
@@ -372,7 +388,12 @@
     - name: Windows shell rule | Remover arquivos candidatos em modo apply
       ansible.windows.win_shell: |
         $CandidateFile = "{{ _windows_shell_candidate_file }}"
+        $AuditFile = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("{{ (_purge_audit_remote_file | default('')) | b64encode }}"))
+        $AuditEnabled = [System.Convert]::ToBoolean("{{ 'true' if (purge_deleted_files_audit_enabled | default(true) | bool and _rule_apply_enabled | bool and (_purge_audit_remote_file is defined)) else 'false' }}")
+        $AuditHost = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("{{ inventory_hostname | b64encode }}"))
+        $AuditRule = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("{{ _rule_name | b64encode }}"))
         $Deleted = 0
+        $DeletedBytes = [int64]0
         $Failed = 0
         $Errors = New-Object System.Collections.ArrayList
 
@@ -399,8 +420,18 @@
 
           try {
             if (Test-Path -LiteralPath $File -PathType Leaf) {
+              $Item = Get-Item -LiteralPath $File -ErrorAction Stop
+              $FileSize = [int64]$Item.Length
               Remove-Item -LiteralPath $File -Force -ErrorAction Stop
               $Deleted++
+              $DeletedBytes += $FileSize
+
+              if ($AuditEnabled -and -not [string]::IsNullOrWhiteSpace($AuditFile)) {
+                $Tz = [System.TimeZoneInfo]::FindSystemTimeZoneById("E. South America Standard Time")
+                $Now = [System.TimeZoneInfo]::ConvertTimeFromUtc((Get-Date).ToUniversalTime(), $Tz).ToString("dd/MM/yyyy HH:mm:ss") + " America/Sao_Paulo"
+                $Line = "{0} | host={1} | sistema=windows | regra={2} | bytes={3} | arquivo={4}" -f $Now, $AuditHost, $AuditRule, $FileSize, $File
+                Add-Content -LiteralPath $AuditFile -Value $Line -Encoding UTF8 -ErrorAction SilentlyContinue
+              }
             }
           } catch {
             $Failed++
@@ -409,6 +440,7 @@
         }
 
         Write-Output "DPM_DELETED=$Deleted"
+        Write-Output "DPM_DELETED_BYTES=$DeletedBytes"
         Write-Output "DPM_FAILED=$Failed"
 
         foreach ($Err in $Errors) {
@@ -431,6 +463,17 @@
               (_windows_shell_delete_result | default({})).stdout_lines | default([])
               | select('match', '^DPM_DELETED=')
               | map('regex_replace', '^DPM_DELETED=', '')
+              | list
+              | default(['0'], true)
+              | first
+            ) | int
+          }}
+        _windows_shell_deleted_bytes: >-
+          {{
+            (
+              (_windows_shell_delete_result | default({})).stdout_lines | default([])
+              | select('match', '^DPM_DELETED_BYTES=')
+              | map('regex_replace', '^DPM_DELETED_BYTES=', '')
               | list
               | default(['0'], true)
               | first
@@ -643,6 +686,8 @@
                 'matched_files': _windows_shell_matched_files | default(0) | int,
                 'deleted_files': _windows_shell_deleted_files | default(0) | int,
                 'failed_files': _windows_shell_failed_files | default(0) | int,
+                'matched_bytes': _windows_shell_matched_bytes | default(0) | int,
+                'deleted_bytes': _windows_shell_deleted_bytes | default(0) | int,
                 'removed_empty_dirs': _windows_shell_removed_empty_dirs | default(0) | int,
                 'failed_empty_dirs': _windows_shell_failed_empty_dirs | default(0) | int,
                 'fatal_errors': (_rule_fatal_errors | default([])) + (_windows_shell_errors | default([])),
@@ -682,6 +727,8 @@
                 'matched_files': 0,
                 'deleted_files': 0,
                 'failed_files': 1,
+                'matched_bytes': 0,
+                'deleted_bytes': 0,
                 'removed_empty_dirs': 0,
                 'failed_empty_dirs': 0,
                 'fatal_errors': [ansible_failed_result.msg | default('Falha técnica não classificada')],
