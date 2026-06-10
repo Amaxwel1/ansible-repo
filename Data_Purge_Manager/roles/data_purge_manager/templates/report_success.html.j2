@@ -21,6 +21,21 @@
   </div>
 {%- endmacro %}
 
+{% macro human_bytes(value) -%}
+  {%- set b = value | default(0) | int -%}
+  {%- if b >= 1099511627776 -%}
+    {{ '%.2f' | format(b / 1099511627776) }} TB
+  {%- elif b >= 1073741824 -%}
+    {{ '%.2f' | format(b / 1073741824) }} GB
+  {%- elif b >= 1048576 -%}
+    {{ '%.2f' | format(b / 1048576) }} MB
+  {%- elif b >= 1024 -%}
+    {{ '%.2f' | format(b / 1024) }} KB
+  {%- else -%}
+    {{ b }} B
+  {%- endif -%}
+{%- endmacro %}
+
 {% macro th(text, width='') -%}
   <th {% if width | length > 0 %}width="{{ width }}"{% endif %} bgcolor="#f4f6f8" style="background-color:#f4f6f8;color:#111111;font-family:Arial,sans-serif;font-size:13px;font-weight:bold;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">
     {{ text }}
@@ -32,7 +47,7 @@
 {%- endmacro %}
 
 {% macro card(label, value, help='') -%}
-  <td valign="top" style="width:16.6%;border:1px solid #d9d9d9;padding:10px;font-family:Arial,sans-serif;color:#111111;">
+  <td valign="top" style="width:14.2%;border:1px solid #d9d9d9;padding:10px;font-family:Arial,sans-serif;color:#111111;">
     <div style="font-size:12px;color:#666666;">{{ label }}</div>
     <div style="font-size:22px;font-weight:bold;color:#111111;margin-top:3px;">{{ value }}</div>
     {% if help | length > 0 %}
@@ -107,6 +122,7 @@
                 {{ card('Regras', purge_total_rules | default(0), 'habilitadas') }}
                 {{ card('Candidatos', purge_total_matched | default(0), 'arquivos elegíveis') }}
                 {{ card('Removidos', purge_total_deleted | default(0), 'modo Apply') }}
+                {{ card('Economia', human_bytes((purge_total_deleted_bytes if (purge_apply_enabled | default(false) | bool) else purge_total_matched_bytes) | default(0)), 'real/estimada') }}
                 {{ card('Alertas', purge_total_warning_rules | default(0), 'regras com aviso') }}
                 {{ card('Bloqueios', purge_total_blocked_paths | default(0), 'paths bloqueados') }}
               </tr>
@@ -152,12 +168,44 @@
                 {% set host_groups = host_report.applications | default([]) %}
                 {% set host_envs = host_report.envs | default([]) %}
                 {% set host_rows = host_report.rows | default([]) %}
+                {% set htot = namespace(matched_bytes=0, deleted_bytes=0) %}
+                {% for r in host_rows %}
+                  {% set htot.matched_bytes = htot.matched_bytes + (r.matched_bytes | default(0) | int) %}
+                  {% set htot.deleted_bytes = htot.deleted_bytes + (r.deleted_bytes | default(0) | int) %}
+                {% endfor %}
+                {% set host_disk_before = host_report.disk_usage_before | default([]) %}
+                {% set host_disk_after = host_report.disk_usage_after | default([]) %}
 
                 <div style="font-family:Arial,sans-serif;font-size:13px;color:#111111;margin-top:12px;margin-bottom:5px;">
                   <b>{{ host_report.host | default('—') }}</b>
                   &nbsp; {{ badge((host_report.os | default('unknown')) | upper, 'gray') }}
                   &nbsp; Grupo(s): {{ code(host_groups | join(', ') if (host_groups | length) > 0 else '—') }}
                   &nbsp; Ambiente(s): {{ code(host_envs | join(', ') if (host_envs | length) > 0 else '—') }}
+                  <div style="font-size:12px;color:#444444;margin-top:5px;line-height:18px;">
+                    {% if mode_label == 'Apply' %}
+                      <b>Economia realizada:</b> {{ human_bytes(htot.deleted_bytes) }}
+                    {% else %}
+                      <b>Economia estimada:</b> {{ human_bytes(htot.matched_bytes) }}
+                    {% endif %}
+
+                    {% if host_disk_before | length > 0 %}
+                      <br/><b>Disco:</b>
+                      {% for d in host_disk_before %}
+                        {% set after_match = host_disk_after | selectattr('mount', 'equalto', d.mount | default('')) | list %}
+                        {% set d_after = after_match[0] if (after_match | length) > 0 else none %}
+                        <br/>
+                        {{ code(d.mount | default(d.filesystem | default('—'))) }}
+                        {% if mode_label == 'Apply' and d_after %}
+                          Antes: <b>{{ d.used_pct | default('—') }}%</b>
+                          &nbsp;|&nbsp; Depois: <b>{{ d_after.used_pct | default('—') }}%</b>
+                          &nbsp;|&nbsp; Livre: {{ human_bytes(d.free_bytes | default(0)) }} → {{ human_bytes(d_after.free_bytes | default(0)) }}
+                        {% else %}
+                          Atual: <b>{{ d.used_pct | default('—') }}%</b>
+                          &nbsp;|&nbsp; Livre: {{ human_bytes(d.free_bytes | default(0)) }}
+                        {% endif %}
+                      {% endfor %}
+                    {% endif %}
+                  </div>
                 </div>
 
                 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;margin-bottom:12px;table-layout:fixed;">
@@ -167,7 +215,7 @@
                     {{ th('Grupo / Ambiente', '125') }}
                     {{ th('Critério', '125') }}
                     {{ th('Paths', '115') }}
-                    {{ th('Arquivos', '115') }}
+                    {{ th('Arquivos', '140') }}
                     {{ th('Observações', '360') }}
                   </tr>
 
@@ -230,7 +278,9 @@
 
                       {{ td_open() }}
                         {{ kv('Candidatos', row.matched_files | default(0)) }}
+                        {{ kv('Tamanho cand.', human_bytes(row.matched_bytes | default(0))) }}
                         {{ kv('Removidos', row.deleted_files | default(0)) }}
+                        {{ kv('Economia', human_bytes((row.deleted_bytes | default(0)) if mode_label == 'Apply' else (row.matched_bytes | default(0)))) }}
                         {{ kv('Falhas', row.failed_files | default(0)) }}
 
                         {% if row.removed_empty_dirs | default(0) | int > 0 %}
@@ -288,9 +338,9 @@
         <tr>
           <td style="font-family:Arial,sans-serif;font-size:12px;color:#666666;margin-top:14px;padding-top:8px;">
             {% if mode_label == 'Check' %}
-              Observação: em modo <b>Check</b>, a automação apenas lista os arquivos candidatos. Remoção real exige <b>purge_mode=apply</b> e <b>purge_confirm_delete=sim</b>.
+              Observação: em modo <b>Check</b>, a automação apenas lista os arquivos candidatos e mostra a <b>economia estimada</b>. Remoção real exige <b>purge_mode=apply</b> e <b>purge_confirm_delete=sim</b>.
             {% else %}
-              Observação: em modo <b>Apply</b>, os arquivos candidatos são removidos quando a regra passa nas validações de segurança.
+              Observação: em modo <b>Apply</b>, os arquivos candidatos são removidos quando a regra passa nas validações de segurança. A economia exibida é baseada no tamanho dos arquivos removidos pela automação; a porcentagem de disco é uma fotografia antes/depois do filesystem ou drive afetado.
             {% endif %}
           </td>
         </tr>
