@@ -96,7 +96,7 @@ purge_windows_audit_tmpdir: "C:\\Windows\\Temp"
 
 purge_audit_cifs_upload_enabled: true
 
-purge_audit_cifs_delegate: "192.168.122.34"
+purge_audit_cifs_delegate: ""
 
 purge_audit_cifs_stage_dir: "/tmp/data-purge-audit-cifs-{{ tower_job_id | default(awx_job_id | default('local')) }}"
 
