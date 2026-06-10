@@ -84,3 +84,25 @@ purge_report_timezone: "America/Sao_Paulo"
 purge_report_sample_limit: 50
 purge_report_title: "Data Purge Manager"
 purge_report_subject_prefix: "Ansible-Report"
+
+purge_disk_usage_enabled: true
+
+# Auditoria de arquivos removidos
+
+purge_deleted_files_audit_enabled: true
+purge_audit_controller_dir: "/tmp/data-purge-audit-{{ tower_job_id | default(awx_job_id | default('local')) }}"
+purge_linux_audit_tmpdir: "/tmp"
+purge_windows_audit_tmpdir: "C:\\Windows\\Temp"
+
+purge_audit_cifs_upload_enabled: true
+
+purge_audit_cifs_delegate: "192.168.122.34"
+
+purge_audit_cifs_stage_dir: "/tmp/data-purge-audit-cifs-{{ tower_job_id | default(awx_job_id | default('local')) }}"
+
+send_mail_cifs: "producao"
+send_mail_cifs_path: "/Ansible/mail_attachments"
+send_mail_cifs_address:
+  tutihofix: "//192.168.0.247/certs"
+  producao: "//192.168.0.115/certs"
+cifs_workgroup: "WORKGROUP"
