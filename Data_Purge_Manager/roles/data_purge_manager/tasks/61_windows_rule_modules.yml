@@ -32,6 +32,8 @@
           results: []
         _deleted_files_count: 0
         _failed_files_count: 0
+        _matched_bytes_count: 0
+        _deleted_bytes_count: 0
         _removed_empty_dirs_count: 0
         _failed_empty_dirs_count: 0
         _rule_status: "ok"
@@ -366,6 +368,44 @@
             | list
             | length
           }}
+        _matched_bytes_count: >-
+          {{
+            _candidate_files
+            | default([])
+            | map(attribute='size')
+            | map('default', 0)
+            | map('int')
+            | sum
+          }}
+        _deleted_bytes_count: >-
+          {%- set ns = namespace(total=0) -%}
+          {%- for r in _windows_delete_result.results | default([]) -%}
+            {%- if r.changed | default(false) -%}
+              {%- set ns.total = ns.total + (r.item.size | default(0) | int) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ ns.total }}
+
+    - name: Windows | Anexar arquivos removidos no TXT de auditoria
+      ansible.windows.win_shell: |
+        $AuditFile = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("{{ (_purge_audit_remote_file | default('')) | b64encode }}"))
+        $AuditHost = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("{{ inventory_hostname | b64encode }}"))
+        $AuditRule = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("{{ _rule_name | b64encode }}"))
+        $FilePath = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("{{ (item.item.path | default('')) | b64encode }}"))
+        $FileBytes = "{{ item.item.size | default(0) | int }}"
+        $Tz = [System.TimeZoneInfo]::FindSystemTimeZoneById("E. South America Standard Time")
+        $Now = [System.TimeZoneInfo]::ConvertTimeFromUtc((Get-Date).ToUniversalTime(), $Tz).ToString("dd/MM/yyyy HH:mm:ss") + " America/Sao_Paulo"
+
+        $Line = "{0} | host={1} | sistema=windows | regra={2} | bytes={3} | arquivo={4}" -f $Now, $AuditHost, $AuditRule, $FileBytes, $FilePath
+        Add-Content -LiteralPath $AuditFile -Value $Line -Encoding UTF8
+      loop: "{{ _windows_delete_result.results | default([]) }}"
+      changed_when: false
+      failed_when: false
+      when:
+        - _rule_apply_enabled | bool
+        - item.changed | default(false)
+        - _purge_audit_remote_file is defined
+        - purge_deleted_files_audit_enabled | default(true) | bool
 
     - name: Windows | Definir status da regra
       ansible.builtin.set_fact:
@@ -412,6 +452,8 @@
                     'matched_files': _candidate_files | length,
                     'deleted_files': _deleted_files_count | int,
                     'failed_files': _failed_files_count | int,
+                    'matched_bytes': _matched_bytes_count | int,
+                    'deleted_bytes': _deleted_bytes_count | int,
                     'removed_empty_dirs': _removed_empty_dirs_count | int,
                     'failed_empty_dirs': _failed_empty_dirs_count | int,
                     'samples': (_candidate_files | map(attribute='path') | list)[:(purge_report_sample_limit | default(10) | int)]
@@ -456,6 +498,8 @@
                     'matched_files': 0,
                     'deleted_files': 0,
                     'failed_files': 1,
+                    'matched_bytes': 0,
+                    'deleted_bytes': 0,
                     'removed_empty_dirs': 0,
                     'failed_empty_dirs': 0,
                     'samples': []
