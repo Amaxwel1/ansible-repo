@@ -184,7 +184,7 @@
                   &nbsp; Grupo(s): {{ code(host_groups | join(', ') if (host_groups | length) > 0 else '—') }}
                   &nbsp; Ambiente(s): {{ code(host_envs | join(', ') if (host_envs | length) > 0 else '—') }}
 
-                  <div style="margin-top:8px;">
+                  <div style="margin-top:8px;margin-bottom:14px;">
                     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
                       <tr>
                         <td valign="top" width="26%" style="background-color:#f1f8f4;border:1px solid #b7dfc2;padding:10px;font-family:Arial,sans-serif;color:#111111;">
@@ -298,6 +298,8 @@
                       </tr>
                     </table>
                   </div>
+
+                <div style="height:14px;line-height:14px;font-size:1px;">&nbsp;</div>
 
                 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;margin-bottom:12px;table-layout:fixed;">
                   <tr>
