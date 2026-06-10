@@ -32,6 +32,8 @@
           results: []
         _deleted_files_count: 0
         _failed_files_count: 0
+        _matched_bytes_count: 0
+        _deleted_bytes_count: 0
         _removed_empty_dirs_count: 0
         _failed_empty_dirs_count: 0
         _rule_status: "ok"
@@ -343,6 +345,51 @@
             | list
             | length
           }}
+        _matched_bytes_count: >-
+          {{
+            _candidate_files
+            | default([])
+            | map(attribute='size')
+            | map('default', 0)
+            | map('int')
+            | sum
+          }}
+        _deleted_bytes_count: >-
+          {%- set ns = namespace(total=0) -%}
+          {%- for r in _linux_delete_result.results | default([]) -%}
+            {%- if r.changed | default(false) -%}
+              {%- set ns.total = ns.total + (r.item.size | default(0) | int) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ ns.total }}
+
+    - name: Linux | Anexar arquivos removidos no TXT de auditoria
+      ansible.builtin.shell:
+        cmd: |
+          set -u
+
+          DPM_AUDIT_FILE={{ _purge_audit_remote_file | quote }}
+          DPM_AUDIT_HOST={{ inventory_hostname | quote }}
+          DPM_AUDIT_RULE={{ _rule_name | quote }}
+          DPM_FILE_PATH={{ item.item.path | default('') | quote }}
+          DPM_FILE_BYTES="{{ item.item.size | default(0) | int }}"
+          DPM_NOW="$(TZ='America/Sao_Paulo' date '+%d/%m/%Y %H:%M:%S America/Sao_Paulo')"
+
+          printf '%s | host=%s | sistema=linux | regra=%s | bytes=%s | arquivo=%s\n' \
+            "$DPM_NOW" \
+            "$DPM_AUDIT_HOST" \
+            "$DPM_AUDIT_RULE" \
+            "$DPM_FILE_BYTES" \
+            "$DPM_FILE_PATH" >> "$DPM_AUDIT_FILE"
+        executable: /bin/bash
+      loop: "{{ _linux_delete_result.results | default([]) }}"
+      changed_when: false
+      failed_when: false
+      when:
+        - _rule_apply_enabled | bool
+        - item.changed | default(false)
+        - _purge_audit_remote_file is defined
+        - purge_deleted_files_audit_enabled | default(true) | bool
 
     - name: Linux | Definir status da regra
       ansible.builtin.set_fact:
@@ -389,6 +436,8 @@
                     'matched_files': _candidate_files | length,
                     'deleted_files': _deleted_files_count | int,
                     'failed_files': _failed_files_count | int,
+                    'matched_bytes': _matched_bytes_count | int,
+                    'deleted_bytes': _deleted_bytes_count | int,
                     'removed_empty_dirs': _removed_empty_dirs_count | int,
                     'failed_empty_dirs': _failed_empty_dirs_count | int,
                     'samples': (_candidate_files | map(attribute='path') | list)[:(purge_report_sample_limit | default(10) | int)]
@@ -433,6 +482,8 @@
                     'matched_files': 0,
                     'deleted_files': 0,
                     'failed_files': 1,
+                    'matched_bytes': 0,
+                    'deleted_bytes': 0,
                     'removed_empty_dirs': 0,
                     'failed_empty_dirs': 0,
                     'samples': []
