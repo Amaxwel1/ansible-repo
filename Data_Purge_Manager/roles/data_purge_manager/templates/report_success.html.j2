@@ -255,6 +255,14 @@
                                 {% set after_match = host_disk_after | selectattr('mount', 'equalto', d.mount | default('')) | list %}
                                 {% set d_after = after_match[0] if (after_match | length) > 0 else none %}
 
+                                {% set used_before_value = (d.used_pct | default('0') | string | regex_replace('[^0-9]', '') | int) %}
+                                {% set used_before_color = '#b00020' if used_before_value >= 75 else '#1b5e20' %}
+
+                                {% if d_after %}
+                                  {% set used_after_value = (d_after.used_pct | default('0') | string | regex_replace('[^0-9]', '') | int) %}
+                                  {% set used_after_color = '#b00020' if used_after_value >= 75 else '#1b5e20' %}
+                                {% endif %}
+
                                 <tr>
                                   <td style="font-family:Arial,sans-serif;font-size:12px;color:#111111;border:1px solid #d9d9d9;padding:6px;vertical-align:top;">
                                     {{ code(d.mount | default(d.filesystem | default('—'))) }}
@@ -262,12 +270,12 @@
 
                                   {% if mode_label == 'Apply' and d_after %}
                                     <td style="font-family:Arial,sans-serif;font-size:12px;color:#111111;border:1px solid #d9d9d9;padding:6px;vertical-align:top;">
-                                      <b style="font-size:15px;color:#333333;">{{ d.used_pct | default('—') }}%</b>
+                                      <b style="font-size:15px;color:{{ used_before_color }};">{{ d.used_pct | default('—') }}%</b>
                                       <div style="font-size:10px;color:#666666;">disco em uso</div>
                                     </td>
 
                                     <td style="font-family:Arial,sans-serif;font-size:12px;color:#111111;border:1px solid #d9d9d9;padding:6px;vertical-align:top;">
-                                      <b style="font-size:15px;color:#1b5e20;">{{ d_after.used_pct | default('—') }}%</b>
+                                      <b style="font-size:15px;color:{{ used_after_color }};">{{ d_after.used_pct | default('—') }}%</b>
                                       <div style="font-size:10px;color:#666666;">disco em uso</div>
                                     </td>
 
@@ -278,7 +286,7 @@
                                     </td>
                                   {% else %}
                                     <td style="font-family:Arial,sans-serif;font-size:12px;color:#111111;border:1px solid #d9d9d9;padding:6px;vertical-align:top;">
-                                      <b style="font-size:15px;color:#333333;">{{ d.used_pct | default('—') }}%</b>
+                                      <b style="font-size:15px;color:{{ used_before_color }};">{{ d.used_pct | default('—') }}%</b>
                                       <div style="font-size:10px;color:#666666;">disco em uso</div>
                                     </td>
 
