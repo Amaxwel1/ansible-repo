@@ -41,7 +41,20 @@
           throw "Arquivo de query não encontrado: $InputFile"
         }
 
-        $result = Invoke-Sqlcmd -ServerInstance $ServerInstance -InputFile $InputFile -ErrorAction Stop -AbortOnError -OutputSqlErrors
+        $invokeSqlcmdParams = @{
+          ServerInstance = $ServerInstance
+          InputFile = $InputFile
+          ErrorAction = 'Stop'
+          AbortOnError = $true
+        }
+
+        $invokeSqlcmdCommand = Get-Command Invoke-Sqlcmd -ErrorAction Stop
+
+        if ($invokeSqlcmdCommand.Parameters.ContainsKey('OutputSqlErrors')) {
+          $invokeSqlcmdParams.OutputSqlErrors = $true
+        }
+
+        $result = Invoke-Sqlcmd @invokeSqlcmdParams
 
         $rows = @($result)
         $rowCount = $rows.Count
