@@ -1,0 +1,151 @@
+---
+- name: Consulta o diretório temporário do Windows
+  ansible.builtin.win_shell: echo $env:TEMP
+  register: databases_win_temp_shell
+
+- name: Registra o diretório temporário do Windows
+  ansible.builtin.set_fact:
+    databases_win_temp_dir: '{{ databases_win_temp_shell.stdout | trim }}\'
+
+- name: Copia o arquivo com a query para o servidor
+  ansible.builtin.win_copy:
+    src: '{{ query_file }}'
+    dest: '{{ databases_win_temp_dir }}{{ databases_query_file_prefix }}-query.sql'
+  register: databases_query_file
+
+- name: Cria variáveis relacionadas ao arquivo CSV
+  ansible.builtin.set_fact:
+    databases_csv_command: '| Export-CSV -NoTypeInformation {{ databases_win_temp_dir }}{{ databases_query_file_prefix }}-result.csv'
+    databases_csv_file: '{{ databases_win_temp_dir }}{{ databases_query_file_prefix }}-result.csv'
+  when: databases_attach | bool == true
+
+- name: Executa a query no servidor
+  ansible.windows.win_powershell:
+    script: |
+      param(
+        [string]$ServerInstance,
+        [string]$InputFile,
+        [string]$Attach,
+        [string]$CsvPath
+      )
+
+      $ErrorActionPreference = 'Stop'
+      $ProgressPreference = 'SilentlyContinue'
+
+      $Ansible.Changed = $true
+
+      try {
+        $AttachBool = [System.Convert]::ToBoolean($Attach)
+
+        if (-not (Test-Path -LiteralPath $InputFile)) {
+          throw "Arquivo de query não encontrado: $InputFile"
+        }
+
+        $result = Invoke-Sqlcmd -ServerInstance $ServerInstance -InputFile $InputFile -ErrorAction Stop -AbortOnError -OutputSqlErrors
+
+        $rows = @($result)
+        $rowCount = $rows.Count
+
+        if ($AttachBool) {
+          if ([string]::IsNullOrWhiteSpace($CsvPath)) {
+            throw "Caminho do arquivo CSV não foi definido."
+          }
+
+          if ($rowCount -gt 0) {
+            $rows | Export-Csv -NoTypeInformation -Path $CsvPath -Encoding UTF8 -Force -ErrorAction Stop
+          }
+          else {
+            Set-Content -Path $CsvPath -Value "" -Encoding UTF8 -Force -ErrorAction Stop
+          }
+
+          $stdoutText = "OK: Query executada com sucesso. CSV gerado em: $CsvPath. Linhas retornadas: $rowCount"
+        }
+        else {
+          $stdoutText = ($rows | Out-String -Width 4096).Trim()
+
+          if ([string]::IsNullOrWhiteSpace($stdoutText)) {
+            $stdoutText = "OK: Query executada com sucesso, mas não retornou linhas."
+          }
+        }
+
+        $Ansible.Result = @{
+          stdout = $stdoutText
+          stderr = ""
+          row_count = $rowCount
+          csv_path = $CsvPath
+          server_instance = $ServerInstance
+          input_file = $InputFile
+        }
+      }
+      catch {
+        $errorDetails = @(
+          "ERRO AO EXECUTAR QUERY SQL"
+          ""
+          "Servidor/Instância: $ServerInstance"
+          "Arquivo da query: $InputFile"
+          ""
+          "Mensagem:"
+          "$($_.Exception.Message)"
+          ""
+          "Categoria:"
+          "$($_.CategoryInfo)"
+          ""
+          "FullyQualifiedErrorId:"
+          "$($_.FullyQualifiedErrorId)"
+          ""
+          "Linha PowerShell:"
+          "$($_.InvocationInfo.Line)"
+          ""
+          "Posição:"
+          "$($_.InvocationInfo.PositionMessage)"
+          ""
+          "StackTrace:"
+          "$($_.ScriptStackTrace)"
+        ) -join [Environment]::NewLine
+
+        $Ansible.Result = @{
+          stdout = ""
+          stderr = $errorDetails
+          row_count = 0
+          csv_path = $CsvPath
+          server_instance = $ServerInstance
+          input_file = $InputFile
+        }
+
+        $Ansible.Failed = $true
+      }
+    parameters:
+      ServerInstance: '{{ ansible_hostname }}\{{ databases_database }}'
+      InputFile: '{{ databases_query_file.dest }}'
+      Attach: '{{ databases_attach | bool }}'
+      CsvPath: '{{ databases_csv_file | default("") }}'
+  register: databases_query_output
+
+- name: Normaliza saída da query
+  ansible.builtin.set_fact:
+    databases_query_stdout: "{{ databases_query_output.result.stdout | default('') }}"
+    databases_query_stderr: "{{ databases_query_output.result.stderr | default('') }}"
+
+- name: Registra detalhes da falha da query
+  ansible.builtin.set_fact:
+    databases_query_error_details: >-
+      {{
+        databases_query_stderr | default('') | trim
+        if (databases_query_stderr | default('') | trim | length > 0)
+        else 'Erro não capturado pela execução da query.'
+      }}
+  when:
+    - databases_query_output is failed
+
+- name: Formata a query e a descrição para mensagem final
+  ansible.builtin.set_fact:
+    databases_output_parsed: "{{ databases_output_parsed | default('') }}
+      <p>{{ lookup('ansible.builtin.file', query_file).split('\n') | first | regex_replace('-- ','') }}</p>
+      <pre>{{ databases_query_stdout }}</pre>"
+  when:
+    - databases_query_stdout | default('') | length > 0
+    - not databases_attach | bool
+
+- name: Inclui tarefas para tratar do arquivo .csv
+  ansible.builtin.include_tasks: ../csv-attachment.yml
+  when: databases_attach | bool == true
