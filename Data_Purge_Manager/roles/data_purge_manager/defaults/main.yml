@@ -87,6 +87,7 @@ purge_report_subject_prefix: "Ansible-Report"
 
 purge_disk_usage_enabled: true
 
+#=========
 # Auditoria de arquivos removidos
 
 purge_deleted_files_audit_enabled: true
@@ -106,3 +107,25 @@ send_mail_cifs_address:
   tutihofix: "//192.168.0.247/certs"
   producao: "//192.168.0.115/certs"
 cifs_workgroup: "WORKGROUP"
+
+#========
+# Métricas mensais de economia
+
+purge_savings_metrics_enabled: true
+
+# Quando true, só gera métrica se houver economia real.
+# Ou seja: apply executado e purge_total_deleted_bytes > 0.
+purge_savings_metrics_only_when_deleted: true
+
+# Diretório local temporário no controller/AAP para montar o JSON.
+purge_savings_metrics_controller_dir: "/tmp/data-purge-savings-{{ tower_job_id | default(awx_job_id | default('local')) }}"
+
+# Caminho dentro do CIFS onde os JSON de métrica serão armazenados.
+purge_savings_cifs_path: "/Ansible/data_purge_metrics"
+purge_savings_cifs_upload_enabled: true
+purge_savings_cifs_delegate: ""
+
+# Diretório temporário no host que executa o smbclient.
+purge_savings_cifs_stage_dir: "/tmp/data-purge-savings-cifs-{{ tower_job_id | default(awx_job_id | default('local')) }}"
+
+purge_savings_timezone: "{{ purge_report_timezone | default('America/Sao_Paulo') }}"
