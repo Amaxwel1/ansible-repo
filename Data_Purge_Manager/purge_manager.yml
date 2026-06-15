@@ -4,30 +4,114 @@
   gather_facts: false
   vars:
     data_purge_phase: controller
-  roles:
-    - role: data_purge_manager
+  tasks:
+    - name: Data Purge Manager | Executar fase de planejamento
+      block:
+        - name: Data Purge Manager | Executar role - controller
+          ansible.builtin.include_role:
+            name: data_purge_manager
+
+      rescue:
+        - name: Data Purge Manager | Publicar relatório de falha - controller
+          ansible.builtin.include_role:
+            name: data_purge_manager
+            tasks_from: 90_build_failure_report.yml
+          vars:
+            data_purge_failure_phase: "Planejamento e inventário dinâmico"
+            data_purge_failure_os: "controller"
+            data_purge_failure_host: "{{ inventory_hostname }}"
+
+        - name: Data Purge Manager | Encerrar job após falha no planejamento
+          ansible.builtin.fail:
+            msg: >-
+              Data Purge Manager falhou na fase de planejamento.
+              O HTML de falha foi publicado em send_mail_body.
 
 - name: Data Purge Manager | Expurgo Linux
   hosts: linux_targets
   gather_facts: false
-  become: "{{ purge_linux_become | default(true) }}"
+  become: false
   vars:
     data_purge_phase: linux_purge
-  roles:
-    - role: data_purge_manager
+  tasks:
+    - name: Data Purge Manager | Executar fase Linux
+      block:
+        - name: Data Purge Manager | Executar role - linux_purge
+          ansible.builtin.include_role:
+            name: data_purge_manager
+            apply:
+              become: "{{ purge_linux_become | default(true) }}"
+
+      rescue:
+        - name: Data Purge Manager | Publicar relatório de falha - Linux
+          ansible.builtin.include_role:
+            name: data_purge_manager
+            tasks_from: 90_build_failure_report.yml
+            apply:
+              become: false
+          vars:
+            data_purge_failure_phase: "Expurgo Linux"
+            data_purge_failure_os: "linux"
+            data_purge_failure_host: "{{ inventory_hostname }}"
+
+        - name: Data Purge Manager | Encerrar host após falha no expurgo Linux
+          ansible.builtin.fail:
+            msg: >-
+              Data Purge Manager falhou na fase de expurgo Linux no host {{ inventory_hostname }}.
+              O HTML de falha foi publicado em send_mail_body.
 
 - name: Data Purge Manager | Expurgo Windows
   hosts: windows_targets
   gather_facts: false
   vars:
     data_purge_phase: windows_purge
-  roles:
-    - role: data_purge_manager
+  tasks:
+    - name: Data Purge Manager | Executar fase Windows
+      block:
+        - name: Data Purge Manager | Executar role - windows_purge
+          ansible.builtin.include_role:
+            name: data_purge_manager
+
+      rescue:
+        - name: Data Purge Manager | Publicar relatório de falha - Windows
+          ansible.builtin.include_role:
+            name: data_purge_manager
+            tasks_from: 90_build_failure_report.yml
+          vars:
+            data_purge_failure_phase: "Expurgo Windows"
+            data_purge_failure_os: "windows"
+            data_purge_failure_host: "{{ inventory_hostname }}"
+
+        - name: Data Purge Manager | Encerrar host após falha no expurgo Windows
+          ansible.builtin.fail:
+            msg: >-
+              Data Purge Manager falhou na fase de expurgo Windows no host {{ inventory_hostname }}.
+              O HTML de falha foi publicado em send_mail_body.
 
 - name: Data Purge Manager | Relatório consolidado
   hosts: localhost
   gather_facts: true
   vars:
     data_purge_phase: report
-  roles:
-    - role: data_purge_manager
+  tasks:
+    - name: Data Purge Manager | Executar fase de relatório
+      block:
+        - name: Data Purge Manager | Executar role - report
+          ansible.builtin.include_role:
+            name: data_purge_manager
+
+      rescue:
+        - name: Data Purge Manager | Publicar relatório de falha - report
+          ansible.builtin.include_role:
+            name: data_purge_manager
+            tasks_from: 90_build_failure_report.yml
+          vars:
+            data_purge_failure_phase: "Relatório consolidado"
+            data_purge_failure_os: "controller"
+            data_purge_failure_host: "{{ inventory_hostname }}"
+
+        - name: Data Purge Manager | Encerrar job após falha no relatório
+          ansible.builtin.fail:
+            msg: >-
+              Data Purge Manager falhou na fase de relatório consolidado.
+              O HTML de falha foi publicado em send_mail_body.
