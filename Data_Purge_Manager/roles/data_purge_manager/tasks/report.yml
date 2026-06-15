@@ -95,7 +95,9 @@
       {%- if (purge_total_failed_files | int) > 0 or (purge_total_failed_empty_dirs | int) > 0 or (purge_total_failed_rules | int) > 0 -%}crit
       {%- elif (purge_unknown_hosts | length) > 0 or (purge_hosts_without_rules | length) > 0 or (purge_total_blocked_paths | int) > 0 or (purge_total_missing_paths | int) > 0 or (purge_total_warning_rules | int) > 0 or (purge_total_blocked_rules | int) > 0 -%}warn
       {%- else -%}ok{%- endif -%}
+
     purge_report_effective_timezone: "{{ purge_report_timezone | default('America/Sao_Paulo') }}"
+
     purge_report_date_br: >-
       {{
         lookup(
@@ -103,7 +105,9 @@
           "TZ='" ~ (purge_report_timezone | default('America/Sao_Paulo')) ~ "' date '+%d/%m/%Y %H:%M:%S " ~ (purge_report_timezone | default('America/Sao_Paulo')) ~ "'"
         )
       }}
+
     purge_report_sample_limit_effective: "{{ purge_report_sample_limit | default(50) | int }}"
+
     purge_effective_mode_label: "{{ 'APPLY / REMOÇÃO REAL' if (purge_apply_enabled | bool) else 'CHECK / SIMULAÇÃO' }}"
 
 - name: Report | Definir labels do relatório
@@ -126,6 +130,8 @@
       {{ purge_report_title }} - {{ purge_report_mode_label }} -
       Job #{{ tower_job_id | default(awx_job_id | default('local')) }}
     send_mail_body: "{{ lookup('ansible.builtin.template', 'report_success.html.j2') }}"
+
+# Anexos TXT de auditoria
 
 - name: Report | Coletar anexos locais de auditoria por host
   ansible.builtin.set_fact:
@@ -169,122 +175,127 @@
     send_mail_cifs_remote_files: []
 
 - name: Report | Publicar arquivos de auditoria no CIFS
+  ansible.builtin.include_tasks: 80_cifs_upload_files.yml
+  vars:
+    cifs_upload_label: "anexos de auditoria"
+    cifs_upload_enabled: "{{ purge_audit_cifs_upload_enabled | default(true) | bool }}"
+    cifs_upload_local_files: "{{ _audit_attachments_local | default([]) }}"
+    cifs_upload_remote_dir: "{{ send_mail_cifs_path | default('/Ansible/mail_attachments') }}"
+    cifs_upload_delegate: "{{ purge_audit_cifs_delegate | default('') }}"
+    cifs_upload_stage_dir: "{{ purge_audit_cifs_stage_dir | default('/tmp/data-purge-audit-cifs-' ~ (tower_job_id | default(awx_job_id | default('local')))) }}"
+    cifs_upload_fail_on_error: true
   when:
     - purge_audit_cifs_upload_enabled | default(true) | bool
     - (_audit_attachments_local | default([]) | length) > 0
-  block:
-    - name: Report | Normalizar configuração CIFS
-      ansible.builtin.set_fact:
-        _cifs_server: "{{ (send_mail_cifs_address | default({}))[send_mail_cifs | lower] | default('') }}"
-        _cifs_dir: "{{ send_mail_cifs_path | default('/Ansible/mail_attachments') }}"
-        _cifs_user: "{{ ansible_user | default('') }}"
-        _cifs_pass: "{{ ansible_password | default('') }}"
-        _cifs_workgroup: "{{ cifs_workgroup | default('agorasenior.corp') }}"
-        _cifs_delegate: >-
-          {{
-            purge_audit_cifs_delegate
-            if (purge_audit_cifs_delegate | default('') | string | trim | length > 0)
-            else 'localhost'
-          }}
-        _cifs_stage_dir: "{{ purge_audit_cifs_stage_dir | default('/tmp/data-purge-audit-cifs-' ~ (tower_job_id | default(awx_job_id | default('local')))) }}"
-        _cifs_password_file: "{{ purge_audit_cifs_stage_dir | default('/tmp/data-purge-audit-cifs-' ~ (tower_job_id | default(awx_job_id | default('local')))) }}/.cifs-pass"
-      no_log: true
 
-    - name: Report | Falhar se CIFS não estiver mapeado
-      ansible.builtin.fail:
-        msg: >-
-          CIFS não mapeado para upload dos anexos de auditoria:
-          send_mail_cifs='{{ send_mail_cifs | default('') }}' não existe em send_mail_cifs_address.
-      when: _cifs_server | length == 0
+- name: Report | Montar lista de anexos remotos para o job de e-mail
+  ansible.builtin.set_fact:
+    send_mail_cifs_remote_files: "{{ cifs_upload_remote_files | default([]) }}"
+  when:
+    - (_audit_attachments_local | default([]) | length) > 0
 
-    - name: Report | Garantir diretório temporário no host do smbclient
-      ansible.builtin.file:
-        path: "{{ _cifs_stage_dir }}"
-        state: directory
-        mode: "0750"
-      delegate_to: "{{ _cifs_delegate }}"
-      become: false
+- name: Report | Montar lista de anexos para playbook de e-mail do cliente
+  ansible.builtin.set_fact:
+    send_mail_attachments: "{{ send_mail_cifs_remote_files | default([]) }}"
 
-    - name: Report | Copiar anexos de auditoria para o host do smbclient
-      ansible.builtin.copy:
-        src: "{{ item }}"
-        dest: "{{ _cifs_stage_dir }}/{{ item | basename }}"
-        mode: "0640"
-      loop: "{{ _audit_attachments_local | default([]) }}"
-      delegate_to: "{{ _cifs_delegate }}"
-      become: false
+# Métrica mensal de economia
 
-    - name: Report | Criar arquivo temporário de senha do CIFS no host do smbclient
-      ansible.builtin.copy:
-        dest: "{{ _cifs_password_file }}"
-        content: "{{ _cifs_pass }}"
-        mode: "0600"
-      delegate_to: "{{ _cifs_delegate }}"
-      become: false
-      no_log: true
+- name: Report | Definir se deve publicar métrica mensal de economia
+  ansible.builtin.set_fact:
+    _savings_should_publish: >-
+      {{
+        purge_savings_metrics_enabled | default(true) | bool
+        and purge_apply_enabled | default(false) | bool
+        and (
+          (not (purge_savings_metrics_only_when_deleted | default(true) | bool))
+          or ((purge_total_deleted_bytes | default(0) | int) > 0)
+        )
+      }}
 
-    - name: Report | Testar acesso ao CIFS
-      ansible.builtin.shell: >
-        smbclient "{{ _cifs_server }}"
-        -U "{{ _cifs_user }}%$(cat {{ _cifs_password_file }})"
-        -W "{{ _cifs_workgroup }}"
-        -c "ls {{ _cifs_dir }}"
-      register: _cifs_probe
-      retries: 5
-      delay: 10
-      until: _cifs_probe.rc == 0
-      changed_when: false
-      delegate_to: "{{ _cifs_delegate }}"
-      become: false
+- name: Report | Preparar dados da métrica mensal
+  ansible.builtin.set_fact:
+    _savings_job_id: "{{ tower_job_id | default(awx_job_id | default('local')) }}"
+    _savings_timezone: "{{ purge_savings_timezone | default(purge_report_timezone | default('America/Sao_Paulo')) }}"
+    _savings_generated_at: >-
+      {{
+        lookup(
+          'ansible.builtin.pipe',
+          "TZ='" ~ (purge_savings_timezone | default(purge_report_timezone | default('America/Sao_Paulo'))) ~ "' date '+%d/%m/%Y %H:%M:%S " ~ (purge_savings_timezone | default(purge_report_timezone | default('America/Sao_Paulo'))) ~ "'"
+        )
+      }}
+    _savings_month: >-
+      {{
+        lookup(
+          'ansible.builtin.pipe',
+          "TZ='" ~ (purge_savings_timezone | default(purge_report_timezone | default('America/Sao_Paulo'))) ~ "' date '+%Y%m'"
+        )
+      }}
+    _savings_metric_controller_dir: "{{ purge_savings_metrics_controller_dir }}"
+  when: _savings_should_publish | bool
 
-    - name: Report | Subir anexos de auditoria para CIFS
-      ansible.builtin.shell: >
-        smbclient "{{ _cifs_server }}"
-        -U "{{ _cifs_user }}%$(cat {{ _cifs_password_file }})"
-        -W "{{ _cifs_workgroup }}"
-        -c 'cd {{ _cifs_dir }} ; put {{ _cifs_stage_dir }}/{{ item | basename }} {{ item | basename }}'
-      loop: "{{ _audit_attachments_local | default([]) }}"
-      register: _cifs_put_audit
-      changed_when: true
-      delegate_to: "{{ _cifs_delegate }}"
-      become: false
+- name: Report | Definir nome do arquivo de métrica mensal
+  ansible.builtin.set_fact:
+    _savings_metric_filename: "data_purge_metric_{{ _savings_month }}_{{ _savings_job_id }}.json"
+    _savings_metric_file: "{{ _savings_metric_controller_dir }}/data_purge_metric_{{ _savings_month }}_{{ _savings_job_id }}.json"
+  when: _savings_should_publish | bool
 
-    - name: Report | Montar lista de anexos remotos para o job de e-mail
-      ansible.builtin.set_fact:
-        send_mail_cifs_remote_files: >-
-          {{
-            (_audit_attachments_local | default([]))
-            | map('basename')
-            | list
-          }}
+- name: Report | Garantir diretório local da métrica mensal
+  ansible.builtin.file:
+    path: "{{ _savings_metric_controller_dir }}"
+    state: directory
+    mode: "0750"
+  when: _savings_should_publish | bool
 
-  always:
-    - name: Report | Remover arquivo temporário de senha do CIFS
-      ansible.builtin.file:
-        path: "{{ _cifs_password_file | default('/tmp/.cifs-pass') }}"
-        state: absent
-      failed_when: false
-      no_log: true
-      delegate_to: "{{ _cifs_delegate | default('localhost') }}"
-      become: false
+- name: Report | Gerar arquivo JSON de métrica mensal
+  ansible.builtin.copy:
+    dest: "{{ _savings_metric_file }}"
+    mode: "0640"
+    content: |-
+      {%- set metric_rendered = lookup('ansible.builtin.template', role_path ~ '/templates/savings_metric.json.j2') -%}
+      {{ (metric_rendered if metric_rendered is mapping else (metric_rendered | from_json)) | to_nice_json(indent=2) }}
+  when: _savings_should_publish | bool
 
-    - name: Report | Remover anexos temporários do host do smbclient
-      ansible.builtin.file:
-        path: "{{ _cifs_stage_dir }}/{{ item | basename }}"
-        state: absent
-      loop: "{{ _audit_attachments_local | default([]) }}"
-      failed_when: false
-      delegate_to: "{{ _cifs_delegate | default('localhost') }}"
-      become: false
+- name: Report | Publicar métrica mensal no CIFS
+  ansible.builtin.include_tasks: 80_cifs_upload_files.yml
+  vars:
+    cifs_upload_label: "métrica mensal de economia"
+    cifs_upload_enabled: "{{ purge_savings_cifs_upload_enabled | default(true) | bool }}"
+    cifs_upload_local_files: "{{ [_savings_metric_file] if (_savings_metric_file | default('') | length > 0) else [] }}"
+    cifs_upload_remote_dir: "{{ purge_savings_cifs_path | default('/Ansible/data_purge_metrics') }}"
+    cifs_upload_delegate: >-
+      {{
+        purge_savings_cifs_delegate
+        if (purge_savings_cifs_delegate | default('') | string | trim | length > 0)
+        else (purge_audit_cifs_delegate | default(''))
+      }}
+    cifs_upload_stage_dir: "{{ purge_savings_cifs_stage_dir | default('/tmp/data-purge-savings-cifs-' ~ (tower_job_id | default(awx_job_id | default('local')))) }}"
+    cifs_upload_fail_on_error: false
+  when:
+    - _savings_should_publish | default(false) | bool
+    - purge_savings_cifs_upload_enabled | default(true) | bool
+
+- name: Report | Publicar path da métrica mensal como fact
+  ansible.builtin.set_fact:
+    purge_savings_metric_file: "{{ _savings_metric_file | default('') }}"
+    purge_savings_metric_filename: "{{ _savings_metric_filename | default('') }}"
+  when: _savings_should_publish | bool
+
+# Set stats para o job de e-mail
 
 - name: Report | Publicar set_stats para envio externo de email
   ansible.builtin.set_stats:
     data:
       send_mail_subject: "{{ send_mail_subject }}"
       send_mail_body: "{{ send_mail_body }}"
+
       send_mail_cifs: "{{ send_mail_cifs | default('') }}"
       send_mail_cifs_path: "{{ send_mail_cifs_path | default('') }}"
       send_mail_cifs_address: "{{ send_mail_cifs_address | default({}) }}"
       cifs_workgroup: "{{ cifs_workgroup | default('agorasenior.corp') }}"
+
       send_mail_cifs_remote_files: "{{ send_mail_cifs_remote_files | default([]) }}"
-      send_mail_attachments: "{{ send_mail_cifs_remote_files  | default([]) }}"
+      send_mail_attachments: "{{ send_mail_attachments | default(send_mail_cifs_remote_files | default([])) }}"
+
+      purge_savings_metric_filename: "{{ purge_savings_metric_filename | default('') }}"
+      purge_savings_metric_file: "{{ purge_savings_metric_file | default('') }}"
+      purge_savings_cifs_path: "{{ purge_savings_cifs_path | default('/Ansible/data_purge_metrics') }}"
