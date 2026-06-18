@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "source": "Data Purge Manager",
+  "job_id": "1699634",
+  "job_template": "Data Purge Manager",
+  "workflow_job_id": "",
+  "generated_at": "11/06/2026 10:18:38 America/Sao_Paulo",
+  "month": "202606",
+  "timezone": "America/Sao_Paulo",
+  "mode": "apply",
+  "status": "success",
+  "reason": "TESTE AUTOMACAO",
+  "envs": [
+    "hml"
+  ],
+  "groups": [
+    "ansible_postgres"
+  ],
+  "total_deleted_files": 36,
+  "total_deleted_bytes": 96835157388,
+  "total_failed_files": 0,
+  "total_failed_rules": 0,
+  "hosts": [
+    {
+      "host": "mc-ah-vv-bd-001",
+      "os": "linux",
+      "envs": [
+        "hml"
+      ],
+      "groups": [
+        "ansible_postgres"
+      ],
+      "matched_files": 36,
+      "matched_bytes": 96835157388,
+      "deleted_files": 36,
+      "deleted_bytes": 96835157388,
+      "failed_files": 0
+    }
+  ],
+  "rules": [
+    {
+      "host": "mc-ah-vv-bd-001",
+      "os": "linux",
+      "rule": "postgres_backups_logs_70d",
+      "description": "Arquivos antigos do banco de dados do Ansible",
+      "group": "ansible_postgres",
+      "environment": "hml",
+      "source": "application",
+      "deleted_files": 36,
+      "deleted_bytes": 96835157388,
+      "failed_files": 0
+    }
+  ]
+}
