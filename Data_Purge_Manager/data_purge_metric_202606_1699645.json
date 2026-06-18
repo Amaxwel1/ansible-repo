@@ -1,0 +1,282 @@
+{
+  "schema_version": 1,
+  "source": "Data Purge Manager",
+  "job_id": "1699645",
+  "job_template": "Data Purge Manager",
+  "workflow_job_id": "",
+  "generated_at": "11/06/2026 10:34:02 America/Sao_Paulo",
+  "month": "202606",
+  "timezone": "America/Sao_Paulo",
+  "mode": "check",
+  "status": "success",
+  "reason": "VERIFICACAO",
+  "envs": [
+    "hml"
+  ],
+  "groups": [
+    "inoa"
+  ],
+  "total_deleted_files": 50476,
+  "total_deleted_bytes": 7064382341,
+  "total_failed_files": 0,
+  "total_failed_rules": 0,
+  "hosts": [
+    {
+      "host": "AG-AH-VV-AP-013",
+      "os": "windows",
+      "envs": [
+        "hml"
+      ],
+      "groups": [
+        "inoa"
+      ],
+      "matched_files": 59,
+      "matched_bytes": 42498785,
+      "deleted_files": 59,
+      "deleted_bytes": 42498785,
+      "failed_files": 0
+    },
+    {
+      "host": "AG-AH-VV-AP-002",
+      "os": "windows",
+      "envs": [
+        "hml"
+      ],
+      "groups": [
+        "inoa"
+      ],
+      "matched_files": 356,
+      "matched_bytes": 30230446,
+      "deleted_files": 356,
+      "deleted_bytes": 30230446,
+      "failed_files": 0
+    },
+    {
+      "host": "AG-AH-VV-AP-005",
+      "os": "windows",
+      "envs": [
+        "hml"
+      ],
+      "groups": [
+        "inoa"
+      ],
+      "matched_files": 32450,
+      "matched_bytes": 3554085437,
+      "deleted_files": 32450,
+      "deleted_bytes": 3554085437,
+      "failed_files": 0
+    },
+    {
+      "host": "AG-AH-VV-AP-007",
+      "os": "windows",
+      "envs": [
+        "hml"
+      ],
+      "groups": [
+        "inoa"
+      ],
+      "matched_files": 5353,
+      "matched_bytes": 1127428915,
+      "deleted_files": 5353,
+      "deleted_bytes": 1127428915,
+      "failed_files": 0
+    },
+    {
+      "host": "CO-AH-VV-AP-39A",
+      "os": "windows",
+      "envs": [
+        "hml"
+      ],
+      "groups": [
+        "inoa"
+      ],
+      "matched_files": 3089,
+      "matched_bytes": 1911260447,
+      "deleted_files": 3089,
+      "deleted_bytes": 1911260447,
+      "failed_files": 0
+    },
+    {
+      "host": "AG-AH-VV-AP-021",
+      "os": "windows",
+      "envs": [
+        "hml"
+      ],
+      "groups": [
+        "inoa"
+      ],
+      "matched_files": 8902,
+      "matched_bytes": 371258819,
+      "deleted_files": 8902,
+      "deleted_bytes": 371258819,
+      "failed_files": 0
+    },
+    {
+      "host": "AG-AH-VV-AP-022",
+      "os": "windows",
+      "envs": [
+        "hml"
+      ],
+      "groups": [
+        "inoa"
+      ],
+      "matched_files": 74,
+      "matched_bytes": 2977956,
+      "deleted_files": 74,
+      "deleted_bytes": 2977956,
+      "failed_files": 0
+    },
+    {
+      "host": "AG-AH-VV-AP-023",
+      "os": "windows",
+      "envs": [
+        "hml"
+      ],
+      "groups": [
+        "inoa"
+      ],
+      "matched_files": 111,
+      "matched_bytes": 21034435,
+      "deleted_files": 111,
+      "deleted_bytes": 21034435,
+      "failed_files": 0
+    },
+    {
+      "host": "AG-AH-VV-AP-024",
+      "os": "windows",
+      "envs": [
+        "hml"
+      ],
+      "groups": [
+        "inoa"
+      ],
+      "matched_files": 82,
+      "matched_bytes": 3607101,
+      "deleted_files": 82,
+      "deleted_bytes": 3607101,
+      "failed_files": 0
+    }
+  ],
+  "rules": [
+    {
+      "host": "AG-AH-VV-AP-013",
+      "os": "windows",
+      "rule": "inoa_ag_ah_vv_ap_013_logs_45d",
+      "description": "Expurgo de logs INOA HML no host AG-AH-VV-AP-013",
+      "group": "inoa",
+      "environment": "hml",
+      "source": "application",
+      "deleted_files": 59,
+      "deleted_bytes": 42498785,
+      "failed_files": 0
+    },
+    {
+      "host": "AG-AH-VV-AP-002",
+      "os": "windows",
+      "rule": "inoa_ag_ah_vv_ap_002_logs_45d",
+      "description": "Expurgo de logs INOA HML no host AG-AH-VV-AP-002",
+      "group": "inoa",
+      "environment": "hml",
+      "source": "application",
+      "deleted_files": 19,
+      "deleted_bytes": 8902410,
+      "failed_files": 0
+    },
+    {
+      "host": "AG-AH-VV-AP-002",
+      "os": "windows",
+      "rule": "inoa_ag_ah_vv_ap_002_logs_45d",
+      "description": "Expurgo de logs INOA HML no host AG-AH-VV-AP-002",
+      "group": "inoa",
+      "environment": "hml",
+      "source": "application",
+      "deleted_files": 337,
+      "deleted_bytes": 21328036,
+      "failed_files": 0
+    },
+    {
+      "host": "AG-AH-VV-AP-005",
+      "os": "windows",
+      "rule": "inoa_ag_ah_vv_ap_005_logs_45d",
+      "description": "Expurgo de logs INOA HML no host AG-AH-VV-AP-005 - Fix HUB",
+      "group": "inoa",
+      "environment": "hml",
+      "source": "application",
+      "deleted_files": 32450,
+      "deleted_bytes": 3554085437,
+      "failed_files": 0
+    },
+    {
+      "host": "AG-AH-VV-AP-007",
+      "os": "windows",
+      "rule": "inoa_ag_ah_vv_ap_007_logs_45d",
+      "description": "Expurgo de logs INOA HML no host AG-AH-VV-AP-007",
+      "group": "inoa",
+      "environment": "hml",
+      "source": "application",
+      "deleted_files": 5353,
+      "deleted_bytes": 1127428915,
+      "failed_files": 0
+    },
+    {
+      "host": "CO-AH-VV-AP-39A",
+      "os": "windows",
+      "rule": "inoa_co_ah_vv_ap_39a_logs_45d",
+      "description": "Expurgo de logs INOA HML no host CO-AH-VV-AP-39A",
+      "group": "inoa",
+      "environment": "hml",
+      "source": "application",
+      "deleted_files": 3089,
+      "deleted_bytes": 1911260447,
+      "failed_files": 0
+    },
+    {
+      "host": "AG-AH-VV-AP-021",
+      "os": "windows",
+      "rule": "inoa_ag_ah_vv_ap_021_logs_45d",
+      "description": "Expurgo de logs INOA HML no host AG-AH-VV-AP-021",
+      "group": "inoa",
+      "environment": "hml",
+      "source": "application",
+      "deleted_files": 8902,
+      "deleted_bytes": 371258819,
+      "failed_files": 0
+    },
+    {
+      "host": "AG-AH-VV-AP-022",
+      "os": "windows",
+      "rule": "inoa_ag_ah_vv_ap_022_logs_45d",
+      "description": "Expurgo de logs INOA HML no host AG-AH-VV-AP-022",
+      "group": "inoa",
+      "environment": "hml",
+      "source": "application",
+      "deleted_files": 74,
+      "deleted_bytes": 2977956,
+      "failed_files": 0
+    },
+    {
+      "host": "AG-AH-VV-AP-023",
+      "os": "windows",
+      "rule": "inoa_ag_ah_vv_ap_023_logs_45d",
+      "description": "Expurgo de logs INOA HML no host AG-AH-VV-AP-023",
+      "group": "inoa",
+      "environment": "hml",
+      "source": "application",
+      "deleted_files": 111,
+      "deleted_bytes": 21034435,
+      "failed_files": 0
+    },
+    {
+      "host": "AG-AH-VV-AP-024",
+      "os": "windows",
+      "rule": "inoa_ag_ah_vv_ap_024_logs_45d",
+      "description": "Expurgo de logs INOA HML no host AG-AH-VV-AP-024",
+      "group": "inoa",
+      "environment": "hml",
+      "source": "application",
+      "deleted_files": 82,
+      "deleted_bytes": 3607101,
+      "failed_files": 0
+    }
+  ]
+}
