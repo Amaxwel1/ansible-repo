@@ -16,6 +16,15 @@
     pg_restore_log_local_file: "{{ pg_restore_log_local_dir }}/{{ pg_restore_log_filename }}"
     pg_restore_cifs_password_file: "{{ pg_restore_log_local_dir }}/.cifs-pass"
 
+    # CIFS
+
+    send_mail_cifs: "producao"
+    send_mail_cifs_path: "/Ansible/mail_attachments"
+    send_mail_cifs_address:
+      tutihofix: "//192.168.0.247/certs"
+      producao: "//192.168.0.115/certs"
+    cifs_workgroup: "WORKGROUP"
+
   tasks:
     - name: Inicializa status do restore e anexos
       ansible.builtin.set_fact:
