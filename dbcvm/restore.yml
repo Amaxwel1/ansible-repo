@@ -1,0 +1,176 @@
+- hosts: all
+  gather_facts: yes
+  vars:
+    pg_restore_temp_folder: /backup/dbcvm_restore
+    pg_restore_dblink: "dbname={{ dblink_dbname }} port={{ dblink_port }} host={{ dblink_host }} user={{ dblink_user }} password={{ dblink_password }}"
+    pg_restore_cifs_path: //ag-ah-vv-fs-001.agorasenior.corp/Apps/Ansible/dbcvm_restore
+    pg_restore_cifs_mount_dir: /tmp/dbcvm_restore
+    pg_restore_drop: false
+  tasks:
+    - block:
+        - name: Cria o diretório de montagem do cifs e de cópia do arquivo
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+          loop:
+            - "{{ pg_restore_cifs_mount_dir }}"
+            - "{{ pg_restore_temp_folder }}"
+
+        - name: Cria o arquivo para guardar a senha do cifs
+          ansible.builtin.copy:
+            dest: /tmp/password-pg-restore-cifs
+            content: "{{ ansible_password }}"
+
+        - name: Cria o arquivo com string do dblink
+          ansible.builtin.copy:
+            dest: /tmp/dblink
+            content: "{{ pg_restore_dblink }}"
+
+        - name: Monta o volume CIFS
+          ansible.builtin.shell: |
+            mount {{ pg_restore_cifs_path }} {{ pg_restore_cifs_mount_dir }} -o username={{ ansible_user }},password=$(cat /tmp/password-pg-restore-cifs),domain=agorasenior.corp,rw,vers=3.0
+
+        - name: Copia o backup para a máquina do Postgres
+          ansible.builtin.copy:
+            src: "{{ pg_restore_cifs_mount_dir }}/dbcvm.dump"
+            dest: "{{ pg_restore_temp_folder }}"
+            remote_src: true
+
+        - name: Verifica se o arquivo toc.dat existe
+          ansible.builtin.stat:
+            path: "{{ pg_restore_temp_folder }}/dbcvm.dump/toc.dat"
+          register: pg_restore_tocdat
+
+        - name: Falha a playbook caso o arquivo toc.dat não existe
+          ansible.builtin.fail:
+            msg: O arquivo toc.dat não existe, os arquivos do banco não foram baixados.
+          when: pg_restore_tocdat.stat.exists == false
+
+        - block:
+            - name: Apagas a bases antigas
+              ansible.builtin.shell: |
+                cat <<EOF | psql
+                SELECT pg_terminate_backend(pid)
+                FROM pg_stat_activity
+                WHERE datname='{{ item }}';
+                DROP DATABASE IF EXISTS {{ item }};
+                EOF
+              loop:
+                - "dbcvm_old"
+                - '{{ "dbcvm" if pg_restore_drop|bool == true else "dbcvm_restoring" }}'
+
+            - name: Cria uma nova base de dados
+              ansible.builtin.command: |
+                psql -c 'CREATE DATABASE {{ "dbcvm" if pg_restore_drop|bool == true else "dbcvm_restoring" }}'
+
+            - name: Restaura a base
+              ansible.builtin.shell: "{{ item }}"
+              loop:
+                - >
+                  pg_restore -l '{{ pg_restore_temp_folder }}/dbcvm.dump' |
+                  sed -e '/USER MAPPING/d'
+                  -e '/MATERIALIZED VIEW DATA public mv_search_companys/d'
+                  -e '/MATERIALIZED VIEW DATA public mv_company_balance_guide/d' > /tmp/dbcvm_restore.lst
+                - pg_restore -d {{ 'dbcvm' if pg_restore_drop|bool == true else 'dbcvm_restoring' }} -v -j8 -x -O -L /tmp/dbcvm_restore.lst '{{ pg_restore_temp_folder }}/dbcvm.dump'
+
+            - name: Configura as permissões
+              ansible.builtin.command: psql -d {{ 'dbcvm' if pg_restore_drop|bool == true else 'dbcvm_restoring' }} -p 5432 -U postgres -c '{{ item }}'
+              loop:
+                - GRANT ALL PRIVILEGES ON SCHEMA 'public' TO svc_dbcvm;
+                - GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA 'public' TO svc_dbcvm;
+                - GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA 'public' TO svc_dbcvm;
+                - GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA 'public' TO svc_dbcvm;
+
+            - name: Configurar servidor remoto 'remote_valemobi'
+              ansible.builtin.shell: |
+                password=$(cat /tmp/dblink | grep -oP 'password=\K\S+')
+                psql -d {{ 'dbcvm' if pg_restore_drop|bool == true else 'dbcvm_restoring' }} -p 5432 -U postgres <<EOF
+                ALTER SERVER remote_valemobi OPTIONS (SET dbname '{{ dblink_dbname }}', SET host '{{ dblink_host }}', SET port '{{ dblink_port }}');
+                CREATE USER MAPPING FOR "postgres" SERVER remote_valemobi OPTIONS (user '{{ dblink_user }}', password '$password');
+                EOF
+                unset password
+
+            - name: Atualiza as materialized views
+              ansible.builtin.shell: |
+                psql -d {{ 'dbcvm' if pg_restore_drop|bool == true else 'dbcvm_restoring' }} -c "SELECT dblink_connect_u('myconn','$(cat /tmp/dblink)');
+                REFRESH MATERIALIZED VIEW {{ item }};
+                SELECT dblink_disconnect('myconn');"
+              loop:
+                - mv_search_companys
+                - mv_company_balance_guide
+
+            - name: Executa o vaacum
+              ansible.builtin.command: psql -c 'VACUUM VERBOSE ANALYZE'
+
+            - name: Bloqueia o usuário
+              ansible.builtin.command: psql -c 'ALTER USER svc_dbcvm NOLOGIN'
+
+            - name: Renomeia a base antiga e a nova
+              ansible.builtin.shell: |
+                cat <<EOF | psql
+                BEGIN;
+
+                SELECT pg_terminate_backend(pid)
+                FROM pg_stat_activity
+                WHERE datname='{{ item.from }}';
+                 
+                ALTER DATABASE {{ item.from }} RENAME TO {{ item.to }};
+
+                COMMIT;
+                EOF
+              loop:
+                - { from: "dbcvm", to: "dbcvm_old" }
+                - { from: "dbcvm_restoring", to: "dbcvm" }
+              when: pg_restore_drop|bool == false
+
+            - name: Desbloqueia o usuário
+              ansible.builtin.command: psql -c 'ALTER USER svc_dbcvm LOGIN'
+
+            - name: Executa as queries para validar a restauração
+              ansible.builtin.shell: |
+                cat <<'EOF' | psql -d dbcvm
+                {{ item }}
+                EOF
+              register: pg_restore_validation
+              loop:
+                - '{{ lookup("ansible.builtin.file", "queries/total.sql") }}'
+                - '{{ lookup("ansible.builtin.file", "queries/total-by-table.sql") }}'
+
+          always:
+            - name: Apaga o arquivo de listagem
+              ansible.builtin.file:
+                path: /tmp/dbcvm_restore.lst
+                state: absent
+
+          become: yes
+          become_user: postgres
+
+      always:
+        - name: Desmonta o volume cifs
+          ansible.builtin.command: |
+            umount {{ pg_restore_cifs_mount_dir }}
+
+        - name: Apaga os arquivos de restauração
+          ansible.builtin.file:
+            path: "{{ pg_restore_temp_folder }}"
+            state: absent
+
+        - name: Apaga o arquivo de senha
+          ansible.builtin.file:
+            path: /tmp/password-pg-restore-cifs
+            state: absent
+
+        - name: Apaga o arquivo com string do dblink
+          ansible.builtin.file:
+            path: /tmp/dblink
+            state: absent
+
+    - name: Define o título e o corpo de email
+      ansible.builtin.set_stats:
+        data:
+          send_mail_subject: "Ansible-Report - Job #{{ awx_job_id }} - {{ awx_job_template_name }}"
+          send_mail_body: |
+            <p>A base de dados "dbcvm" foi restaurada. Abaixo está o tamanho total e o tamanho de cada tabela.</p>
+            {% for i in pg_restore_validation.results %}
+            <pre>{{ i.stdout }}</pre>
+            {% endfor %}

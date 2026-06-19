@@ -1,0 +1,432 @@
+---
+- hosts: all
+  gather_facts: yes
+  vars:
+    pg_restore_temp_folder: /backup/dbcvm_restore
+    pg_restore_dblink: "dbname={{ dblink_dbname }} port={{ dblink_port }} host={{ dblink_host }} user={{ dblink_user }} password={{ dblink_password }}"
+    pg_restore_cifs_path: //ag-ah-vv-fs-001.agorasenior.corp/Apps/Ansible/dbcvm_restore
+    pg_restore_cifs_mount_dir: /tmp/dbcvm_restore
+    pg_restore_drop: false
+
+    # Log do pg_restore / anexos
+    pg_restore_job_id: "{{ awx_job_id | default(tower_job_id | default('local')) }}"
+    pg_restore_log_filename: "pg_restore_dbcvm_{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}_job_{{ pg_restore_job_id }}.log"
+    pg_restore_log_file: "/tmp/{{ pg_restore_log_filename }}"
+    pg_restore_log_local_dir: "/tmp/pg_restore_logs_{{ pg_restore_job_id }}"
+    pg_restore_log_local_file: "{{ pg_restore_log_local_dir }}/{{ pg_restore_log_filename }}"
+    pg_restore_cifs_password_file: "{{ pg_restore_log_local_dir }}/.cifs-pass"
+
+  tasks:
+    - name: Inicializa status do restore e anexos
+      ansible.builtin.set_fact:
+        pg_restore_failed: false
+        pg_restore_error_msg: ""
+        pg_restore_failed_task: ""
+        pg_restore_cifs_upload_failed: false
+        pg_restore_cifs_upload_error: ""
+        send_mail_cifs_remote_files: []
+        send_mail_attachments: []
+
+    - block:
+        - name: Inicializa arquivo de log do pg_restore
+          ansible.builtin.copy:
+            dest: "{{ pg_restore_log_file }}"
+            content: |
+              Log do pg_restore - dbcvm
+              Host: {{ inventory_hostname }}
+              Job: {{ pg_restore_job_id }}
+              Inicio: {{ lookup('ansible.builtin.pipe', 'date "+%d/%m/%Y %H:%M:%S"') }}
+              Banco destino: {{ 'dbcvm' if pg_restore_drop|bool == true else 'dbcvm_restoring' }}
+
+            mode: "0640"
+          become: yes
+          become_user: postgres
+
+        - name: Cria o diretório de montagem do cifs e de cópia do arquivo
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+          loop:
+            - "{{ pg_restore_cifs_mount_dir }}"
+            - "{{ pg_restore_temp_folder }}"
+
+        - name: Cria o arquivo para guardar a senha do cifs
+          ansible.builtin.copy:
+            dest: /tmp/password-pg-restore-cifs
+            content: "{{ ansible_password }}"
+
+        - name: Cria o arquivo com string do dblink
+          ansible.builtin.copy:
+            dest: /tmp/dblink
+            content: "{{ pg_restore_dblink }}"
+
+        - name: Monta o volume CIFS
+          ansible.builtin.shell: |
+            mount {{ pg_restore_cifs_path }} {{ pg_restore_cifs_mount_dir }} -o username={{ ansible_user }},password=$(cat /tmp/password-pg-restore-cifs),domain=agorasenior.corp,rw,vers=3.0
+
+        - name: Copia o backup para a máquina do Postgres
+          ansible.builtin.copy:
+            src: "{{ pg_restore_cifs_mount_dir }}/dbcvm.dump"
+            dest: "{{ pg_restore_temp_folder }}"
+            remote_src: true
+
+        - name: Verifica se o arquivo toc.dat existe
+          ansible.builtin.stat:
+            path: "{{ pg_restore_temp_folder }}/dbcvm.dump/toc.dat"
+          register: pg_restore_tocdat
+
+        - name: Falha a playbook caso o arquivo toc.dat não existe
+          ansible.builtin.fail:
+            msg: O arquivo toc.dat não existe, os arquivos do banco não foram baixados.
+          when: pg_restore_tocdat.stat.exists == false
+
+        - block:
+            - name: Apagas a bases antigas
+              ansible.builtin.shell: |
+                cat <<EOF | psql
+                SELECT pg_terminate_backend(pid)
+                FROM pg_stat_activity
+                WHERE datname='{{ item }}';
+                DROP DATABASE IF EXISTS {{ item }};
+                EOF
+              loop:
+                - "dbcvm_old"
+                - '{{ "dbcvm" if pg_restore_drop|bool == true else "dbcvm_restoring" }}'
+
+            - name: Cria uma nova base de dados
+              ansible.builtin.command: |
+                psql -c 'CREATE DATABASE {{ "dbcvm" if pg_restore_drop|bool == true else "dbcvm_restoring" }}'
+
+            - name: Restaura a base
+              ansible.builtin.shell: "{{ item }}"
+              loop:
+                - >
+                  pg_restore -l '{{ pg_restore_temp_folder }}/dbcvm.dump' 2>> '{{ pg_restore_log_file }}' |
+                  sed -e '/USER MAPPING/d'
+                  -e '/MATERIALIZED VIEW DATA public mv_search_companys/d'
+                  -e '/MATERIALIZED VIEW DATA public mv_company_balance_guide/d' > /tmp/dbcvm_restore.lst
+                - >
+                  pg_restore -d {{ 'dbcvm' if pg_restore_drop|bool == true else 'dbcvm_restoring' }}
+                  -v -j8 -x -O -L /tmp/dbcvm_restore.lst
+                  '{{ pg_restore_temp_folder }}/dbcvm.dump'
+                  >> '{{ pg_restore_log_file }}' 2>&1
+
+            - name: Configura as permissões
+              ansible.builtin.command: psql -d {{ 'dbcvm' if pg_restore_drop|bool == true else 'dbcvm_restoring' }} -p 5432 -U postgres -c '{{ item }}'
+              loop:
+                - GRANT ALL PRIVILEGES ON SCHEMA 'public' TO svc_dbcvm;
+                - GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA 'public' TO svc_dbcvm;
+                - GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA 'public' TO svc_dbcvm;
+                - GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA 'public' TO svc_dbcvm;
+
+            - name: Configurar servidor remoto 'remote_valemobi'
+              ansible.builtin.shell: |
+                password=$(cat /tmp/dblink | grep -oP 'password=\K\S+')
+                psql -d {{ 'dbcvm' if pg_restore_drop|bool == true else 'dbcvm_restoring' }} -p 5432 -U postgres <<EOF
+                ALTER SERVER remote_valemobi OPTIONS (SET dbname '{{ dblink_dbname }}', SET host '{{ dblink_host }}', SET port '{{ dblink_port }}');
+                CREATE USER MAPPING FOR "postgres" SERVER remote_valemobi OPTIONS (user '{{ dblink_user }}', password '$password');
+                EOF
+                unset password
+
+            - name: Atualiza as materialized views
+              ansible.builtin.shell: |
+                psql -d {{ 'dbcvm' if pg_restore_drop|bool == true else 'dbcvm_restoring' }} -c "SELECT dblink_connect_u('myconn','$(cat /tmp/dblink)');
+                REFRESH MATERIALIZED VIEW {{ item }};
+                SELECT dblink_disconnect('myconn');"
+              loop:
+                - mv_search_companys
+                - mv_company_balance_guide
+
+            - name: Executa o vaacum
+              ansible.builtin.command: psql -c 'VACUUM VERBOSE ANALYZE'
+
+            - name: Bloqueia o usuário
+              ansible.builtin.command: psql -c 'ALTER USER svc_dbcvm NOLOGIN'
+
+            - name: Renomeia a base antiga e a nova
+              ansible.builtin.shell: |
+                cat <<EOF | psql
+                BEGIN;
+
+                SELECT pg_terminate_backend(pid)
+                FROM pg_stat_activity
+                WHERE datname='{{ item.from }}';
+
+                ALTER DATABASE {{ item.from }} RENAME TO {{ item.to }};
+
+                COMMIT;
+                EOF
+              loop:
+                - { from: "dbcvm", to: "dbcvm_old" }
+                - { from: "dbcvm_restoring", to: "dbcvm" }
+              when: pg_restore_drop|bool == false
+
+            - name: Desbloqueia o usuário
+              ansible.builtin.command: psql -c 'ALTER USER svc_dbcvm LOGIN'
+
+            - name: Executa as queries para validar a restauração
+              ansible.builtin.shell: |
+                cat <<'EOF' | psql -d dbcvm
+                {{ item }}
+                EOF
+              register: pg_restore_validation
+              loop:
+                - '{{ lookup("ansible.builtin.file", "queries/total.sql") }}'
+                - '{{ lookup("ansible.builtin.file", "queries/total-by-table.sql") }}'
+
+          always:
+            - name: Apaga o arquivo de listagem
+              ansible.builtin.file:
+                path: /tmp/dbcvm_restore.lst
+                state: absent
+              failed_when: false
+
+          become: yes
+          become_user: postgres
+
+      rescue:
+        - name: Marca falha do restore
+          ansible.builtin.set_fact:
+            pg_restore_failed: true
+            pg_restore_failed_task: "{{ ansible_failed_task.name | default('desconhecida') }}"
+            pg_restore_error_msg: >-
+              {{
+                ansible_failed_result.msg
+                | default(ansible_failed_result.stderr
+                | default(ansible_failed_result.stdout
+                | default('Falha não detalhada durante a restauração.')))
+              }}
+
+        - name: Grava falha capturada no log do pg_restore
+          ansible.builtin.shell: |
+            cat <<'EOF' >> "{{ pg_restore_log_file }}"
+
+            FALHA CAPTURADA PELO ANSIBLE
+            Data: {{ lookup('ansible.builtin.pipe', 'date "+%d/%m/%Y %H:%M:%S"') }}
+            Task: {{ pg_restore_failed_task | default('desconhecida') }}
+
+            Mensagem:
+            {{ pg_restore_error_msg | default('') }}
+
+            STDERR:
+            {{ ansible_failed_result.stderr | default('') }}
+
+            STDOUT:
+            {{ ansible_failed_result.stdout | default('') }}
+
+            EOF
+          args:
+            executable: /bin/bash
+          become: yes
+          become_user: postgres
+          failed_when: false
+          changed_when: false
+
+      always:
+        - name: Finaliza arquivo de log do pg_restore
+          ansible.builtin.shell: |
+            cat <<'EOF' >> "{{ pg_restore_log_file }}"
+
+            Fim: {{ lookup('ansible.builtin.pipe', 'date "+%d/%m/%Y %H:%M:%S"') }}
+            Status: {{ 'FALHA' if (pg_restore_failed | default(false) | bool) else 'SUCESSO' }}
+
+            EOF
+          args:
+            executable: /bin/bash
+          become: yes
+          become_user: postgres
+          failed_when: false
+          changed_when: false
+
+        - name: Desmonta o volume cifs
+          ansible.builtin.command: |
+            umount {{ pg_restore_cifs_mount_dir }}
+          failed_when: false
+          changed_when: false
+
+        - name: Apaga os arquivos de restauração
+          ansible.builtin.file:
+            path: "{{ pg_restore_temp_folder }}"
+            state: absent
+          failed_when: false
+
+        - name: Apaga o arquivo de senha
+          ansible.builtin.file:
+            path: /tmp/password-pg-restore-cifs
+            state: absent
+          failed_when: false
+
+        - name: Apaga o arquivo com string do dblink
+          ansible.builtin.file:
+            path: /tmp/dblink
+            state: absent
+          failed_when: false
+
+        - name: Verifica existência do log remoto do pg_restore
+          ansible.builtin.stat:
+            path: "{{ pg_restore_log_file }}"
+          register: st_pg_restore_log
+          become: yes
+          become_user: postgres
+          failed_when: false
+          changed_when: false
+
+        - name: Garante diretório local para log do pg_restore
+          ansible.builtin.file:
+            path: "{{ pg_restore_log_local_dir }}"
+            state: directory
+            mode: "0750"
+          delegate_to: localhost
+          become: false
+          failed_when: false
+          when: st_pg_restore_log.stat.exists | default(false)
+
+        - name: Copia log do pg_restore para o controller
+          ansible.builtin.fetch:
+            src: "{{ pg_restore_log_file }}"
+            dest: "{{ pg_restore_log_local_dir }}/"
+            flat: true
+          register: fetch_pg_restore_log
+          become: yes
+          become_user: postgres
+          failed_when: false
+          when: st_pg_restore_log.stat.exists | default(false)
+
+        - name: Verifica existência do log local do pg_restore
+          ansible.builtin.stat:
+            path: "{{ pg_restore_log_local_file }}"
+          register: st_pg_restore_log_local
+          delegate_to: localhost
+          become: false
+          failed_when: false
+          changed_when: false
+
+        - name: Preparar lista local de anexos do pg_restore
+          ansible.builtin.set_fact:
+            _pg_restore_local_attachments: >-
+              {{
+                [pg_restore_log_local_file]
+                if (st_pg_restore_log_local.stat.exists | default(false)) and (st_pg_restore_log_local.stat.size | default(0) | int > 0)
+                else []
+              }}
+
+        - name: Resolve CIFS server/dir para anexos do pg_restore
+          ansible.builtin.set_fact:
+            _cifs_server: "{{ (send_mail_cifs_address | default({})).get(send_mail_cifs | default('') | lower, '') }}"
+            _cifs_dir: "{{ send_mail_cifs_path | default('/Ansible/mail_attachments') }}"
+            _cifs_user: "{{ ansible_user | default('') }}"
+            _cifs_pass: "{{ ansible_password | default('') }}"
+            _cifs_workgroup: "{{ cifs_workgroup | default('agorasenior.corp') }}"
+          no_log: true
+
+        - name: Publicar log do pg_restore no CIFS
+          when:
+            - (_pg_restore_local_attachments | default([]) | length) > 0
+          block:
+            - name: Validar mapeamento CIFS
+              ansible.builtin.fail:
+                msg: "CIFS não mapeado: send_mail_cifs='{{ send_mail_cifs | default('') }}' não existe em send_mail_cifs_address."
+              when: (_cifs_server | default('') | length) == 0
+
+            - name: Criar arquivo temporário de senha do CIFS
+              ansible.builtin.copy:
+                dest: "{{ pg_restore_cifs_password_file }}"
+                content: "{{ _cifs_pass }}"
+                mode: "0600"
+              delegate_to: localhost
+              become: false
+              no_log: true
+
+            - name: Testar acesso ao CIFS
+              ansible.builtin.shell: >
+                smbclient "{{ _cifs_server }}"
+                -U "{{ _cifs_user }}%$(cat {{ pg_restore_cifs_password_file }})"
+                -W "{{ _cifs_workgroup }}"
+                -c "cd {{ _cifs_dir }} ; ls"
+              register: _cifs_probe
+              retries: 5
+              delay: 10
+              until: _cifs_probe.rc == 0
+              changed_when: false
+              delegate_to: localhost
+              become: false
+
+            - name: Enviar log do pg_restore para o CIFS
+              ansible.builtin.shell: >
+                smbclient "{{ _cifs_server }}"
+                -U "{{ _cifs_user }}%$(cat {{ pg_restore_cifs_password_file }})"
+                -W "{{ _cifs_workgroup }}"
+                -c 'cd {{ _cifs_dir }} ; put {{ item }} {{ item | basename }}'
+              loop: "{{ _pg_restore_local_attachments }}"
+              register: _cifs_put_pg_restore_log
+              changed_when: true
+              delegate_to: localhost
+              become: false
+
+            - name: Publicar lista de anexos remotos do pg_restore
+              ansible.builtin.set_fact:
+                send_mail_cifs_remote_files: "{{ _pg_restore_local_attachments | map('basename') | list }}"
+                send_mail_attachments: "{{ _pg_restore_local_attachments | map('basename') | list }}"
+
+          rescue:
+            - name: Registrar falha no upload CIFS do log
+              ansible.builtin.set_fact:
+                pg_restore_cifs_upload_failed: true
+                pg_restore_cifs_upload_error: "{{ ansible_failed_result.msg | default(ansible_failed_result | to_json) }}"
+                send_mail_cifs_remote_files: []
+                send_mail_attachments: []
+
+          always:
+            - name: Remover arquivo de senha temporário do CIFS
+              ansible.builtin.file:
+                path: "{{ pg_restore_cifs_password_file }}"
+                state: absent
+              failed_when: false
+              delegate_to: localhost
+              become: false
+              no_log: true
+
+        - name: Define o título, corpo e anexos de email
+          ansible.builtin.set_stats:
+            data:
+              send_mail_subject: >-
+                Ansible-Report - Job #{{ awx_job_id | default(tower_job_id | default('local')) }} -
+                {{ awx_job_template_name | default(tower_job_template_name | default('PostgreSQL Restore')) }} -
+                {{ 'FALHA' if (pg_restore_failed | default(false) | bool) else 'SUCESSO' }}
+              send_mail_body: |
+                {% if pg_restore_failed | default(false) | bool %}
+                <p><b>Falha durante a restauração da base de dados "dbcvm".</b></p>
+                <p>Task com falha: {{ pg_restore_failed_task | default('desconhecida') }}</p>
+                <pre>{{ pg_restore_error_msg | default('Falha sem mensagem detalhada.') }}</pre>
+                {% else %}
+                <p>A base de dados "dbcvm" foi restaurada. Abaixo está o tamanho total e o tamanho de cada tabela.</p>
+                {% for i in pg_restore_validation.results | default([]) %}
+                <pre>{{ i.stdout }}</pre>
+                {% endfor %}
+                {% endif %}
+
+                {% if send_mail_attachments | default([]) | length > 0 %}
+                <p>O log detalhado do pg_restore foi anexado ao e-mail.</p>
+                {% else %}
+                <p><b>Atenção:</b> não foi possível anexar o log do pg_restore ao e-mail.</p>
+                {% endif %}
+
+                {% if pg_restore_cifs_upload_failed | default(false) | bool %}
+                <p><b>Atenção:</b> o log foi gerado, mas não foi possível publicá-lo no CIFS.</p>
+                <pre>{{ pg_restore_cifs_upload_error | default('Erro não informado.') }}</pre>
+                {% endif %}
+              send_mail_cifs: "{{ send_mail_cifs | default('') }}"
+              send_mail_cifs_path: "{{ send_mail_cifs_path | default('') }}"
+              send_mail_cifs_address: "{{ send_mail_cifs_address | default({}) }}"
+              cifs_workgroup: "{{ cifs_workgroup | default('agorasenior.corp') }}"
+              send_mail_cifs_remote_files: "{{ send_mail_cifs_remote_files | default([]) }}"
+              send_mail_attachments: "{{ send_mail_attachments | default(send_mail_cifs_remote_files | default([])) }}"
+              tmp_path_local: "{{ pg_restore_log_local_dir }}"
+
+        - name: Apaga log remoto do pg_restore
+          ansible.builtin.file:
+            path: "{{ pg_restore_log_file }}"
+            state: absent
+          become: yes
+          become_user: postgres
+          failed_when: false
