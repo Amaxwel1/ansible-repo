@@ -1,0 +1,57 @@
+- hosts: all
+  vars:
+    disks: {}
+    disks_below_threshold: []
+    verify_disk_treshold: 30
+
+  tasks:
+
+    - name: Calcula percentual de espaço livre por filesystem válido
+      ansible.builtin.set_fact:
+        disks: >-
+          {{
+            disks | combine({
+              item.device: (((item.size_available | float) / (item.size_total | float)) * 100) | int
+            })
+          }}
+      loop: "{{ ansible_mounts | default([]) }}"
+      loop_control:
+        label: "{{ item.mount | default(item.device | default('N/A')) }}"
+      when:
+        - item.size_available is defined
+        - item.size_available is not none
+        - item.size_total is defined
+        - item.size_total is not none
+        - (item.size_total | int) > 0
+
+    - name: Monta lista de discos abaixo do limite
+      ansible.builtin.set_fact:
+        disks_below_threshold: >-
+          {{
+            disks
+            | dict2items
+            | selectattr('value', 'lt', verify_disk_treshold | int)
+            | list
+          }}
+
+    - name: Define o título do email
+      ansible.builtin.set_stats:
+        aggregate: false
+        data:
+          send_mail_subject: 'Ansible-Report - Job #{{ awx_job_id }} - {{ awx_job_template_name }}'
+
+    - name: Define o corpo de email se necessário
+      ansible.builtin.set_stats:
+        data:
+          send_mail_body: |
+            <ul>
+            {% for disk in disks_below_threshold %}
+              <li>O disco {{ disk.key }} em {{ ansible_hostname }} está com {{ disk.value }}% de espaço livre.</li>
+            {% endfor %}
+            </ul>
+      when: disks_below_threshold | length > 0
+
+    - name: Falha a playbook caso existam discos com pouco espaço livre
+      ansible.builtin.fail:
+        msg: "Um ou mais discos estão com menos de {{ verify_disk_treshold }}% de espaço livre."
+      when: disks_below_threshold | length > 0
