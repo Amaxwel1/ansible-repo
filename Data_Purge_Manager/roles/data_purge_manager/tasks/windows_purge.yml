@@ -33,6 +33,7 @@
     path: "{{ _purge_audit_controller_dir }}"
     state: directory
     mode: "0750"
+  become: false
   delegate_to: localhost
   when:
     - purge_deleted_files_audit_enabled | default(true) | bool
@@ -332,18 +333,46 @@
     - purge_deleted_files_audit_enabled | default(true) | bool
     - purge_apply_enabled | bool
     - _purge_audit_remote_file is defined
+    - (_purge_host_deleted_files_count | default(0) | int) > 0
 
 - name: Windows | Buscar arquivo de auditoria para o controller
   ansible.builtin.fetch:
     src: "{{ _purge_audit_remote_file }}"
-    dest: "{{ _purge_audit_controller_dir }}/{{ _purge_audit_file_name }}"
+    dest: "{{ _purge_audit_controller_dir }}/"
     flat: true
-  register: _purge_audit_fetch_result
+    fail_on_missing: false
+  register: _purge_audit_fetch
+  failed_when: false
+  when:
+    - purge_deleted_files_audit_enabled | default(true) | bool
+    - purge_apply_enabled | bool
+    - _purge_audit_remote_file is defined
+    - (_purge_host_deleted_files_count | default(0) | int) > 0
+    - _purge_audit_remote_stat.stat.exists | default(false) | bool
+
+- name: Windows | Verificar arquivo local de auditoria no controller
+  ansible.builtin.stat:
+    path: "{{ _purge_audit_controller_dir }}/{{ _purge_audit_file_name }}"
+  register: _purge_audit_local_stat
+  changed_when: false
+  failed_when: false
+  become: false
+  delegate_to: localhost
   when:
     - purge_deleted_files_audit_enabled | default(true) | bool
     - purge_apply_enabled | bool
     - (_purge_host_deleted_files_count | default(0) | int) > 0
-    - _purge_audit_remote_stat.stat.exists | default(false)
+
+- name: Windows | Registrar ausência de arquivo de auditoria
+  ansible.builtin.debug:
+    msg: >-
+      Arquivo de auditoria não foi localizado para o host {{ inventory_hostname }}.
+      O expurgo continuará normalmente sem anexo TXT deste host.
+  when:
+    - purge_deleted_files_audit_enabled | default(true) | bool
+    - purge_apply_enabled | bool
+    - (_purge_host_deleted_files_count | default(0) | int) > 0
+    - not (_purge_audit_local_stat.stat.exists | default(false) | bool)
 
 - name: Windows | Registrar anexo local de auditoria
   ansible.builtin.set_fact:
@@ -353,7 +382,7 @@
     - purge_deleted_files_audit_enabled | default(true) | bool
     - purge_apply_enabled | bool
     - (_purge_host_deleted_files_count | default(0) | int) > 0
-    - _purge_audit_remote_stat.stat.exists | default(false)
+    - _purge_audit_local_stat.stat.exists | default(false) | bool
 
 - name: Windows | Remover arquivo remoto temporário de auditoria
   ansible.windows.win_file:
